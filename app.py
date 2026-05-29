@@ -16,7 +16,6 @@ Kullanıcı talepleri karşılanıyor:
 """
 from __future__ import annotations
 
-import itertools
 import os
 import sys
 import time
@@ -30,7 +29,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import torch
 
 from data import BIST28, SPLIT, START, END, download_bist, train_test_split
 from env.portfolio_env import (
@@ -41,7 +39,7 @@ from config import SEED, DQNConfig, PPOConfig, SACConfig
 from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
-from utils.metrics import success_vs_benchmark, summary
+from utils.metrics import summary
 from utils.portfolio_tl import (
     build_cumulative_trade_log, build_portfolio_table, build_trade_log,
     compute_tl_series, compute_tl_step, step_rows_for_training,
@@ -514,7 +512,7 @@ def tab_mdp():
             ("𝒫 Geçiş", "Piyasa tarafından belirlenen stokastik süreç"),
             ("r Ödül", "log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)"),
             ("γ İndirgeme", "0.95 / 0.99 / 0.995 (vadeye göre)"),
-            ("Sonlandırma", "veri sonu VEYA NAV<0.5 VEYA 252 adım"),
+            ("Sonlandırma", "veri sonu VEYA NAV<0.01 (iflas) VEYA 252 adım"),
         ], columns=["Bileşen", "Tanım"])
         st.dataframe(mdp, hide_index=True, use_container_width=True)
 

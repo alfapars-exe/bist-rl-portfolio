@@ -66,19 +66,26 @@ python main.py --skip-plots      # sadece eğitim
 
 ```
 kod/
-├── app.py                      # Streamlit UI (ana giriş)
-├── main.py                     # CLI orkestratörü (9 figür üretir)
-├── train.py                    # CLI eğitim + backtest
-├── plots.py                    # 9 matplotlib figürü
+├── app.py                      # Streamlit UI (ana giriş) — core.trainer/rollout tüketir
+├── main.py                     # CLI orkestratörü (train.run() + plots.run())
+├── train.py                    # CLI eğitim + backtest sürücüsü (prepare_data + run)
+├── plots.py                    # 9 matplotlib figürü (run())
 ├── data.py                     # BIST 28 indirme + parquet cache
+├── config.py                   # Merkezi hiperparametreler + HORIZON_PRESETS (tek kaynak)
+├── pyproject.toml              # Paketleme + pytest yapılandırması
 ├── requirements.txt
 ├── README.md
 ├── data/prices.parquet         # yfinance cache (ilk çalıştırmada oluşur)
+├── core/                       # Eğitim/eval çekirdeği — CLI + UI ortak (Faz 3)
+│   ├── trainer.py              # generator tabanlı eğitim (DQN/PPO/SAC) + dispatch
+│   └── rollout.py              # ajan-agnostik evaluate (act_eval)
 ├── env/
 │   ├── __init__.py
-│   └── portfolio_env.py        # MDP env + HORIZON_PRESETS + AdaptiveRewardShaper
+│   └── portfolio_env.py        # MDP env + AdaptiveRewardShaper (HORIZON_PRESETS → config)
 ├── agents/
 │   ├── __init__.py
+│   ├── base.py                 # BaseAgent arayüzü (act_eval)
+│   ├── common.py               # ReplayBuffer, mlp, get_device, set_seed
 │   ├── dqn.py                  # PyTorch DQN (169→256→128→6, Huber, lr=1e-3)
 │   ├── ppo.py                  # PyTorch PPO (GAE, clipped surrogate)
 │   └── sac.py                  # PyTorch SAC (twin-Q, tanh-squashed Gaussian)
@@ -86,7 +93,10 @@ kod/
 │   ├── __init__.py
 │   ├── features.py             # add_features + TrainScaler (z-score)
 │   ├── baselines.py            # EW, BuyHold, MeanVar
-│   └── metrics.py              # CAGR/Sharpe/Sortino/MDD + success_vs_benchmark
+│   ├── metrics.py              # CAGR/Sharpe/Sortino/MDD + success_vs_benchmark
+│   └── portfolio_tl.py         # NAV→TL/lot/işlem-logu türetimi (UI katmanı)
+├── tests/                      # pytest: invariants + golden-master regresyon
+│   └── golden/                 # dondurulmuş metrics_baseline.csv (≤1e-6 gate)
 ├── results/                    # CSV'ler
 └── figures/                    # PNG'ler
 ```

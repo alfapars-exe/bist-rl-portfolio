@@ -1,0 +1,7 @@
+# Satır sonlarını normalize et: depoda LF, checkout'ta platform-native.
+# (Windows'taki "LF will be replaced by CRLF" uyarılarını susturur.)
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.csv text eol=lf

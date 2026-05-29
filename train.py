@@ -19,12 +19,12 @@ from utils.metrics import summary
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
 from agents import DQNAgent, PPOAgent, SACAgent
+from config import SEED, DQNConfig, PPOConfig, SACConfig
 
 BASE = Path(__file__).resolve().parent
 RES  = BASE / "results"
 RES.mkdir(exist_ok=True)
 
-SEED = 42
 np.random.seed(SEED)
 
 # -------------------- load data --------------------
@@ -57,8 +57,8 @@ def train_dqn(n_episodes: int = 6, horizon: str = "medium", adaptive: bool = Tru
                    adaptive=adaptive, max_steps=252)
     agent = DQNAgent(
         env.state_dim, env.n_discrete,
-        hidden=(256, 128), lr=1e-3, eps_decay=10_000,
-        batch_size=64, target_update=500, seed=SEED,
+        hidden=DQNConfig.hidden, lr=DQNConfig.lr, eps_decay=DQNConfig.eps_decay,
+        batch_size=DQNConfig.batch_size, target_update=DQNConfig.target_update, seed=SEED,
     )
     curve = []
     for ep in range(n_episodes):
@@ -82,9 +82,9 @@ def train_ppo(n_updates: int = 18, rollout_len: int = 400,
               horizon: str = "medium", adaptive: bool = True):
     env = make_env(px_tr, feats_tr, discrete=False, horizon=horizon,
                    adaptive=adaptive, max_steps=10_000)
-    agent = PPOAgent(env.state_dim, env.action_dim, hidden=(256, 128),
-                     lr_p=3e-4, lr_v=1e-3, batch_size=128,
-                     n_epochs=6, seed=SEED)
+    agent = PPOAgent(env.state_dim, env.action_dim, hidden=PPOConfig.hidden,
+                     lr_p=PPOConfig.lr_p, lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
+                     n_epochs=PPOConfig.n_epochs, seed=SEED)
     curve = []
     s, _ = env.reset()
     for upd in range(n_updates):
@@ -116,8 +116,9 @@ def train_sac(n_episodes: int = 3, max_steps_per_episode: int = 1200,
               horizon: str = "medium", adaptive: bool = True):
     env = make_env(px_tr, feats_tr, discrete=False, horizon=horizon,
                    adaptive=adaptive, max_steps=max_steps_per_episode)
-    agent = SACAgent(env.state_dim, env.action_dim, hidden=(256, 128),
-                     lr_pi=3e-4, lr_q=5e-4, alpha=0.05, seed=SEED, batch_size=128)
+    agent = SACAgent(env.state_dim, env.action_dim, hidden=SACConfig.hidden,
+                     lr_pi=SACConfig.lr_pi, lr_q=SACConfig.lr_q, alpha=SACConfig.alpha,
+                     seed=SEED, batch_size=SACConfig.batch_size)
     curve = []
     for ep in range(n_episodes):
         s, _ = env.reset()

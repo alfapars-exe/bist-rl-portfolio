@@ -37,6 +37,7 @@ from env.portfolio_env import (
     ACTION_NAMES, HORIZON_PRESETS, DiscretePortfolioEnv, PortfolioEnv,
 )
 from agents import DQNAgent, PPOAgent, SACAgent
+from config import SEED, DQNConfig, PPOConfig, SACConfig
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
 from utils.metrics import success_vs_benchmark, summary
@@ -50,7 +51,6 @@ from utils.portfolio_tl import (
 # Sabitler, yardımcılar
 # =====================================================================
 ASSET_NAMES = BIST28 + ["CASH"]
-SEED = 42
 
 
 def _init_state():
@@ -128,28 +128,28 @@ def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
     if algo == "DQN":
         return DQNAgent(
             state_dim, action_dim,
-            hidden=tuple(hp.get("hidden", (256, 128))),
-            lr=hp.get("lr", 1e-3),
-            eps_decay=hp.get("eps_decay", 10_000),
-            batch_size=hp.get("batch_size", 64),
-            target_update=hp.get("target_update", 500),
+            hidden=tuple(hp.get("hidden", DQNConfig.hidden)),
+            lr=hp.get("lr", DQNConfig.lr),
+            eps_decay=hp.get("eps_decay", DQNConfig.eps_decay),
+            batch_size=hp.get("batch_size", DQNConfig.batch_size),
+            target_update=hp.get("target_update", DQNConfig.target_update),
             seed=SEED,
         )
     if algo == "PPO":
         return PPOAgent(
             state_dim, action_dim,
-            hidden=tuple(hp.get("hidden", (256, 128))),
-            lr_p=hp.get("lr_p", 3e-4), lr_v=hp.get("lr_v", 1e-3),
-            clip=hp.get("clip", 0.2), ent_coef=hp.get("ent_coef", 0.005),
-            batch_size=hp.get("batch_size", 128), n_epochs=hp.get("n_epochs", 6),
+            hidden=tuple(hp.get("hidden", PPOConfig.hidden)),
+            lr_p=hp.get("lr_p", PPOConfig.lr_p), lr_v=hp.get("lr_v", PPOConfig.lr_v),
+            clip=hp.get("clip", PPOConfig.clip), ent_coef=hp.get("ent_coef", PPOConfig.ent_coef),
+            batch_size=hp.get("batch_size", PPOConfig.batch_size), n_epochs=hp.get("n_epochs", PPOConfig.n_epochs),
             seed=SEED,
         )
     return SACAgent(
         state_dim, action_dim,
-        hidden=tuple(hp.get("hidden", (256, 128))),
-        lr_pi=hp.get("lr_pi", 3e-4), lr_q=hp.get("lr_q", 5e-4),
-        alpha=hp.get("alpha", 0.05), tau=hp.get("tau", 0.01),
-        batch_size=hp.get("batch_size", 128), seed=SEED,
+        hidden=tuple(hp.get("hidden", SACConfig.hidden)),
+        lr_pi=hp.get("lr_pi", SACConfig.lr_pi), lr_q=hp.get("lr_q", SACConfig.lr_q),
+        alpha=hp.get("alpha", SACConfig.alpha), tau=hp.get("tau", SACConfig.tau),
+        batch_size=hp.get("batch_size", SACConfig.batch_size), seed=SEED,
     )
 
 

@@ -1,0 +1,35 @@
+# ── Sanal ortamlar ───────────────────────────────────────────────
+.venv/
+.venv.*/
+venv/
+env/
+ENV/
+
+# ── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── Proje çıktıları (yeniden üretilebilir) ───────────────────────
+results/
+figures/
+data/*.parquet
+data/*.csv
+
+# Golden-master regresyon referansları İZLENİR (gitignore edilmez):
+!tests/golden/
+
+# ── OS / editör ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp

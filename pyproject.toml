@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bist-rl-portfolio"
+version = "0.1.0"
+description = "BIST 28 hissesi uzerinde DQN/PPO/SAC ile portfoy yonetimi — UYIK 2026 RL demosu"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Harun Benli" }]
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+    "yfinance>=0.2.40",
+    "torch>=2.1",
+    "streamlit>=1.30",
+    "plotly>=5.18",
+    "pyarrow>=14.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+# Flat-layout: kok dizindeki moduller + paketler acikca bildirilir
+# (setuptools auto-discovery'nin birden cok top-level modulde sasirmasini onler).
+[tool.setuptools]
+py-modules = ["data", "train", "main", "app", "plots"]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "env*", "utils*", "core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

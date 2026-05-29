@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .base import BaseAgent
 from .common import ReplayBuffer, get_device, mlp, set_seed
 
 
@@ -57,7 +58,7 @@ class QNet(nn.Module):
         return self.net(torch.cat([s, a], dim=-1)).squeeze(-1)
 
 
-class SACAgent:
+class SACAgent(BaseAgent):
     def __init__(self, state_dim: int, action_dim: int,
                  hidden: Tuple[int, int] = (256, 128),
                  lr_pi: float = 3e-4, lr_q: float = 5e-4,
@@ -98,6 +99,10 @@ class SACAgent:
         with torch.no_grad():
             a, _ = self.pi.sample(s_t, deterministic=deterministic)
         return a.cpu().numpy()[0].astype(np.float32)
+
+    def act_eval(self, s: np.ndarray) -> np.ndarray:
+        """Eval: tanh-deterministik aksiyon."""
+        return self.act(s, deterministic=True)
 
     def remember(self, s, a, r, s2, d):
         self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d)

@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from .base import BaseAgent
 from .common import ReplayBuffer, get_device, mlp, set_seed
 
 
@@ -30,7 +31,7 @@ class QNetwork(nn.Module):
         return self.net(x)
 
 
-class DQNAgent:
+class DQNAgent(BaseAgent):
     def __init__(self, state_dim: int, n_actions: int,
                  hidden: Tuple[int, int] = (256, 128),
                  lr: float = 1e-3, gamma: float = 0.99,
@@ -77,6 +78,10 @@ class DQNAgent:
         if (not greedy) and np.random.rand() < self.eps():
             return int(np.random.randint(self.n_actions))
         return int(np.argmax(self.q_values(s)))
+
+    def act_eval(self, s: np.ndarray) -> int:
+        """Eval: greedy secim (epsilon yok) — ayrik sablon indeksi."""
+        return self.act(s, greedy=True)
 
     def remember(self, s, a, r, s2, d):
         self.buffer.push(s, int(a), r, s2, d)

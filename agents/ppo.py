@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .base import BaseAgent
 from .common import get_device, mlp, set_seed
 
 
@@ -42,7 +43,7 @@ class ValueNet(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-class PPOAgent:
+class PPOAgent(BaseAgent):
     def __init__(self, state_dim: int, action_dim: int,
                  hidden: Tuple[int, int] = (256, 128),
                  lr_p: float = 3e-4, lr_v: float = 1e-3,
@@ -85,6 +86,11 @@ class PPOAgent:
         return (a.cpu().numpy()[0].astype(np.float32),
                 float(logp.item()),
                 float(v.item()))
+
+    def act_eval(self, s: np.ndarray) -> np.ndarray:
+        """Eval: politikadan ornek (mevcut eval davranisiyla birebir ayni — stokastik)."""
+        a, _, _ = self.act(s)
+        return a
 
     def remember(self, s, a, r, done, v, logp):
         self.S.append(np.asarray(s, dtype=np.float32))

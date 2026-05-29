@@ -6,7 +6,6 @@ Twin critics Q1, Q2 + soft target güncellemesi (τ). Sabit entropi katsayısı 
 """
 from __future__ import annotations
 
-from collections import deque
 from typing import Tuple
 
 import numpy as np
@@ -14,10 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-def _set_seed(seed: int):
-    import random
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+from .common import ReplayBuffer, get_device, mlp, set_seed
 
 
 class GaussianPolicy(nn.Module):
@@ -25,10 +21,7 @@ class GaussianPolicy(nn.Module):
                  hidden: Tuple[int, int] = (256, 128),
                  log_std_clip: Tuple[float, float] = (-5.0, 2.0)):
         super().__init__()
-        self.trunk = nn.Sequential(
-            nn.Linear(state_dim, hidden[0]), nn.ReLU(),
-            nn.Linear(hidden[0], hidden[1]), nn.ReLU(),
-        )
+        self.trunk = mlp([state_dim, hidden[0], hidden[1]], nn.ReLU, out_activation=nn.ReLU)
         self.mu_head = nn.Linear(hidden[1], action_dim)
         self.log_std_head = nn.Linear(hidden[1], action_dim)
         self.log_std_clip = log_std_clip
@@ -58,11 +51,7 @@ class QNet(nn.Module):
     def __init__(self, state_dim: int, action_dim: int,
                  hidden: Tuple[int, int] = (256, 128)):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim + action_dim, hidden[0]), nn.ReLU(),
-            nn.Linear(hidden[0], hidden[1]), nn.ReLU(),
-            nn.Linear(hidden[1], 1),
-        )
+        self.net = mlp([state_dim + action_dim, hidden[0], hidden[1], 1], nn.ReLU)
 
     def forward(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
         return self.net(torch.cat([s, a], dim=-1)).squeeze(-1)
@@ -75,8 +64,8 @@ class SACAgent:
                  gamma: float = 0.99, tau: float = 0.01, alpha: float = 0.05,
                  buffer_size: int = 50_000, batch_size: int = 128,
                  seed: int = 42, device: str | None = None):
-        _set_seed(seed)
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        set_seed(seed)
+        self.device = get_device(device)
         self.state_dim = state_dim; self.action_dim = action_dim
         self.gamma = float(gamma); self.tau = float(tau); self.alpha = float(alpha)
         self.batch_size = int(batch_size)
@@ -92,7 +81,7 @@ class SACAgent:
         self.opt_q1 = torch.optim.Adam(self.q1.parameters(), lr=lr_q)
         self.opt_q2 = torch.optim.Adam(self.q2.parameters(), lr=lr_q)
 
-        self.buffer: deque = deque(maxlen=int(buffer_size))
+        self.buffer = ReplayBuffer(buffer_size)
 
     def _sync(self):
         self.q1_t.load_state_dict(self.q1.state_dict())
@@ -111,24 +100,17 @@ class SACAgent:
         return a.cpu().numpy()[0].astype(np.float32)
 
     def remember(self, s, a, r, s2, d):
-        self.buffer.append((
-            np.asarray(s, dtype=np.float32),
-            np.asarray(a, dtype=np.float32),
-            float(r),
-            np.asarray(s2, dtype=np.float32),
-            float(d),
-        ))
+        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
-        idx = np.random.randint(0, len(self.buffer), size=self.batch_size)
-        batch = [self.buffer[i] for i in idx]
-        s  = torch.as_tensor(np.stack([b[0] for b in batch]), dtype=torch.float32, device=self.device)
-        a  = torch.as_tensor(np.stack([b[1] for b in batch]), dtype=torch.float32, device=self.device)
-        r  = torch.as_tensor(np.array([b[2] for b in batch]), dtype=torch.float32, device=self.device)
-        s2 = torch.as_tensor(np.stack([b[3] for b in batch]), dtype=torch.float32, device=self.device)
-        d  = torch.as_tensor(np.array([b[4] for b in batch]), dtype=torch.float32, device=self.device)
+        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s  = torch.as_tensor(s,  dtype=torch.float32, device=self.device)
+        a  = torch.as_tensor(a,  dtype=torch.float32, device=self.device)
+        r  = torch.as_tensor(r,  dtype=torch.float32, device=self.device)
+        s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
+        d  = torch.as_tensor(d,  dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             a2, logp2 = self.pi.sample(s2)

@@ -11,28 +11,20 @@ Prompt spec'i:
 """
 from __future__ import annotations
 
-from collections import deque
 from typing import Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-
-def _set_seed(seed: int):
-    import random
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+from .common import ReplayBuffer, get_device, mlp, set_seed
 
 
 class QNetwork(nn.Module):
     def __init__(self, state_dim: int, n_actions: int,
                  hidden: Tuple[int, int] = (256, 128)):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden[0]), nn.ReLU(),
-            nn.Linear(hidden[0], hidden[1]), nn.ReLU(),
-            nn.Linear(hidden[1], n_actions),
-        )
+        self.net = mlp([state_dim, hidden[0], hidden[1], n_actions], nn.ReLU)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -47,8 +39,8 @@ class DQNAgent:
                  buffer_size: int = 50_000, batch_size: int = 64,
                  target_update: int = 500, huber_delta: float = 1.0,
                  seed: int = 42, device: str | None = None):
-        _set_seed(seed)
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        set_seed(seed)
+        self.device = get_device(device)
         self.state_dim = state_dim
         self.n_actions = n_actions
         self.gamma = float(gamma)
@@ -65,7 +57,7 @@ class DQNAgent:
         self.opt = torch.optim.Adam(self.q.parameters(), lr=lr)
         self.loss_fn = nn.HuberLoss(delta=huber_delta)
 
-        self.buffer: deque = deque(maxlen=int(buffer_size))
+        self.buffer = ReplayBuffer(buffer_size)
         self.step_count = 0
 
     def _sync_target(self):
@@ -87,24 +79,17 @@ class DQNAgent:
         return int(np.argmax(self.q_values(s)))
 
     def remember(self, s, a, r, s2, d):
-        self.buffer.append((
-            np.asarray(s, dtype=np.float32),
-            int(a),
-            float(r),
-            np.asarray(s2, dtype=np.float32),
-            float(d),
-        ))
+        self.buffer.push(s, int(a), r, s2, d)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
-        idx = np.random.randint(0, len(self.buffer), size=self.batch_size)
-        batch = [self.buffer[i] for i in idx]
-        s  = torch.as_tensor(np.stack([b[0] for b in batch]), dtype=torch.float32, device=self.device)
-        a  = torch.as_tensor(np.array([b[1] for b in batch]), dtype=torch.int64, device=self.device)
-        r  = torch.as_tensor(np.array([b[2] for b in batch]), dtype=torch.float32, device=self.device)
-        s2 = torch.as_tensor(np.stack([b[3] for b in batch]), dtype=torch.float32, device=self.device)
-        d  = torch.as_tensor(np.array([b[4] for b in batch]), dtype=torch.float32, device=self.device)
+        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s  = torch.as_tensor(s,  dtype=torch.float32, device=self.device)
+        a  = torch.as_tensor(a,  dtype=torch.int64,   device=self.device)
+        r  = torch.as_tensor(r,  dtype=torch.float32, device=self.device)
+        s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
+        d  = torch.as_tensor(d,  dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             q_next = self.q_target(s2).max(dim=1).values

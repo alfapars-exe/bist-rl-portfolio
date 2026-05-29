@@ -14,10 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-def _set_seed(seed: int):
-    import random
-    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+from .common import get_device, mlp, set_seed
 
 
 class PolicyNet(nn.Module):
@@ -25,10 +22,7 @@ class PolicyNet(nn.Module):
                  hidden: Tuple[int, int] = (256, 128),
                  log_std_init: float = -0.5):
         super().__init__()
-        self.trunk = nn.Sequential(
-            nn.Linear(state_dim, hidden[0]), nn.Tanh(),
-            nn.Linear(hidden[0], hidden[1]), nn.Tanh(),
-        )
+        self.trunk = mlp([state_dim, hidden[0], hidden[1]], nn.Tanh, out_activation=nn.Tanh)
         self.mu_head = nn.Linear(hidden[1], action_dim)
         self.log_std = nn.Parameter(torch.full((action_dim,), float(log_std_init)))
 
@@ -42,11 +36,7 @@ class PolicyNet(nn.Module):
 class ValueNet(nn.Module):
     def __init__(self, state_dim: int, hidden: Tuple[int, int] = (256, 128)):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(state_dim, hidden[0]), nn.Tanh(),
-            nn.Linear(hidden[0], hidden[1]), nn.Tanh(),
-            nn.Linear(hidden[1], 1),
-        )
+        self.net = mlp([state_dim, hidden[0], hidden[1], 1], nn.Tanh)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x).squeeze(-1)
@@ -60,8 +50,8 @@ class PPOAgent:
                  ent_coef: float = 0.005, n_epochs: int = 8,
                  batch_size: int = 128, seed: int = 42,
                  log_std_init: float = -0.5, device: str | None = None):
-        _set_seed(seed)
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        set_seed(seed)
+        self.device = get_device(device)
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.gamma = float(gamma); self.lam = float(lam); self.clip = float(clip)

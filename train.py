@@ -27,20 +27,23 @@ BASE = Path(__file__).resolve().parent
 RES  = BASE / "results"
 RES.mkdir(exist_ok=True)
 
-np.random.seed(SEED)
+# -------------------- veri (M1: import yan etkisi yok; run()/prepare_data yukler) --------------------
+px = px_tr = px_te = feats_tr = feats_te = scaler = None
 
-# -------------------- load data --------------------
-px = download_bist()
-feats_all_raw = add_features(px)
-px_tr, px_te = train_test_split(px)
-feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
-feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
-scaler = TrainScaler().fit(feats_tr_raw)
-feats_tr = scaler.transform(feats_tr_raw)
-feats_te = scaler.transform(feats_te_raw)
-
-print(f"Train: {px_tr.shape}, Test: {px_te.shape}, tickers: {px.shape[1]}")
+def prepare_data():
+    """BIST verisini yukler, train/test ayirir, train-only z-score uygular;
+    modul globallerini doldurur (train_*/evaluate bunlari kullanir)."""
+    global px, px_tr, px_te, feats_tr, feats_te, scaler
+    px = download_bist()
+    feats_all_raw = add_features(px)
+    px_tr, px_te = train_test_split(px)
+    feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
+    feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
+    scaler = TrainScaler().fit(feats_tr_raw)
+    feats_tr = scaler.transform(feats_tr_raw)
+    feats_te = scaler.transform(feats_te_raw)
+    print(f"Train: {px_tr.shape}, Test: {px_te.shape}, tickers: {px.shape[1]}")
 
 
 def make_env(px_, feats_, discrete: bool, horizon: str = "medium",
@@ -111,7 +114,11 @@ def evaluate(agent, algo: str, horizon: str = "medium", adaptive: bool = True):
 
 
 # -------------------- Main --------------------
-if __name__ == "__main__":
+def run():
+    """Tam egitim + backtest akisi: seed -> veri -> 3 ajan -> eval -> CSV.
+    main.py bunu DOGRUDAN cagirir (runpy yerine). Modul import'u yan etkisizdir (M1)."""
+    np.random.seed(SEED)
+    prepare_data()
     t0 = time.time()
     print("=" * 60)
     dqn_agent, dqn_curve = train_dqn(n_episodes=6)
@@ -164,3 +171,7 @@ if __name__ == "__main__":
 
     print("=" * 60)
     print("DONE. Total wall time:", round(time.time() - t0, 1), "s")
+
+
+if __name__ == "__main__":
+    run()

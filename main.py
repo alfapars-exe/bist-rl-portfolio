@@ -47,17 +47,16 @@ def step_train():
     print("=" * 70)
     print("[2/3] DQN + PPO + SAC eğitimi ve backtest ...")
     print("=" * 70)
-    # train.py __main__ bloğunu modül olarak çalıştır
-    import runpy
-    runpy.run_path(str(HERE / "train.py"), run_name="__main__")
+    import train
+    train.run()
 
 
 def step_plots():
     print("=" * 70)
     print("[3/3] 9 figür üretiliyor ...")
     print("=" * 70)
-    import runpy
-    runpy.run_path(str(HERE / "plots.py"), run_name="__main__")
+    import plots
+    plots.run()
     print(f"  Figürler: {FIG}")
 
 

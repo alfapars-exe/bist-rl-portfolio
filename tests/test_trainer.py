@@ -32,6 +32,9 @@ def test_train_dqn_telemetry():
     for k in ("iter", "episode", "reward", "train_nav", "nav", "gain",
               "eps", "loss", "success", "actions", "agent", "env"):
         assert k in rec
+    # L3: "reward" = iterasyon boyu toplam cevre odulu (Sigma env.step total)
+    total_env_reward = sum(rt["total"] for rt in rec["env"].reward_terms_history)
+    assert abs(rec["reward"] - total_env_reward) < 1e-6
 
 
 def test_train_ppo_telemetry():

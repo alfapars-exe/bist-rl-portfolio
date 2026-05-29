@@ -625,7 +625,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         df = pd.DataFrame(curve)
 
         fig_r = px.line(df, x="iter", y="reward",
-                        title="Kümülatif Ödül (episod başına)",
+                        title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
                         markers=True)
         fig_r.update_layout(height=260, margin=dict(t=40, b=20))
         ph_reward.plotly_chart(fig_r, use_container_width=True)

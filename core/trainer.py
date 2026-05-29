@@ -72,10 +72,12 @@ def train_ppo(agent, env, n_updates: Optional[int] = None,
     s, _ = env.reset()
     for upd in _counter(n_updates):
         ep_navs = []
+        rollout_reward = 0.0
         for _ in range(rollout_len):
             a, lp, v = agent.act(s)
             s2, r, done, trunc, _ = env.step(a)
             agent.remember(s, a, r, done or trunc, v, lp)
+            rollout_reward += r
             s = s2
             if done or trunc:
                 ep_navs.append(float(env.nav))
@@ -94,7 +96,7 @@ def train_ppo(agent, env, n_updates: Optional[int] = None,
             "p_loss": float(info["p_loss"]), "v_loss": float(info["v_loss"]),
             "ent": float(info["ent"]), "kl": float(info["kl"]),
             "mean_nav": mean_nav, "nav": mean_nav,
-            "reward": -float(info["p_loss"]),
+            "reward": float(rollout_reward),  # L3: rollout boyu toplam cevre odulu (eski: -p_loss)
             "gain": mean_nav - 1.0,
             "loss": float(info["v_loss"]),
             "success": int(success),
@@ -110,6 +112,7 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
         s, _ = env.reset()
         done = trunc = False
         step = 0
+        ep_reward = 0.0
         losses = []
         while not (done or trunc):
             if len(agent.buffer) < warmup:
@@ -124,12 +127,13 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
                     losses.append(loss)
             s = s2
             step += 1
+            ep_reward += r
         nav_agent = np.array(env.nav_history[1:])
         success = (success_vs_benchmark(nav_agent, ew_nav[:len(nav_agent)])
                    if ew_nav is not None else 0)
         yield {
             "algo": "SAC", "iter": ep, "episode": ep,
-            "reward": float(np.sum(env.ret_history)),
+            "reward": float(ep_reward),  # L3: tum ajanlarda = iterasyon boyu toplam cevre odulu
             "nav": float(env.nav), "train_nav": float(env.nav),
             "gain": float(env.nav) - 1.0,
             "steps": step,

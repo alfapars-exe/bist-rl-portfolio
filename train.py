@@ -20,6 +20,8 @@ from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
 from agents import DQNAgent, PPOAgent, SACAgent
 from config import SEED, DQNConfig, PPOConfig, SACConfig
+from core.rollout import evaluate as rollout_evaluate
+from core.trainer import train as train_loop
 
 BASE = Path(__file__).resolve().parent
 RES  = BASE / "results"
@@ -61,19 +63,11 @@ def train_dqn(n_episodes: int = 6, horizon: str = "medium", adaptive: bool = Tru
         batch_size=DQNConfig.batch_size, target_update=DQNConfig.target_update, seed=SEED,
     )
     curve = []
-    for ep in range(n_episodes):
-        s, _ = env.reset()
-        done = trunc = False
-        ep_reward = 0.0
-        while not (done or trunc):
-            a = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
-            agent.train_step()
-            s = s2; ep_reward += r
-        curve.append(dict(episode=ep, reward=ep_reward,
-                          train_nav=float(env.nav), eps=agent.eps()))
-        print(f"[DQN] ep {ep:02d}  ret={ep_reward:+.3f}  NAV={env.nav:.3f}  eps={agent.eps():.3f}")
+    for rec in train_loop(agent, env, n_iters=n_episodes):
+        curve.append(dict(episode=rec["episode"], reward=rec["reward"],
+                          train_nav=rec["train_nav"], eps=rec["eps"]))
+        print(f"[DQN] ep {rec['episode']:02d}  ret={rec['reward']:+.3f}  "
+              f"NAV={rec['train_nav']:.3f}  eps={rec['eps']:.3f}")
     return agent, curve
 
 
@@ -86,28 +80,11 @@ def train_ppo(n_updates: int = 18, rollout_len: int = 400,
                      lr_p=PPOConfig.lr_p, lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
                      n_epochs=PPOConfig.n_epochs, seed=SEED)
     curve = []
-    s, _ = env.reset()
-    for upd in range(n_updates):
-        ep_navs = []
-        for _ in range(rollout_len):
-            a, lp, v = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, done or trunc, v, lp)
-            s = s2
-            if done or trunc:
-                ep_navs.append(float(env.nav))
-                s, _ = env.reset()
-        import torch
-        with torch.no_grad():
-            last_v = float(agent.value(
-                torch.as_tensor(s, dtype=torch.float32,
-                                device=agent.device).unsqueeze(0)
-            ).item())
-        info = agent.train(last_v)
-        mean_nav = float(np.mean(ep_navs)) if ep_navs else float(env.nav)
-        curve.append(dict(update=upd, **info, mean_nav=mean_nav))
-        print(f"[PPO] upd {upd:02d}  p_loss={info['p_loss']:.3f} "
-              f"v_loss={info['v_loss']:.3f} ent={info['ent']:.2f} kl={info['kl']:.3f}")
+    for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len):
+        curve.append(dict(update=rec["update"], p_loss=rec["p_loss"], v_loss=rec["v_loss"],
+                          ent=rec["ent"], kl=rec["kl"], mean_nav=rec["mean_nav"]))
+        print(f"[PPO] upd {rec['update']:02d}  p_loss={rec['p_loss']:.3f} "
+              f"v_loss={rec['v_loss']:.3f} ent={rec['ent']:.2f} kl={rec['kl']:.3f}")
     return agent, curve
 
 
@@ -120,21 +97,9 @@ def train_sac(n_episodes: int = 3, max_steps_per_episode: int = 1200,
                      lr_pi=SACConfig.lr_pi, lr_q=SACConfig.lr_q, alpha=SACConfig.alpha,
                      seed=SEED, batch_size=SACConfig.batch_size)
     curve = []
-    for ep in range(n_episodes):
-        s, _ = env.reset()
-        done = trunc = False; step = 0
-        while not (done or trunc):
-            if len(agent.buffer) < 500:
-                a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
-            else:
-                a = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
-            if len(agent.buffer) > 500 and step % 4 == 0:
-                agent.train_step()
-            s = s2; step += 1
-        curve.append(dict(episode=ep, train_nav=float(env.nav), steps=step))
-        print(f"[SAC] ep {ep:02d}  NAV={env.nav:.3f}  buf={len(agent.buffer)}")
+    for rec in train_loop(agent, env, n_iters=n_episodes):
+        curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"]))
+        print(f"[SAC] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 
 
@@ -142,23 +107,7 @@ def train_sac(n_episodes: int = 3, max_steps_per_episode: int = 1200,
 def evaluate(agent, algo: str, horizon: str = "medium", adaptive: bool = True):
     env = make_env(px_te, feats_te, discrete=(algo == "DQN"),
                    horizon=horizon, adaptive=adaptive, max_steps=10_000)
-    s, _ = env.reset()
-    done = trunc = False
-    while not (done or trunc):
-        if algo == "DQN":
-            a = agent.act(s, greedy=True)
-        elif algo == "PPO":
-            a, _, _ = agent.act(s)
-        else:  # SAC
-            a = agent.act(s, deterministic=True)
-        s, r, done, trunc, _ = env.step(a)
-    nav = np.array(env.nav_history[1:])
-    rets = np.array(env.ret_history)
-    W = np.array(env.weight_history[1:])
-    offset = env.window
-    dates = list(env.dates[offset: offset + len(nav)])
-    return dict(nav=nav, rets=rets, weights=W, dates=dates,
-                reward_terms_history=env.reward_terms_history)
+    return rollout_evaluate(agent, env)
 
 
 # -------------------- Main --------------------

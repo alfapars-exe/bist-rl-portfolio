@@ -38,6 +38,7 @@ from env.portfolio_env import (
 )
 from agents import DQNAgent, PPOAgent, SACAgent
 from config import SEED, DQNConfig, PPOConfig, SACConfig
+from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
 from utils.metrics import success_vs_benchmark, summary
@@ -160,104 +161,15 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
                     rollout_len: int = 400):
     """Episod/update başına bir telemetri kaydı yield eder. Sonsuz akış —
     tüketici (tab_train) 'Durdur' butonuyla keser."""
-    if algo == "DQN":
-        env = _make_env(True, algo, horizon, adaptive, max_steps=252)
-        agent = _make_agent(algo, env.state_dim, env.n_discrete, hp)
-        # Başarı kıyası için tren EW NAV'ı (statik)
-        ew_tr = equal_weight(st.session_state.px_tr)["nav"]
-        for ep in itertools.count():
-            s, _ = env.reset()
-            done = trunc = False
-            ep_reward = 0.0
-            losses = []
-            actions = []
-            while not (done or trunc):
-                a = agent.act(s)
-                actions.append(int(a))
-                s2, r, done, trunc, _ = env.step(a)
-                agent.remember(s, a, r, s2, float(done))
-                l = agent.train_step()
-                if l is not None:
-                    losses.append(l)
-                s = s2; ep_reward += r
-            nav_agent = np.array(env.nav_history[1:])
-            success = success_vs_benchmark(nav_agent, ew_tr[:len(nav_agent)])
-            yield {
-                "iter": ep, "reward": float(ep_reward),
-                "gain": float(env.nav) - 1.0,
-                "success": int(success),
-                "loss": float(np.mean(losses)) if losses else 0.0,
-                "nav": float(env.nav), "eps": agent.eps(),
-                "agent": agent, "env": env,
-                "actions": actions,
-            }
-
-    elif algo == "PPO":
-        env = _make_env(True, algo, horizon, adaptive, max_steps=10_000)
-        agent = _make_agent(algo, env.state_dim, env.action_dim, hp)
-        ew_tr = equal_weight(st.session_state.px_tr)["nav"]
-        s, _ = env.reset()
-        for upd in itertools.count():
-            ep_navs = []
-            for _ in range(rollout_len):
-                a, lp, v = agent.act(s)
-                s2, r, done, trunc, _ = env.step(a)
-                agent.remember(s, a, r, done or trunc, v, lp)
-                s = s2
-                if done or trunc:
-                    ep_navs.append(float(env.nav))
-                    s, _ = env.reset()
-            with torch.no_grad():
-                last_v = float(agent.value(
-                    torch.as_tensor(s, dtype=torch.float32,
-                                    device=agent.device).unsqueeze(0)
-                ).item())
-            info = agent.train(last_v)
-            mean_nav = float(np.mean(ep_navs)) if ep_navs else float(env.nav)
-            # Başarı: son bölüm NAV'ı EW benchmark'ına kıyasla
-            bench_end = float(ew_tr[min(len(ew_tr) - 1, env.step_count)])
-            success = int(mean_nav >= bench_end)
-            yield {
-                "iter": upd,
-                "reward": -float(info["p_loss"]),
-                "gain": mean_nav - 1.0,
-                "success": success,
-                "loss": float(info["v_loss"]),
-                "nav": mean_nav,
-                "ent": float(info["ent"]), "kl": float(info["kl"]),
-                "agent": agent, "env": env,
-            }
-
-    else:  # SAC
-        env = _make_env(True, algo, horizon, adaptive, max_steps=1200)
-        agent = _make_agent(algo, env.state_dim, env.action_dim, hp)
-        ew_tr = equal_weight(st.session_state.px_tr)["nav"]
-        for ep in itertools.count():
-            s, _ = env.reset()
-            done = trunc = False; step = 0; losses = []
-            while not (done or trunc):
-                if len(agent.buffer) < 500:
-                    a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
-                else:
-                    a = agent.act(s)
-                s2, r, done, trunc, _ = env.step(a)
-                agent.remember(s, a, r, s2, float(done))
-                if len(agent.buffer) > 500 and step % 4 == 0:
-                    l = agent.train_step()
-                    if l is not None:
-                        losses.append(l)
-                s = s2; step += 1
-            nav_agent = np.array(env.nav_history[1:])
-            success = success_vs_benchmark(nav_agent, ew_tr[:len(nav_agent)])
-            yield {
-                "iter": ep,
-                "reward": float(np.sum(env.ret_history)),
-                "gain": float(env.nav) - 1.0,
-                "success": int(success),
-                "loss": float(np.mean(losses)) if losses else 0.0,
-                "nav": float(env.nav),
-                "agent": agent, "env": env,
-            }
+    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200}[algo]
+    env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
+    action_dim = env.n_discrete if algo == "DQN" else env.action_dim
+    agent = _make_agent(algo, env.state_dim, action_dim, hp)
+    # Başarı kıyası için tren EW NAV'ı (core.trainer success'i bununla hesaplar)
+    ew_tr = equal_weight(st.session_state.px_tr)["nav"]
+    # Sonsuz akış (n_iters=None) — core.trainer.train ajan tipine göre dispatch eder;
+    # tüketici (tab_train) 'Durdur' ile keser. Telemetri dict'i CLI ile ortaktır.
+    yield from train_loop(agent, env, n_iters=None, rollout_len=rollout_len, ew_nav=ew_tr)
 
 
 # =====================================================================
@@ -268,26 +180,22 @@ def evaluate_with_trace(agent, algo: str, horizon: str, adaptive: bool) -> list:
     s, _ = env.reset()
     trace = []
     done = trunc = False
-    n_actions = env.n_discrete if algo == "DQN" else env.action_dim
+    has_q = hasattr(agent, "q_values")  # yalnizca DQN introspeksiyonu sunar
     while not (done or trunc):
         date = env.dates[env.t]
-        q_vals = None; action_idx = None; action_name = ""
         weights_before = env.w.copy()
         state_snapshot = s.copy()
 
-        if algo == "DQN":
-            q_vals = agent.q_values(s)
-            action_idx = int(np.argmax(q_vals))
-            action_name = ACTION_NAMES[action_idx]
-            s2, r, done, trunc, info = env.step(action_idx)
-        elif algo == "PPO":
-            a, lp, v = agent.act(s)
-            s2, r, done, trunc, info = env.step(a)
-            action_name = "Gaussian sample (PPO)"
-        else:  # SAC
-            a = agent.act(s, deterministic=True)
-            s2, r, done, trunc, info = env.step(a)
-            action_name = "Tanh-deterministic (SAC)"
+        q_vals = agent.q_values(s) if has_q else None
+        a = agent.act_eval(s)                       # ajan-agnostik (BaseAgent.act_eval)
+        if isinstance(a, (int, np.integer)):
+            action_idx = int(a)
+            action_name = (ACTION_NAMES[action_idx]
+                           if 0 <= action_idx < len(ACTION_NAMES) else str(action_idx))
+        else:
+            action_idx = None
+            action_name = f"{algo} (sürekli aksiyon)"
+        s2, r, done, trunc, info = env.step(a)
 
         trace.append({
             "step": len(trace),

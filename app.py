@@ -35,7 +35,7 @@ from env.portfolio_env import (
     ACTION_NAMES, HORIZON_PRESETS, DiscretePortfolioEnv, PortfolioEnv,
 )
 from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, PPOConfig, SACConfig
+from config import SEED, FEATURES, DQNConfig, PPOConfig, SACConfig
 from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
@@ -272,11 +272,12 @@ def _reward_bar(rt: dict):
 
 
 def _state_top_features(state_vec: np.ndarray, top_k: int = 8) -> pd.DataFrame:
-    """169 boyutlu durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı)."""
-    feat_names = ["logret", "ma5", "ma20", "vol20", "rsi"]
+    """Durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı). Feature
+    sayısı config.FEATURES'tan dinamik okunur (v2: 12 özellik)."""
+    feat_names = list(FEATURES)
     n_assets = len(BIST28)
-    snap = state_vec[: 5 * n_assets].reshape(5, n_assets)
-    weights = state_vec[5 * n_assets:]
+    F = len(feat_names)
+    snap = state_vec[: F * n_assets].reshape(F, n_assets)
     rows = []
     for fi, fname in enumerate(feat_names):
         for ai, aname in enumerate(BIST28):
@@ -506,7 +507,7 @@ def tab_mdp():
     with col2:
         st.subheader("MDP Tuple (𝒮, 𝒜, 𝒫, r, γ)")
         mdp = pd.DataFrame([
-            ("𝒮 Durum Uzayı", "ℝ¹⁶⁹ — 28 hisse × 5 teknik özellik (z-skorlu) + 29 boyutlu ağırlık vektörü"),
+            ("𝒮 Durum Uzayı", "ℝ³⁶⁵ — 28 hisse × 12 teknik özellik (z-skorlu) + 29 boyutlu ağırlık vektörü"),
             ("𝒜 Eylem Uzayı (DQN)", "6 şablon: Nakit, Eşit Ağırlık, Top-3/Top-5 Mom, Ters-Vol, Min-Vol"),
             ("𝒜 Eylem Uzayı (PPO/SAC)", "ℝ²⁹ → softmax → portföy simpleksi"),
             ("𝒫 Geçiş", "Piyasa tarafından belirlenen stokastik süreç"),

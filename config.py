@@ -33,6 +33,20 @@ HORIZON_PRESETS: Dict[str, dict] = {
 
 
 # ---------------------------------------------------------------------
+# v2: zenginlestirilmis teknik feature seti (Close-turevli, ileri-bakissiz).
+# Not: OHLCV-bagimli gostergeler (ATR/ADX/CCI/Stochastic) ertelendi — yfinance bu
+# ortamda BIST OHLCV dondurmuyor; yalniz gercek Close cache'i mevcut. Hepsi
+# olcek-bagimsiz (oran/yuzde) -> enflasyonlu fiyat seviyesinden bagimsiz.
+# add_features bu sirayla doner; state vektoru layout'u bu listeye baglidir.
+# ---------------------------------------------------------------------
+FEATURES = [
+    "logret", "ma5", "ma20", "vol20", "rsi",            # v1 (mevcut)
+    "macd_hist", "bb_pctb", "bb_bw", "roc10",            # v2 yeni
+    "mom60", "vol60", "ema_dist",
+]
+
+
+# ---------------------------------------------------------------------
 # Ajan hiperparametreleri (hat-etkin default'lar = README 'Prompt Spec').
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)

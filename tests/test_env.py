@@ -7,6 +7,7 @@ aksiyon dizisi altinda tam deterministik olmali (icinde torch/rastgelelik yok).
 import numpy as np
 import pandas as pd
 
+from config import FEATURES
 from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
 from utils.features import add_features
 
@@ -75,4 +76,5 @@ def test_state_dim_matches_formula():
     env = PortfolioEnv(prices, feats)
     # state_dim = F * N_assets + N   (N = N_assets + nakit)
     assert env.state_dim == env.F * env.N_assets + env.N
-    assert env.state_dim == 5 * 5 + 6
+    assert env.F == len(FEATURES)
+    assert env.state_dim == len(FEATURES) * 5 + 6

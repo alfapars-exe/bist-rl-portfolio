@@ -35,7 +35,7 @@ from env.portfolio_env import (
     ACTION_NAMES, HORIZON_PRESETS, DiscretePortfolioEnv, PortfolioEnv,
 )
 from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, FEATURES, DQNConfig, PPOConfig, SACConfig
+from config import SEED, FEATURES, DQNConfig, PPOConfig, SACConfig, ForecastConfig
 from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
@@ -92,6 +92,12 @@ def _load_data():
         prices = download_bist()
     feats_all_raw = add_features(prices)
     px_tr, px_te = train_test_split(prices)
+    if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
+        from forecast.forecaster import build_forecast_feature
+        feats_all_raw["forecast"] = build_forecast_feature(
+            prices, px_tr, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
+            hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
+            lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
     feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
     feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
@@ -276,9 +282,10 @@ def _reward_bar(rt: dict):
 def _state_top_features(state_vec: np.ndarray, top_k: int = 8) -> pd.DataFrame:
     """Durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı). Feature
     sayısı config.FEATURES'tan dinamik okunur (v2: 12 özellik)."""
-    feat_names = list(FEATURES)
     n_assets = len(BIST28)
-    F = len(feat_names)
+    F = (len(state_vec) - (n_assets + 1)) // n_assets   # state'ten türet (12 ya da 13)
+    names = list(FEATURES) + ["forecast"]
+    feat_names = (names + [f"f{i}" for i in range(F)])[:F]
     snap = state_vec[: F * n_assets].reshape(F, n_assets)
     rows = []
     for fi, fname in enumerate(feat_names):
@@ -509,7 +516,7 @@ def tab_mdp():
     with col2:
         st.subheader("MDP Tuple (𝒮, 𝒜, 𝒫, r, γ)")
         mdp = pd.DataFrame([
-            ("𝒮 Durum Uzayı", "ℝ³⁶⁵ — 28 hisse × 12 teknik özellik (z-skorlu) + 29 boyutlu ağırlık vektörü"),
+            ("𝒮 Durum Uzayı", "ℝ³⁹³ — 28 hisse × 13 özellik (12 teknik + 1 forecast, z-skorlu) + 29 boyutlu ağırlık"),
             ("𝒜 Eylem Uzayı (DQN)", "6 şablon: Nakit, Eşit Ağırlık, Top-3/Top-5 Mom, Ters-Vol, Min-Vol"),
             ("𝒜 Eylem Uzayı (PPO/SAC)", "ℝ²⁹ → softmax → portföy simpleksi"),
             ("𝒫 Geçiş", "Piyasa tarafından belirlenen stokastik süreç"),

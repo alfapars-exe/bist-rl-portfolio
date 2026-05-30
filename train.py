@@ -19,7 +19,7 @@ from utils.metrics import summary
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
 from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, PPOConfig, SACConfig, TrainConfig, EnvConfig
+from config import SEED, DQNConfig, PPOConfig, SACConfig, TrainConfig, EnvConfig, ForecastConfig
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
 
@@ -38,6 +38,12 @@ def prepare_data():
     px = download_bist()
     feats_all_raw = add_features(px)
     px_tr, px_te = train_test_split(px)
+    if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
+        from forecast.forecaster import build_forecast_feature
+        feats_all_raw["forecast"] = build_forecast_feature(
+            px, px_tr, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
+            hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
+            lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
     feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
     feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
     scaler = TrainScaler().fit(feats_tr_raw)

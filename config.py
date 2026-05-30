@@ -128,3 +128,18 @@ class TrainConfig:
 class RewardConfig:
     w_dsr: float = 0.05      # Diferansiyel Sharpe agirligi (0 -> kapali)
     dsr_eta: float = 0.01    # DSR EWMA orani
+
+
+# ---------------------------------------------------------------------
+# v2: CNN-LSTM forecaster (predict-then-optimize). enabled=True ise state'e
+# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^393.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class ForecastConfig:
+    enabled: bool = True
+    window: int = 20
+    conv_ch: int = 16
+    hidden: int = 32
+    epochs: int = 4
+    lr: float = 1e-3
+    batch: int = 256

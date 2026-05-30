@@ -8,13 +8,28 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 ## Öne Çıkanlar
 
 - **Evren**: 28 BIST hissesi (`KOZAA.IS` ve `KOZAL.IS` hariç), 2015-01-01 → 2024-12-31
-- **Durum**: ℝ¹⁶⁹ = 5 teknik özellik × 28 hisse + 29 ağırlık (nakit dâhil), train-only z-score
+- **Durum (v2)**: ℝ³⁹³ = 13 özellik (12 teknik + 1 CNN-LSTM forecast) × 28 hisse + 29 ağırlık (nakit dâhil), train-only z-score
 - **Eylem (DQN)**: 6 şablon (Nakit, Eşit, Top-3 Mom, Top-5 Mom, Ters-Vol, Min-Vol)
 - **Eylem (PPO/SAC)**: 29-boyutlu softmax (sürekli)
 - **Ödül**: `log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)` — 4 terim ayrı ayrı raporlanır
 - **Vade Preset'leri**: Kısa / Orta / Uzun — (η, λ, τ, γ, rebalans frekansı) değişir
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
+
+## v2 Değişiklikleri (RL-in-finance literatürüyle hizalı)
+
+| Değişiklik | Gerekçe / kaynak |
+|-----------|-------------------|
+| Zengin gözlem: 5 → 13 feature (MACD, Bollinger %b/bant, ROC, mom60, vol60, EMA-uzaklık + forecast) | FinRL standart TA seti (arXiv:2011.09607) |
+| CNN-LSTM forecast: bir-adım getiri tahmini state'e (predict-then-optimize) | LSTM→PPO hibrit (arXiv:2511.17963) |
+| Diferansiyel Sharpe ödülü: online risk-ayarlı terim | Moody & Saffell; çok-ödül (arXiv:2511.11481) |
+| Rastgele-başlangıç ortam + env-yerel RNG → çeşitli, çok-episode | overfitting/genelleme (Velay 2023, arXiv:2306.10950) |
+| Walk-forward doğrulama: `python main.py --walkforward` | backtest overfitting (Liu 2022, arXiv:2209.05559) |
+
+> **Sızıntısızlık**: tüm feature'lar causal (yalnız ≤t); forecaster YALNIZ train'de fit;
+> walk-forward fold-yerel ölçeklenir. `tests/` bunları kilitler (leak-safety testleri).
+> **Not**: Aşağıdaki S1/S2 raporlama bölümleri v1 (ℝ¹⁶⁹) tasarımını anlatır; v2 bunu
+> yukarıdaki tabloyla genişletir.
 
 ## Kurulum
 
@@ -78,7 +93,10 @@ kod/
 ├── data/prices.parquet         # yfinance cache (ilk çalıştırmada oluşur)
 ├── core/                       # Eğitim/eval çekirdeği — CLI + UI ortak (Faz 3)
 │   ├── trainer.py              # generator tabanlı eğitim (DQN/PPO/SAC) + dispatch
-│   └── rollout.py              # ajan-agnostik evaluate (act_eval)
+│   ├── rollout.py              # ajan-agnostik evaluate (act_eval)
+│   └── walkforward.py          # v2: walk-forward doğrulama (overfitting kontrolü)
+├── forecast/                   # v2: CNN-LSTM bir-adım getiri tahmincisi
+│   └── forecaster.py           # predict-then-optimize; 'forecast' feature (train-only fit)
 ├── env/
 │   ├── __init__.py
 │   └── portfolio_env.py        # MDP env + AdaptiveRewardShaper (HORIZON_PRESETS → config)

@@ -114,6 +114,8 @@ def _load_data():
 def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
     px_df   = st.session_state.px_tr if is_train else st.session_state.px_te
     feats   = st.session_state.feats_tr if is_train else st.session_state.feats_te
+    if "forecast" in feats and algo not in ForecastConfig.forecast_agents:
+        feats = {k: v for k, v in feats.items() if k != "forecast"}   # v2: PPO forecast almaz
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
     cfg = st.session_state.get("reward_cfg", {}) or {}
     return cls(

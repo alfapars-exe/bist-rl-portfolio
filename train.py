@@ -63,9 +63,17 @@ def make_env(px_, feats_, discrete: bool, horizon: str = "medium",
     )
 
 
+def _feats_for(feats: dict, algo: str) -> dict:
+    """v2: forecast feature'ini yalniz ForecastConfig.forecast_agents'taki ajanlara ver
+    (ablation: PPO forecast'tan zarar gordu -> haric)."""
+    if "forecast" in feats and algo not in ForecastConfig.forecast_agents:
+        return {k: v for k, v in feats.items() if k != "forecast"}
+    return feats
+
+
 # -------------------- DQN training --------------------
 def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_tr, feats_tr, discrete=True, horizon=horizon,
+    env = make_env(px_tr, _feats_for(feats_tr, "DQN"), discrete=True, horizon=horizon,
                    adaptive=adaptive, max_steps=252,
                    random_start=EnvConfig.random_start, seed=SEED)
     agent = DQNAgent(
@@ -85,7 +93,7 @@ def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium
 # -------------------- PPO training --------------------
 def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = TrainConfig.ppo_rollout_len,
               horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_tr, feats_tr, discrete=False, horizon=horizon,
+    env = make_env(px_tr, _feats_for(feats_tr, "PPO"), discrete=False, horizon=horizon,
                    adaptive=adaptive, max_steps=10_000,
                    random_start=EnvConfig.random_start, seed=SEED)
     agent = PPOAgent(env.state_dim, env.action_dim, hidden=PPOConfig.hidden,
@@ -103,7 +111,7 @@ def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = Train
 # -------------------- SAC training --------------------
 def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode: int = TrainConfig.sac_episode_len,
               horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_tr, feats_tr, discrete=False, horizon=horizon,
+    env = make_env(px_tr, _feats_for(feats_tr, "SAC"), discrete=False, horizon=horizon,
                    adaptive=adaptive, max_steps=max_steps_per_episode,
                    random_start=EnvConfig.random_start, seed=SEED)
     agent = SACAgent(env.state_dim, env.action_dim, hidden=SACConfig.hidden,
@@ -118,7 +126,7 @@ def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode:
 
 # -------------------- Evaluation --------------------
 def evaluate(agent, algo: str, horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_te, feats_te, discrete=(algo == "DQN"),
+    env = make_env(px_te, _feats_for(feats_te, algo), discrete=(algo == "DQN"),
                    horizon=horizon, adaptive=adaptive, max_steps=10_000)
     return rollout_evaluate(agent, env)
 

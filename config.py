@@ -143,3 +143,6 @@ class ForecastConfig:
     epochs: int = 4
     lr: float = 1e-3
     batch: int = 256
+    # Hangi ajanlar forecast feature'ini kullansin? V3<->V4 ablation'a gore forecast
+    # DQN/SAC'a yaradi (+10pp DQN), PPO'ya zarar verdi (-7.5pp) -> PPO haric tutulur.
+    forecast_agents: tuple = ("DQN", "SAC")

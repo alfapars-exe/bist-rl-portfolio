@@ -101,6 +101,15 @@ def test_random_start_within_bounds_and_seeded():
     assert s1 == starts(7)           # ayni tohum -> ayni dizilim (env-yerel RNG)
 
 
+def test_per_agent_forecast_filtering():
+    """v2: forecast yalniz DQN/SAC'a verilir; PPO almaz (ablation karari)."""
+    import train
+    feats = {"logret": None, "rsi": None, "forecast": None}
+    assert "forecast" in train._feats_for(feats, "DQN")
+    assert "forecast" in train._feats_for(feats, "SAC")
+    assert "forecast" not in train._feats_for(feats, "PPO")
+
+
 def test_differential_sharpe_first_zero_finite_clipped():
     """v2: DSR ilk cagride 0; sonrasi sonlu ve clip araliginda."""
     from env.portfolio_env import DifferentialSharpe

@@ -31,7 +31,8 @@ def test_reward_decomposition_sums_to_total():
         _, r, done, trunc, info = env.step(a)
         rt = info["reward_terms"]
         recomputed = (rt["log_return"] - rt["tx_cost"]
-                      - rt["drawdown_penalty"] - rt["bankruptcy_penalty"])
+                      - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
+                      + rt["dsr_term"])
         assert abs(rt["total"] - recomputed) < 1e-9
         assert abs(float(r) - rt["total"]) < 1e-9
         if done or trunc:
@@ -65,7 +66,8 @@ def test_discrete_env_reward_invariant_holds():
         _, r, done, trunc, info = env.step(k % env.n_discrete)
         rt = info["reward_terms"]
         recomputed = (rt["log_return"] - rt["tx_cost"]
-                      - rt["drawdown_penalty"] - rt["bankruptcy_penalty"])
+                      - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
+                      + rt["dsr_term"])
         assert abs(rt["total"] - recomputed) < 1e-9
         if done or trunc:
             break
@@ -97,3 +99,13 @@ def test_random_start_within_bounds_and_seeded():
     s1 = starts(7)
     assert len(set(s1)) > 1          # gercekten cesitli pencereler
     assert s1 == starts(7)           # ayni tohum -> ayni dizilim (env-yerel RNG)
+
+
+def test_differential_sharpe_first_zero_finite_clipped():
+    """v2: DSR ilk cagride 0; sonrasi sonlu ve clip araliginda."""
+    from env.portfolio_env import DifferentialSharpe
+    ds = DifferentialSharpe(eta=0.04, clip=5.0)
+    assert ds.update(0.01) == 0.0                       # ilk cagri -> initialize, 0
+    vals = [ds.update(r) for r in (0.02, -0.01, 0.03, 0.0, 0.015, -0.02)]
+    assert all(np.isfinite(v) for v in vals)
+    assert all(abs(v) <= 5.0 + 1e-9 for v in vals)      # clip uygulanir

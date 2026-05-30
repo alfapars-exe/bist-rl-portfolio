@@ -117,3 +117,14 @@ class TrainConfig:
     ppo_rollout_len: int = 400
     sac_episodes: int = 8
     sac_episode_len: int = 600
+
+
+# ---------------------------------------------------------------------
+# v2: odul terim agirliklari. Mevcut terimler (log-getiri; tx-cost eta ile;
+# drawdown lambda ile) korunur. Ek olarak online risk-ayarli Diferansiyel
+# Sharpe (Moody & Saffell) terimi: total += w_dsr * DSR_t.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class RewardConfig:
+    w_dsr: float = 0.05      # Diferansiyel Sharpe agirligi (0 -> kapali)
+    dsr_eta: float = 0.01    # DSR EWMA orani

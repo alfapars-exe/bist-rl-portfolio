@@ -19,7 +19,7 @@ from utils.metrics import summary
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
 from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, PPOConfig, SACConfig
+from config import SEED, DQNConfig, PPOConfig, SACConfig, TrainConfig, EnvConfig
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
 
@@ -47,19 +47,21 @@ def prepare_data():
 
 
 def make_env(px_, feats_, discrete: bool, horizon: str = "medium",
-             adaptive: bool = True, max_steps: int = 10_000):
+             adaptive: bool = True, max_steps: int = 10_000,
+             random_start: bool = False, seed: int = SEED):
     cls = DiscretePortfolioEnv if discrete else PortfolioEnv
     return cls(
         px_, feats_,
         horizon=horizon, adaptive=adaptive,
-        max_steps=max_steps,
+        max_steps=max_steps, random_start=random_start, seed=seed,
     )
 
 
 # -------------------- DQN training --------------------
-def train_dqn(n_episodes: int = 6, horizon: str = "medium", adaptive: bool = True):
+def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium", adaptive: bool = True):
     env = make_env(px_tr, feats_tr, discrete=True, horizon=horizon,
-                   adaptive=adaptive, max_steps=252)
+                   adaptive=adaptive, max_steps=252,
+                   random_start=EnvConfig.random_start, seed=SEED)
     agent = DQNAgent(
         env.state_dim, env.n_discrete,
         hidden=DQNConfig.hidden, lr=DQNConfig.lr, eps_decay=DQNConfig.eps_decay,
@@ -75,10 +77,11 @@ def train_dqn(n_episodes: int = 6, horizon: str = "medium", adaptive: bool = Tru
 
 
 # -------------------- PPO training --------------------
-def train_ppo(n_updates: int = 18, rollout_len: int = 400,
+def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = TrainConfig.ppo_rollout_len,
               horizon: str = "medium", adaptive: bool = True):
     env = make_env(px_tr, feats_tr, discrete=False, horizon=horizon,
-                   adaptive=adaptive, max_steps=10_000)
+                   adaptive=adaptive, max_steps=10_000,
+                   random_start=EnvConfig.random_start, seed=SEED)
     agent = PPOAgent(env.state_dim, env.action_dim, hidden=PPOConfig.hidden,
                      lr_p=PPOConfig.lr_p, lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
                      n_epochs=PPOConfig.n_epochs, seed=SEED)
@@ -92,10 +95,11 @@ def train_ppo(n_updates: int = 18, rollout_len: int = 400,
 
 
 # -------------------- SAC training --------------------
-def train_sac(n_episodes: int = 3, max_steps_per_episode: int = 1200,
+def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode: int = TrainConfig.sac_episode_len,
               horizon: str = "medium", adaptive: bool = True):
     env = make_env(px_tr, feats_tr, discrete=False, horizon=horizon,
-                   adaptive=adaptive, max_steps=max_steps_per_episode)
+                   adaptive=adaptive, max_steps=max_steps_per_episode,
+                   random_start=EnvConfig.random_start, seed=SEED)
     agent = SACAgent(env.state_dim, env.action_dim, hidden=SACConfig.hidden,
                      lr_pi=SACConfig.lr_pi, lr_q=SACConfig.lr_q, alpha=SACConfig.alpha,
                      seed=SEED, batch_size=SACConfig.batch_size)
@@ -121,15 +125,15 @@ def run():
     prepare_data()
     t0 = time.time()
     print("=" * 60)
-    dqn_agent, dqn_curve = train_dqn(n_episodes=6)
+    dqn_agent, dqn_curve = train_dqn()
     print("DQN total time:", round(time.time() - t0, 1), "s")
 
     t1 = time.time()
-    ppo_agent, ppo_curve = train_ppo(n_updates=18, rollout_len=400)
+    ppo_agent, ppo_curve = train_ppo()
     print("PPO total time:", round(time.time() - t1, 1), "s")
 
     t2 = time.time()
-    sac_agent, sac_curve = train_sac(n_episodes=3, max_steps_per_episode=1200)
+    sac_agent, sac_curve = train_sac()
     print("SAC total time:", round(time.time() - t2, 1), "s")
 
     print("=" * 60)

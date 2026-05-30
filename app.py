@@ -112,6 +112,7 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     cfg = st.session_state.get("reward_cfg", {}) or {}
     return cls(
         px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
+        random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         eta_base=cfg.get("eta_base"),
         lambda_base=cfg.get("lambda_base"),
         tau_base=cfg.get("tau_base"),

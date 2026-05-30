@@ -102,3 +102,18 @@ class EnvConfig:
     max_episode_steps: int = 252
     bankruptcy_nav: float = 0.01
     bankruptcy_penalty: float = 10.0
+    random_start: bool = True        # v2: egitimde rastgele pencere (eval'de False gecilir)
+    seed: int = 42
+
+
+# ---------------------------------------------------------------------
+# v2: egitim dongusu uzunluklari. random_start cesitliligi sagladigi icin adim
+# sayilari CPU-dostu tutuldu (cesitlilik sayidan cok rastgele-pencereden gelir).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class TrainConfig:
+    dqn_episodes: int = 12
+    ppo_updates: int = 24
+    ppo_rollout_len: int = 400
+    sac_episodes: int = 8
+    sac_episode_len: int = 600

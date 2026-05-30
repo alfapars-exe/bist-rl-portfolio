@@ -78,3 +78,22 @@ def test_state_dim_matches_formula():
     assert env.state_dim == env.F * env.N_assets + env.N
     assert env.F == len(FEATURES)
     assert env.state_dim == len(FEATURES) * 5 + 6
+
+
+def test_random_start_within_bounds_and_seeded():
+    """v2: rastgele-baslangic pencere sinirlari icinde + tohumlu (deterministik)."""
+    prices, feats = _toy_market(n=400)
+
+    def starts(seed):
+        env = PortfolioEnv(prices, feats, horizon="short", max_steps=50,
+                           random_start=True, seed=seed)
+        out = []
+        for _ in range(30):
+            env.reset()
+            assert env.window <= env.t < env.T - env.max_steps - 1   # sinir icinde
+            out.append(env.t)
+        return out
+
+    s1 = starts(7)
+    assert len(set(s1)) > 1          # gercekten cesitli pencereler
+    assert s1 == starts(7)           # ayni tohum -> ayni dizilim (env-yerel RNG)

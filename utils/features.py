@@ -7,7 +7,7 @@ Durum vektörü için her hisseden 12 teknik öznitelik üretilir (hepsi Close-t
   - vol20/vol60 : 20g / 60g logret standart sapması
   - rsi       : 14 günlük RSI (0-1 ölçekli)
   - macd_hist : MACD histogramı (EMA12-EMA26-sinyal9), close ile normalize
-  - bb_pctb   : Bollinger %b (20g)
+  - bb_pctb   : merkezli Bollinger %b (20g): (close-SMA)/(2*std) = 2*%b-1, ~[-1,1]
   - bb_bw     : Bollinger bant genişliği (20g)
   - roc10     : 10g değişim
   - mom60     : 60g momentum

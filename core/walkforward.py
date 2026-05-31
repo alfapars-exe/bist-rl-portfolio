@@ -16,6 +16,7 @@ from collections import deque
 
 import numpy as np
 
+from config import HORIZON_PRESETS
 from core.rollout import evaluate
 from core.trainer import train as train_loop
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
@@ -39,12 +40,20 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
     T = len(prices)
     val_len = max(1, int(T * val_frac / n_folds))
     env_cls = DiscretePortfolioEnv if discrete else PortfolioEnv
+    # Egitim env'i max_steps + random_start ile kurulur; env reset'i gecerli ve CESITLI bir
+    # rastgele-baslangic araligi icin lo < tr_end - max_steps - 1 ister, aksi halde sessizce
+    # sabit-baslangica duser (bkz. PortfolioEnv._reset_state) ve fold tek-pencereye dejenere
+    # olur. Bu yuzden fold-atlama esigini sabit 80 yerine env'in episode-pencere gereksinimine
+    # baglariz (lo, env ile ayni: max(window=20, minvol_window, 21)).
+    train_max_steps = 252
+    lo = max(20, HORIZON_PRESETS[horizon]["minvol_window"], 21)
+    min_train = lo + train_max_steps + 8       # +8: dejenere olmayan baslangic cesitliligi
     fold_metrics = []
     for i in range(n_folds):
         val_end = T - (n_folds - 1 - i) * val_len
         val_start = val_end - val_len
         tr_end = val_start - purge
-        if tr_end <= 80:                       # yeterli train yoksa fold'u atla
+        if tr_end < min_train:                 # random_start icin yeterli/cesitli train yok -> atla
             continue
         tr_idx = prices.index[:tr_end]
         va_idx = prices.index[val_start:val_end]
@@ -54,7 +63,7 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
         f_va = sc.transform(_slice(feats_raw, va_idx))
 
         tr_env = env_cls(prices.loc[tr_idx], f_tr, horizon=horizon, adaptive=adaptive,
-                         max_steps=252, random_start=True, seed=seed)
+                         max_steps=train_max_steps, random_start=True, seed=seed)
         action_dim = tr_env.n_discrete if discrete else tr_env.action_dim
         agent = agent_factory(tr_env.state_dim, action_dim, seed)
         # generator'i sonuna kadar tuket (egitim yan-etkili; ciktiya gerek yok)

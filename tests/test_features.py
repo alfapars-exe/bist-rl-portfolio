@@ -79,6 +79,10 @@ def test_add_features_returns_config_set():
     px = _toy_prices()
     feats = add_features(px)
     assert set(feats) == set(FEATURES)          # config ile senkron (v2: 12 feature)
+    # add_features SOZLESMESI: anahtar SIRASI da config.FEATURES ile birebir ayni olmali
+    # (env state layout'u feat dict sirasina baglidir -> salt set-esitligi siralama
+    # regresyonunu kacirir; bkz. PortfolioEnv.feat_names / feat_tensor).
+    assert list(feats.keys()) == list(FEATURES)
     for k, df in feats.items():
         assert df.shape == px.shape
         assert np.isfinite(df.values).all()      # NaN/inf yok

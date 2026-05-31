@@ -30,6 +30,8 @@ def test_reward_decomposition_sums_to_total():
         a = rng.normal(0, 1, size=env.action_dim).astype(np.float32)
         _, r, done, trunc, info = env.step(a)
         rt = info["reward_terms"]
+        # v2: odul ozdesligine Diferansiyel Sharpe terimi eklendi (+dsr_term = w_dsr*DSR,
+        # online risk-ayar). Ozdeslik: log_return - tx_cost - drawdown - bankruptcy + dsr_term.
         recomputed = (rt["log_return"] - rt["tx_cost"]
                       - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
                       + rt["dsr_term"])

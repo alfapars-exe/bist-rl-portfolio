@@ -38,15 +38,15 @@ class ReturnForecaster(nn.Module):
 def _make_windows(logret: np.ndarray, window: int):
     """logret (T,N) -> X (M,window,1), y (M,); ornek (t,j) icin y = logret[t+1,j]."""
     T, N = logret.shape
-    Xs, ys = [], []
+    xs, ys = [], []
     for j in range(N):
         col = logret[:, j]
         for t in range(window - 1, T - 1):
-            Xs.append(col[t - window + 1: t + 1])
+            xs.append(col[t - window + 1: t + 1])
             ys.append(col[t + 1])
-    X = np.asarray(Xs, dtype=np.float32)[:, :, None]
+    x = np.asarray(xs, dtype=np.float32)[:, :, None]
     y = np.asarray(ys, dtype=np.float32)
-    return X, y
+    return x, y
 
 
 def _logret(prices: pd.DataFrame) -> np.ndarray:
@@ -67,20 +67,20 @@ def build_forecast_feature(prices_full: pd.DataFrame, prices_train: pd.DataFrame
     lr_tr = _logret(prices_train)
     lr_full = _logret(prices_full)
 
-    X, y = _make_windows(lr_tr, window)
+    x, y = _make_windows(lr_tr, window)
     model = ReturnForecaster(window, conv_ch, hidden).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0)
     loss_fn = nn.MSELoss()
-    Xt = torch.as_tensor(X, device=device)
-    yt = torch.as_tensor(y, device=device)
-    n = Xt.shape[0]
+    x_all = torch.as_tensor(x, device=device)
+    y_all = torch.as_tensor(y, device=device)
+    n = x_all.shape[0]
     model.train()
     for _ in range(epochs):
         perm = torch.randperm(n, device=device)
         for s in range(0, n, batch):
             b = perm[s: s + batch]
             opt.zero_grad()
-            loss_fn(model(Xt[b]), yt[b]).backward()
+            loss_fn(model(x_all[b]), y_all[b]).backward()
             opt.step()
 
     # Causal tahmin: t'deki feature = t+1 ongorusu (pencere t'de biter).

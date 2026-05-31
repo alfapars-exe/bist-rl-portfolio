@@ -55,9 +55,9 @@ def add_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     ema50   = close.ewm(span=50, adjust=False).mean()
     ema_dist = ((close - ema50) / (ema50 + 1e-9)).fillna(0.0)
 
-    return dict(logret=logret, ma5=ma5, ma20=ma20, vol20=vol20, rsi=rsi,
-                macd_hist=macd_hist, bb_pctb=bb_pctb, bb_bw=bb_bw, roc10=roc10,
-                mom60=mom60, vol60=vol60, ema_dist=ema_dist)
+    return {"logret": logret, "ma5": ma5, "ma20": ma20, "vol20": vol20, "rsi": rsi,
+            "macd_hist": macd_hist, "bb_pctb": bb_pctb, "bb_bw": bb_bw, "roc10": roc10,
+            "mom60": mom60, "vol60": vol60, "ema_dist": ema_dist}
 
 
 class TrainScaler:

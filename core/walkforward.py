@@ -12,6 +12,8 @@ ile cagrilmali (main.py boyle yapar).
 """
 from __future__ import annotations
 
+from collections import deque
+
 import numpy as np
 
 from core.rollout import evaluate
@@ -36,7 +38,7 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
     """
     T = len(prices)
     val_len = max(1, int(T * val_frac / n_folds))
-    Cls = DiscretePortfolioEnv if discrete else PortfolioEnv
+    env_cls = DiscretePortfolioEnv if discrete else PortfolioEnv
     fold_metrics = []
     for i in range(n_folds):
         val_end = T - (n_folds - 1 - i) * val_len
@@ -51,15 +53,15 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
         f_tr = sc.transform(_slice(feats_raw, tr_idx))
         f_va = sc.transform(_slice(feats_raw, va_idx))
 
-        tr_env = Cls(prices.loc[tr_idx], f_tr, horizon=horizon, adaptive=adaptive,
-                     max_steps=252, random_start=True, seed=seed)
+        tr_env = env_cls(prices.loc[tr_idx], f_tr, horizon=horizon, adaptive=adaptive,
+                         max_steps=252, random_start=True, seed=seed)
         action_dim = tr_env.n_discrete if discrete else tr_env.action_dim
         agent = agent_factory(tr_env.state_dim, action_dim, seed)
-        for _ in train_loop(agent, tr_env, n_iters=n_iters, rollout_len=rollout_len):
-            pass
+        # generator'i sonuna kadar tuket (egitim yan-etkili; ciktiya gerek yok)
+        deque(train_loop(agent, tr_env, n_iters=n_iters, rollout_len=rollout_len), maxlen=0)
 
-        va_env = Cls(prices.loc[va_idx], f_va, horizon=horizon, adaptive=adaptive,
-                     max_steps=10_000, random_start=False, seed=seed)
+        va_env = env_cls(prices.loc[va_idx], f_va, horizon=horizon, adaptive=adaptive,
+                         max_steps=10_000, random_start=False, seed=seed)
         bt = evaluate(agent, va_env)
         if len(bt["nav"]) > 0:
             fold_metrics.append(summary(bt["nav"], bt["rets"], bt["weights"]))

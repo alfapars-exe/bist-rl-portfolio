@@ -114,7 +114,7 @@ def test_differential_sharpe_first_zero_finite_clipped():
     """v2: DSR ilk cagride 0; sonrasi sonlu ve clip araliginda."""
     from env.portfolio_env import DifferentialSharpe
     ds = DifferentialSharpe(eta=0.04, clip=5.0)
-    assert ds.update(0.01) == 0.0                       # ilk cagri -> initialize, 0
+    assert abs(ds.update(0.01)) < 1e-12                 # ilk cagri -> initialize, 0
     vals = [ds.update(r) for r in (0.02, -0.01, 0.03, 0.0, 0.015, -0.02)]
     assert all(np.isfinite(v) for v in vals)
     assert all(abs(v) <= 5.0 + 1e-9 for v in vals)      # clip uygulanir

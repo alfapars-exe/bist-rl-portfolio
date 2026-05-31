@@ -7,7 +7,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from utils.features import TrainScaler
+from config import FEATURES
+from utils.features import TrainScaler, add_features
 
 
 def _toy_feats(seed=0, n=120, k=4):
@@ -65,3 +66,41 @@ def test_zero_variance_column_no_div_by_zero():
     assert np.isfinite(out["f"].values).all()
     # sabit kolon: std 1.0'a sabitlenir -> z-score (x-mean)/1 = 0
     assert np.allclose(out["f"].values, 0.0)
+
+
+def _toy_prices(seed=0, n=220, k=4):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    return pd.DataFrame(100.0 * np.exp(np.cumsum(rng.normal(0, 0.012, (n, k)), axis=0)),
+                        index=idx, columns=[f"A{i}" for i in range(k)])
+
+
+def test_add_features_returns_config_set():
+    px = _toy_prices()
+    feats = add_features(px)
+    assert set(feats) == set(FEATURES)          # config ile senkron (v2: 12 feature)
+    # add_features SOZLESMESI: anahtar SIRASI da config.FEATURES ile birebir ayni olmali
+    # (env state layout'u feat dict sirasina baglidir -> salt set-esitligi siralama
+    # regresyonunu kacirir; bkz. PortfolioEnv.feat_names / feat_tensor).
+    assert list(feats.keys()) == list(FEATURES)
+    for k, df in feats.items():
+        assert df.shape == px.shape
+        assert np.isfinite(df.values).all()      # NaN/inf yok
+
+
+def test_features_are_causal_no_lookahead():
+    """t'deki feature degeri, gelecekteki (>t) fiyatlar degisse bile DEGISMEMELI.
+
+    Tum gostergeler causal (rolling/ewm/pct_change/diff) -> ileri-bakis (lookahead)
+    yok. Bu, RL-in-finance literaturunun 1 numarali tuzagina (data leakage) karsi kilit.
+    """
+    px = _toy_prices(seed=1)
+    t = 160
+    f_full = add_features(px)
+    px2 = px.copy()
+    px2.iloc[t + 1:] *= 1.5                       # yalniz gelecegi degistir
+    f_trunc = add_features(px2)
+    for k in f_full:
+        a = f_full[k].iloc[: t + 1].values
+        b = f_trunc[k].iloc[: t + 1].values
+        assert np.allclose(a, b, atol=1e-9), f"{k}: lookahead sizintisi!"

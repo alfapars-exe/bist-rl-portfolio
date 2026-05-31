@@ -33,6 +33,20 @@ HORIZON_PRESETS: Dict[str, dict] = {
 
 
 # ---------------------------------------------------------------------
+# v2: zenginlestirilmis teknik feature seti (Close-turevli, ileri-bakissiz).
+# Not: OHLCV-bagimli gostergeler (ATR/ADX/CCI/Stochastic) ertelendi — yfinance bu
+# ortamda BIST OHLCV dondurmuyor; yalniz gercek Close cache'i mevcut. Hepsi
+# olcek-bagimsiz (oran/yuzde) -> enflasyonlu fiyat seviyesinden bagimsiz.
+# add_features bu sirayla doner; state vektoru layout'u bu listeye baglidir.
+# ---------------------------------------------------------------------
+FEATURES = [
+    "logret", "ma5", "ma20", "vol20", "rsi",            # v1 (mevcut)
+    "macd_hist", "bb_pctb", "bb_bw", "roc10",            # v2 yeni
+    "mom60", "vol60", "ema_dist",
+]
+
+
+# ---------------------------------------------------------------------
 # Ajan hiperparametreleri (hat-etkin default'lar = README 'Prompt Spec').
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -88,3 +102,47 @@ class EnvConfig:
     max_episode_steps: int = 252
     bankruptcy_nav: float = 0.01
     bankruptcy_penalty: float = 10.0
+    random_start: bool = True        # v2: egitimde rastgele pencere (eval'de False gecilir)
+    seed: int = 42
+
+
+# ---------------------------------------------------------------------
+# v2: egitim dongusu uzunluklari. random_start cesitliligi sagladigi icin adim
+# sayilari CPU-dostu tutuldu (cesitlilik sayidan cok rastgele-pencereden gelir).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class TrainConfig:
+    dqn_episodes: int = 12
+    ppo_updates: int = 24
+    ppo_rollout_len: int = 400
+    sac_episodes: int = 8
+    sac_episode_len: int = 600
+
+
+# ---------------------------------------------------------------------
+# v2: odul terim agirliklari. Mevcut terimler (log-getiri; tx-cost eta ile;
+# drawdown lambda ile) korunur. Ek olarak online risk-ayarli Diferansiyel
+# Sharpe (Moody & Saffell) terimi: total += w_dsr * DSR_t.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class RewardConfig:
+    w_dsr: float = 0.05      # Diferansiyel Sharpe agirligi (0 -> kapali)
+    dsr_eta: float = 0.01    # DSR EWMA orani
+
+
+# ---------------------------------------------------------------------
+# v2: CNN-LSTM forecaster (predict-then-optimize). enabled=True ise state'e
+# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^393.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class ForecastConfig:
+    enabled: bool = True
+    window: int = 20
+    conv_ch: int = 16
+    hidden: int = 32
+    epochs: int = 4
+    lr: float = 1e-3
+    batch: int = 256
+    # Hangi ajanlar forecast feature'ini kullansin? V3<->V4 ablation'a gore forecast
+    # DQN/SAC'a yaradi (+10pp DQN), PPO'ya zarar verdi (-7.5pp) -> PPO haric tutulur.
+    forecast_agents: tuple = ("DQN", "SAC")

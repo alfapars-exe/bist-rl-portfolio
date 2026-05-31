@@ -35,7 +35,7 @@ from env.portfolio_env import (
     ACTION_NAMES, HORIZON_PRESETS, DiscretePortfolioEnv, PortfolioEnv,
 )
 from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, PPOConfig, SACConfig
+from config import SEED, FEATURES, DQNConfig, PPOConfig, SACConfig, ForecastConfig
 from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
@@ -92,6 +92,12 @@ def _load_data():
         prices = download_bist()
     feats_all_raw = add_features(prices)
     px_tr, px_te = train_test_split(prices)
+    if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
+        from forecast.forecaster import build_forecast_feature
+        feats_all_raw["forecast"] = build_forecast_feature(
+            prices, px_tr, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
+            hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
+            lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
     feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
     feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
@@ -108,10 +114,13 @@ def _load_data():
 def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
     px_df   = st.session_state.px_tr if is_train else st.session_state.px_te
     feats   = st.session_state.feats_tr if is_train else st.session_state.feats_te
+    if "forecast" in feats and algo not in ForecastConfig.forecast_agents:
+        feats = {k: v for k, v in feats.items() if k != "forecast"}   # v2: PPO forecast almaz
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
     cfg = st.session_state.get("reward_cfg", {}) or {}
     return cls(
         px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
+        random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         eta_base=cfg.get("eta_base"),
         lambda_base=cfg.get("lambda_base"),
         tau_base=cfg.get("tau_base"),
@@ -261,8 +270,9 @@ def _q_bar(q_values: np.ndarray, chosen: int):
 
 
 def _reward_bar(rt: dict):
-    names = ["log_return", "tx_cost", "dd_penalty", "total"]
-    vals = [rt["log_return"], -rt["tx_cost"], -rt["drawdown_penalty"], rt["total"]]
+    names = ["log_return", "tx_cost", "dd_penalty", "dsr", "total"]
+    vals = [rt["log_return"], -rt["tx_cost"], -rt["drawdown_penalty"],
+            rt.get("dsr_term", 0.0), rt["total"]]
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in vals]
     fig = go.Figure(go.Bar(x=names, y=vals, marker_color=colors,
                            text=[f"{v:+.5f}" for v in vals], textposition="outside"))
@@ -272,11 +282,13 @@ def _reward_bar(rt: dict):
 
 
 def _state_top_features(state_vec: np.ndarray, top_k: int = 8) -> pd.DataFrame:
-    """169 boyutlu durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı)."""
-    feat_names = ["logret", "ma5", "ma20", "vol20", "rsi"]
+    """Durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı). Feature
+    sayısı config.FEATURES'tan dinamik okunur (v2: 12 özellik)."""
     n_assets = len(BIST28)
-    snap = state_vec[: 5 * n_assets].reshape(5, n_assets)
-    weights = state_vec[5 * n_assets:]
+    F = (len(state_vec) - (n_assets + 1)) // n_assets   # state'ten türet (12 ya da 13)
+    names = list(FEATURES) + ["forecast"]
+    feat_names = (names + [f"f{i}" for i in range(F)])[:F]
+    snap = state_vec[: F * n_assets].reshape(F, n_assets)
     rows = []
     for fi, fname in enumerate(feat_names):
         for ai, aname in enumerate(BIST28):
@@ -506,7 +518,7 @@ def tab_mdp():
     with col2:
         st.subheader("MDP Tuple (𝒮, 𝒜, 𝒫, r, γ)")
         mdp = pd.DataFrame([
-            ("𝒮 Durum Uzayı", "ℝ¹⁶⁹ — 28 hisse × 5 teknik özellik (z-skorlu) + 29 boyutlu ağırlık vektörü"),
+            ("𝒮 Durum Uzayı", "ℝ³⁹³ — 28 hisse × 13 özellik (12 teknik + 1 forecast, z-skorlu) + 29 boyutlu ağırlık"),
             ("𝒜 Eylem Uzayı (DQN)", "6 şablon: Nakit, Eşit Ağırlık, Top-3/Top-5 Mom, Ters-Vol, Min-Vol"),
             ("𝒜 Eylem Uzayı (PPO/SAC)", "ℝ²⁹ → softmax → portföy simpleksi"),
             ("𝒫 Geçiş", "Piyasa tarafından belirlenen stokastik süreç"),

@@ -1,11 +1,17 @@
 """Özellik mühendisliği ve eğitim-seti z-score ölçekleyicisi.
 
-Durum vektörü için her hisseden 5 teknik öznitelik üretilir:
-  - logret : günlük log getiri
-  - ma5    : 5 günlük yüzde değişim
-  - ma20   : 20 günlük yüzde değişim
-  - vol20  : 20 günlük logret standart sapması
-  - rsi    : 14 günlük RSI (Wilder; 0-1 aralığında ölçeklenmiş)
+Durum vektörü için her hisseden 12 teknik öznitelik üretilir (hepsi Close-türevli,
+ölçek-bağımsız ve yalnız-geçmişe-bakar):
+  - logret    : günlük log getiri
+  - ma5/ma20  : 5g / 20g yüzde değişim
+  - vol20/vol60 : 20g / 60g logret standart sapması
+  - rsi       : 14 günlük RSI (0-1 ölçekli)
+  - macd_hist : MACD histogramı (EMA12-EMA26-sinyal9), close ile normalize
+  - bb_pctb   : merkezli Bollinger %b (20g): (close-SMA)/(2*std) = 2*%b-1, ~[-1,1]
+  - bb_bw     : Bollinger bant genişliği (20g)
+  - roc10     : 10g değişim
+  - mom60     : 60g momentum
+  - ema_dist  : EMA50'ye göreli uzaklık
 
 `TrainScaler` istatistikleri YALNIZCA eğitim kümesinde fit eder;
 test dönemine aynı istatistikler uygulanır → veri sızıntısı yok.
@@ -18,16 +24,40 @@ import pandas as pd
 
 
 def add_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    """28 hisselik fiyat matrisinden 5 özellik DataFrame'i döner (ham, standardize değil)."""
-    logret = np.log(prices).diff().fillna(0.0)
-    ma5    = prices.pct_change(5).fillna(0.0)
-    ma20   = prices.pct_change(20).fillna(0.0)
+    """Close (T,N) matrisinden zenginleştirilmiş teknik feature dict'i döner (ham).
+
+    Anahtar sırası `config.FEATURES` ile aynıdır. Tüm göstergeler yalnız-geçmişe
+    bakar (rolling/ewm/pct_change/diff — causal) → ileri-bakış (lookahead) yok.
+    """
+    close = prices
+    logret = np.log(close).diff().fillna(0.0)
+    ma5    = close.pct_change(5).fillna(0.0)
+    ma20   = close.pct_change(20).fillna(0.0)
     vol20  = logret.rolling(20).std().fillna(0.0)
-    delta  = prices.diff()
+    delta  = close.diff()
     up     = delta.clip(lower=0).rolling(14).mean()
     dn     = (-delta.clip(upper=0)).rolling(14).mean()
     rsi    = (100 - 100 / (1 + up / (dn + 1e-9))).fillna(50) / 100.0
-    return dict(logret=logret, ma5=ma5, ma20=ma20, vol20=vol20, rsi=rsi)
+
+    # --- v2 yeni göstergeler (Close-türevli, ölçek-bağımsız) ---
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    macd  = ema12 - ema26
+    signal = macd.ewm(span=9, adjust=False).mean()
+    macd_hist = ((macd - signal) / close).fillna(0.0)
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    bb_pctb = ((close - sma20) / (2 * std20 + 1e-9)).fillna(0.0)
+    bb_bw   = ((4 * std20) / (sma20 + 1e-9)).fillna(0.0)
+    roc10   = close.pct_change(10).fillna(0.0)
+    mom60   = close.pct_change(60).fillna(0.0)
+    vol60   = logret.rolling(60).std().fillna(0.0)
+    ema50   = close.ewm(span=50, adjust=False).mean()
+    ema_dist = ((close - ema50) / (ema50 + 1e-9)).fillna(0.0)
+
+    return {"logret": logret, "ma5": ma5, "ma20": ma20, "vol20": vol20, "rsi": rsi,
+            "macd_hist": macd_hist, "bb_pctb": bb_pctb, "bb_bw": bb_bw, "roc10": roc10,
+            "mom60": mom60, "vol60": vol60, "ema_dist": ema_dist}
 
 
 class TrainScaler:

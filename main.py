@@ -60,17 +60,44 @@ def step_plots():
     print(f"  Figürler: {FIG}")
 
 
+def step_walkforward():
+    print("=" * 70)
+    print("[WF] Walk-forward dogrulama (PPO, train donemi, fold-yerel olcekleme) ...")
+    print("=" * 70)
+    from data import download_bist, train_test_split
+    from utils.features import add_features
+    from core.walkforward import walk_forward
+    from agents import PPOAgent
+    from config import PPOConfig, SEED
+    px = download_bist()
+    px_tr, _ = train_test_split(px)
+    feats_raw = add_features(px_tr)        # teknik feat (forecast haric -> fold-yerel leak-safe)
+
+    def ppo_factory(sd, ad, seed):
+        return PPOAgent(sd, ad, hidden=PPOConfig.hidden, lr_p=PPOConfig.lr_p,
+                        lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
+                        n_epochs=PPOConfig.n_epochs, seed=seed)
+
+    rep = walk_forward(px_tr, feats_raw, ppo_factory, n_folds=3, n_iters=12, seed=SEED)
+    print(f"  Fold sayisi: {len(rep['folds'])}")
+    for key in ("CAGR", "Sharpe", "Sortino", "MaxDD", "Calmar"):
+        print(f"  {key:<8} mean={rep['mean'].get(key, 0):+.4f}  std={rep['std'].get(key, 0):.4f}")
+    print("  -> fold'lar arasi dusuk std = stabil genelleme (overfitting kontrolu)")
+
+
 def main():
     ap = argparse.ArgumentParser(description="BIST 30 RL Portföy Yönetimi — tam akış")
     ap.add_argument("--skip-data",  action="store_true", help="Veri indirme adımını atla")
     ap.add_argument("--skip-train", action="store_true", help="Eğitim + backtest adımını atla")
     ap.add_argument("--skip-plots", action="store_true", help="Çizim adımını atla")
+    ap.add_argument("--walkforward", action="store_true", help="Walk-forward doğrulama çalıştır (v2)")
     args = ap.parse_args()
 
     t0 = time.time()
     if not args.skip_data:  step_data()
     if not args.skip_train: step_train()
     if not args.skip_plots: step_plots()
+    if args.walkforward:    step_walkforward()
 
     print("=" * 70)
     print(f"BİTTİ.  Toplam süre: {time.time() - t0:.1f} s")

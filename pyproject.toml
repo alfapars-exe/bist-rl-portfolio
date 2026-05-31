@@ -31,7 +31,7 @@ dev = ["pytest>=7.0"]
 py-modules = ["config", "data", "train", "main", "app", "plots"]
 
 [tool.setuptools.packages.find]
-include = ["agents*", "env*", "utils*", "core*"]
+include = ["agents*", "env*", "utils*", "core*", "forecast*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

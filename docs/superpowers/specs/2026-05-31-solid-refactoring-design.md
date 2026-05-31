@@ -201,3 +201,20 @@ Golden-yolu fazları (3,4,6,7): `pytest -q` sonrası ek olarak `python main.py` 
 - `.venv` çalışır durumda ve bağımlılıklar kurulu (P0'da doğrulanır).
 - `tests/golden/metrics_baseline.csv` mevcut ve geçerli (deterministik seed=42 baseline).
 - Yeni modüller `tests/test_imports.py::SAFE_MODULES` listesine eklenecek (test genişletmesi; davranış değil).
+
+## 11. SonarCloud baseline bulguları (PR #2)
+
+PR #2'de SonarCloud **Quality Gate PASSED** ✅. Raporlanan 8 "new issue"nun tamamı `env/portfolio_env.py`'de — `9cd6c13` ("env/ paketini izlemeye al") commit'i bu dosyayı izlemeye aldığı için yüzeye çıkan **önceden var olan** kod kokularıdır; bu oturumun (saf markdown) commit'i sıfır issue üretti. GitHub inline yorumu yoktur (resolve edilecek thread yok). Gate geçtiğinden bloke edici değildir.
+
+Planlanan refactoring bunların çoğunu **doğal olarak** kapatır (ad-hoc yama yerine golden-kapılı fazlar içinde):
+
+| Satır | Düzey | Plan kapsamı |
+|---|---|---|
+| 147 (`PortfolioEnv.__init__`, ~20 parametre) | warning | **P7**: ödül parametreleri (`eta/lambda/tau/vol/turnover/ema/w_dsr/dsr_eta/bankruptcy*`) `RewardEngine`'e taşınır → ctor parametre sayısı düşer. **P3**: `build_env` tek kurulum noktası |
+| 131, 132 (`DifferentialSharpe.update`) | warning | **P7**: `DifferentialSharpe` → `env/reward.py` |
+| 194 (`__init__` gövdesi) | warning | **P7**: ctor yeniden düzenlenir |
+| 258, 292, 306 (`step`, reward_terms/info dict'leri) | warning | **P7**: ödül hesabı `RewardEngine`'e çıkar |
+| 329 (`DiscretePortfolioEnv._discrete_to_logits`) | warning | (hedef dışı; küçük) |
+| **214** (`_reset_state` rastgele-başlangıç ternary) | **failure** | **P7 içinde açıkça incelenir** — DİKKAT: `_reset_state` RNG/golden-duyarlı; YALNIZ davranış-koruyan düzeltme |
+
+> **Şimdi ad-hoc dokunulmaz:** (a) brainstorming gate'i (spec onayı öncesi implementasyon yok); (b) `env/portfolio_env.py` golden-master'ın en duyarlı dosyası — koku temizliği davranışı değiştirip 1e-6'yı kırabilir. Doğru yer: golden-kapılı fazlar.

@@ -218,3 +218,10 @@ Planlanan refactoring bunların çoğunu **doğal olarak** kapatır (ad-hoc yama
 | **214** (`_reset_state` rastgele-başlangıç ternary) | **failure** | **P7 içinde açıkça incelenir** — DİKKAT: `_reset_state` RNG/golden-duyarlı; YALNIZ davranış-koruyan düzeltme |
 
 > **Şimdi ad-hoc dokunulmaz:** (a) brainstorming gate'i (spec onayı öncesi implementasyon yok); (b) `env/portfolio_env.py` golden-master'ın en duyarlı dosyası — koku temizliği davranışı değiştirip 1e-6'yı kırabilir. Doğru yer: golden-kapılı fazlar.
+
+## 12. PR review geri bildirimi (Copilot, PR #2)
+
+| # | Konum | Geri bildirim | Disposition |
+|---|---|---|---|
+| 1 | `.github/workflows/ci.yml` | Fork PR'larda `SONAR_TOKEN` expose edilmez → scan adımı patlar | ✅ **Düzeltildi**: scan adımı `push` veya ayni-repo PR ile gate'lendi; fork PR'lar yine test/coverage alır. CI dosyası refactoring kapsamı dışı, golden riski yok. |
+| 2 | `env/portfolio_env.py:354` (`DiscretePortfolioEnv.step`) | Aralık-dışı `action_idx` kabul ediliyor → tüm logit `-1e6` → softmax near-uniform portföy (sessiz hatalı davranış) | ⏭ **P7'ye ertelendi**: env davranış değişikliği + golden-duyarlı dosya. P7 `DiscretePortfolioEnv.step`'i yeniden düzenlerken `0 <= a_idx < n_discrete` doğrulaması eklenir (golden-kapılı). DQN her zaman geçerli indeks ürettiğinden golden etkilenmez. |

@@ -2,8 +2,8 @@
 .venv/
 .venv.*/
 venv/
-env/
-ENV/
+# NOT: 'env/' ve 'ENV/' KALDIRILDI — kaynak paketimiz env/ (PortfolioEnv) bu
+# kalıplarla çakışıp izlenmiyordu. Sanal ortamlar zaten .venv/ kullanıyor.
 
 # ── Python ───────────────────────────────────────────────────────
 __pycache__/
@@ -16,6 +16,12 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# ── Coverage (üretilen — izlenmez) ───────────────────────────────
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # ── Proje çıktıları (yeniden üretilebilir) ───────────────────────
 results/

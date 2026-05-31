@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 
 # Flat-layout: kok dizindeki moduller + paketler acikca bildirilir
 # (setuptools auto-discovery'nin birden cok top-level modulde sasirmasini onler).
@@ -36,3 +36,21 @@ include = ["agents*", "env*", "utils*", "core*", "forecast*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+# ── Coverage (pytest-cov) ────────────────────────────────────────
+# CI: pytest --cov=. --cov-report=xml:coverage.xml  → SonarCloud'a Cobertura XML.
+# relative_files=true: rapordaki yollar repo-göreli olur (ör. env/portfolio_env.py),
+# böylece SonarCloud yol eşlemesi sorunsuz çalışır (CI çalışma diziniyle uyumlu).
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["."]
+omit = [
+    "tests/*",
+    ".venv/*",
+    ".venv.*/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true

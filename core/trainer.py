@@ -144,17 +144,36 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
 
 
 # --------------------------------------------------------------------- dispatch
+def _launch_dqn(agent, env, n_iters, rollout_len, ew_nav):
+    return train_dqn(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
+
+
+def _launch_ppo(agent, env, n_iters, rollout_len, ew_nav):
+    return train_ppo(agent, env, n_updates=n_iters, rollout_len=rollout_len, ew_nav=ew_nav)
+
+
+def _launch_sac(agent, env, n_iters, rollout_len, ew_nav):
+    return train_sac(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
+
+
+# SOLID P4 (OCP): yeni ajan tipi eklemek = bu registry'ye kayit eklemek;
+# train() govdesi degismez. Kayit yoksa TypeError (onceki davranisla ayni).
+_TRAINERS: dict = {
+    DQNAgent: _launch_dqn,
+    PPOAgent: _launch_ppo,
+    SACAgent: _launch_sac,
+}
+
+
 def train(agent, env, *, n_iters: Optional[int] = None,
           rollout_len: int = 400,
           ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
     """Ajan tipine gore dogru egitim generator'ini secen TEK dispatch noktasi.
 
-    (Strategy pattern: dallanma burada bir kez yapilir, tuketicilerde degil.)
+    (Registry/Strategy pattern: dallanma tablo uzerinden bir kez yapilir,
+    tuketicilerde degil.)
     """
-    if isinstance(agent, DQNAgent):
-        return train_dqn(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
-    if isinstance(agent, PPOAgent):
-        return train_ppo(agent, env, n_updates=n_iters, rollout_len=rollout_len, ew_nav=ew_nav)
-    if isinstance(agent, SACAgent):
-        return train_sac(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
-    raise TypeError(f"Bilinmeyen ajan tipi: {type(agent).__name__}")
+    launcher = _TRAINERS.get(type(agent))
+    if launcher is None:
+        raise TypeError(f"Bilinmeyen ajan tipi: {type(agent).__name__}")
+    return launcher(agent, env, n_iters, rollout_len, ew_nav)

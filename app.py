@@ -36,6 +36,7 @@ from env.portfolio_env import (
 )
 from agents import DQNAgent, PPOAgent, SACAgent
 from config import SEED, FEATURES, DQNConfig, PPOConfig, SACConfig, ForecastConfig
+from core.features import select_features
 from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
@@ -114,8 +115,7 @@ def _load_data():
 def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
     px_df   = st.session_state.px_tr if is_train else st.session_state.px_te
     feats   = st.session_state.feats_tr if is_train else st.session_state.feats_te
-    if "forecast" in feats and algo not in ForecastConfig.forecast_agents:
-        feats = {k: v for k, v in feats.items() if k != "forecast"}   # v2: PPO forecast almaz
+    feats = select_features(feats, algo)   # v2: PPO forecast almaz (P2: tek kaynak core.features)
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
     cfg = st.session_state.get("reward_cfg", {}) or {}
     return cls(

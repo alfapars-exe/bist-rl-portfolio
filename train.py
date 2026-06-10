@@ -20,6 +20,7 @@ from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
 from agents import DQNAgent, PPOAgent, SACAgent
 from config import SEED, DQNConfig, PPOConfig, SACConfig, TrainConfig, EnvConfig, ForecastConfig
+from core.features import select_features
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
 
@@ -64,11 +65,9 @@ def make_env(px_, feats_, discrete: bool, horizon: str = "medium",
 
 
 def _feats_for(feats: dict, algo: str) -> dict:
-    """v2: forecast feature'ini yalniz ForecastConfig.forecast_agents'taki ajanlara ver
-    (ablation: PPO forecast'tan zarar gordu -> haric)."""
-    if "forecast" in feats and algo not in ForecastConfig.forecast_agents:
-        return {k: v for k, v in feats.items() if k != "forecast"}
-    return feats
+    """Shim — SOLID P2: tek dogruluk kaynagi core.features.select_features.
+    (test_env bu adi cagirir; geriye-uyumluluk icin korunur.)"""
+    return select_features(feats, algo)
 
 
 # -------------------- DQN training --------------------

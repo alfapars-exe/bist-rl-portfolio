@@ -9,6 +9,7 @@ from __future__ import annotations
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -27,14 +28,22 @@ BASE = Path(__file__).resolve().parent
 RES  = BASE / "results"
 RES.mkdir(exist_ok=True)
 
-# -------------------- veri (M1: import yan etkisi yok; run()/prepare_data yukler) --------------------
-px = px_tr = px_te = feats_tr = feats_te = scaler = None
+# -------------------- veri (P6: modul-global state yerine acik DataBundle) --------------------
+@dataclass
+class DataBundle:
+    """Egitim/degerlendirme veri paketi — prepare_data() uretir, tuketiciler
+    acikca alir (DIP/testability: global durum yok, sahte bundle enjekte edilebilir)."""
+    px: pd.DataFrame
+    px_tr: pd.DataFrame
+    px_te: pd.DataFrame
+    feats_tr: dict
+    feats_te: dict
+    scaler: TrainScaler
 
 
-def prepare_data():
+def prepare_data() -> DataBundle:
     """BIST verisini yukler, train/test ayirir, train-only z-score uygular;
-    modul globallerini doldurur (train_*/evaluate bunlari kullanir)."""
-    global px, px_tr, px_te, feats_tr, feats_te, scaler
+    DataBundle dondurur (onceki surum modul globallerini dolduruyordu)."""
     px = download_bist()
     feats_all_raw = add_features(px)
     px_tr, px_te = train_test_split(px)
@@ -50,6 +59,8 @@ def prepare_data():
     feats_tr = scaler.transform(feats_tr_raw)
     feats_te = scaler.transform(feats_te_raw)
     print(f"Train: {px_tr.shape}, Test: {px_te.shape}, tickers: {px.shape[1]}")
+    return DataBundle(px=px, px_tr=px_tr, px_te=px_te,
+                      feats_tr=feats_tr, feats_te=feats_te, scaler=scaler)
 
 
 def _feats_for(feats: dict, algo: str) -> dict:
@@ -59,8 +70,9 @@ def _feats_for(feats: dict, algo: str) -> dict:
 
 
 # -------------------- DQN training --------------------
-def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium", adaptive: bool = True):
-    env = build_env("DQN", px_tr, feats_tr, horizon=horizon, adaptive=adaptive,
+def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
+              horizon: str = "medium", adaptive: bool = True):
+    env = build_env("DQN", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
                     max_steps=252, random_start=EnvConfig.random_start, seed=SEED)
     agent = build_agent("DQN", env.state_dim, env.n_discrete, seed=SEED)
     curve = []
@@ -73,9 +85,10 @@ def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium
 
 
 # -------------------- PPO training --------------------
-def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = TrainConfig.ppo_rollout_len,
+def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
+              rollout_len: int = TrainConfig.ppo_rollout_len,
               horizon: str = "medium", adaptive: bool = True):
-    env = build_env("PPO", px_tr, feats_tr, horizon=horizon, adaptive=adaptive,
+    env = build_env("PPO", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
                     max_steps=10_000, random_start=EnvConfig.random_start, seed=SEED)
     agent = build_agent("PPO", env.state_dim, env.action_dim, seed=SEED)
     curve = []
@@ -88,9 +101,10 @@ def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = Train
 
 
 # -------------------- SAC training --------------------
-def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode: int = TrainConfig.sac_episode_len,
+def train_sac(bundle: DataBundle, n_episodes: int = TrainConfig.sac_episodes,
+              max_steps_per_episode: int = TrainConfig.sac_episode_len,
               horizon: str = "medium", adaptive: bool = True):
-    env = build_env("SAC", px_tr, feats_tr, horizon=horizon, adaptive=adaptive,
+    env = build_env("SAC", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
                     max_steps=max_steps_per_episode,
                     random_start=EnvConfig.random_start, seed=SEED)
     agent = build_agent("SAC", env.state_dim, env.action_dim, seed=SEED)
@@ -102,8 +116,8 @@ def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode:
 
 
 # -------------------- Evaluation --------------------
-def evaluate(agent, algo: str, horizon: str = "medium", adaptive: bool = True):
-    env = build_env(algo, px_te, feats_te, horizon=horizon, adaptive=adaptive,
+def evaluate(bundle: DataBundle, agent, algo: str, horizon: str = "medium", adaptive: bool = True):
+    env = build_env(algo, bundle.px_te, bundle.feats_te, horizon=horizon, adaptive=adaptive,
                     max_steps=10_000)
     return rollout_evaluate(agent, env)
 
@@ -113,33 +127,33 @@ def run():
     """Tam egitim + backtest akisi: seed -> veri -> 3 ajan -> eval -> CSV.
     main.py bunu DOGRUDAN cagirir (runpy yerine). Modul import'u yan etkisizdir (M1)."""
     np.random.seed(SEED)
-    prepare_data()
+    bundle = prepare_data()
     t0 = time.time()
     print("=" * 60)
-    dqn_agent, dqn_curve = train_dqn()
+    dqn_agent, dqn_curve = train_dqn(bundle)
     print("DQN total time:", round(time.time() - t0, 1), "s")
 
     t1 = time.time()
-    ppo_agent, ppo_curve = train_ppo()
+    ppo_agent, ppo_curve = train_ppo(bundle)
     print("PPO total time:", round(time.time() - t1, 1), "s")
 
     t2 = time.time()
-    sac_agent, sac_curve = train_sac()
+    sac_agent, sac_curve = train_sac(bundle)
     print("SAC total time:", round(time.time() - t2, 1), "s")
 
     print("=" * 60)
     results = {}
     for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent), ("SAC", sac_agent)]:
-        bt = evaluate(agent, name)
+        bt = evaluate(bundle, agent, name)
         m = summary(bt["nav"], bt["rets"], bt["weights"])
         results[name] = dict(backtest=bt, metrics=m)
         print(f"[TEST] {name:<3}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
               f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
 
     print("-" * 60)
-    bh = buy_and_hold_index(px_te)
-    ew = equal_weight(px_te)
-    mv = mean_variance(px_te, lookback=120, rebalance=20)
+    bh = buy_and_hold_index(bundle.px_te)
+    ew = equal_weight(bundle.px_te)
+    mv = mean_variance(bundle.px_te, lookback=120, rebalance=20)
     for name, d in [("BuyHold", bh), ("EqualWeight", ew), ("MeanVar", mv)]:
         m = summary(d["nav"], d["rets"], d.get("weights"))
         results[name] = dict(backtest=d, metrics=m)
@@ -148,7 +162,7 @@ def run():
 
     min_len = min(len(v["backtest"]["nav"]) for v in results.values())
     dfn = pd.DataFrame({k: v["backtest"]["nav"][-min_len:] for k, v in results.items()})
-    dfn.index = px_te.index[-min_len:]
+    dfn.index = bundle.px_te.index[-min_len:]
     dfn.to_csv(RES / "navs_aligned.csv")
 
     met_df = pd.DataFrame({k: v["metrics"] for k, v in results.items()}).T
@@ -161,7 +175,7 @@ def run():
 
     for name in ["DQN", "PPO", "SAC"]:
         W = results[name]["backtest"]["weights"]
-        cols = list(px_te.columns) + ["CASH"]
+        cols = list(bundle.px_te.columns) + ["CASH"]
         pd.DataFrame(W, columns=cols).to_csv(RES / f"weights_{name}.csv", index=False)
 
     print("=" * 60)

@@ -13,7 +13,7 @@ import pytest
 SAFE_MODULES = [
     "config",
     "data",
-    "env", "env.portfolio_env",
+    "env", "env.portfolio_env", "env.reward",
     "agents", "agents.base", "agents.common",
     "agents.dqn", "agents.ppo", "agents.sac",
     "utils", "utils.features", "utils.metrics",

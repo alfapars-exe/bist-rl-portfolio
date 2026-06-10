@@ -120,3 +120,46 @@ def test_differential_sharpe_first_zero_finite_clipped():
     vals = [ds.update(r) for r in (0.02, -0.01, 0.03, 0.0, 0.015, -0.02)]
     assert all(np.isfinite(v) for v in vals)
     assert all(abs(v) <= 5.0 + 1e-9 for v in vals)      # clip uygulanir
+
+
+def test_discrete_env_rejects_out_of_range_action():
+    """P7 (Copilot PR #2): aralik-disi action_idx artik sessiz near-uniform
+    portfoy yerine ValueError firlatir."""
+    import pytest
+    prices, feats = _toy_market(seed=3)
+    env = DiscretePortfolioEnv(prices, feats, horizon="short", max_steps=20)
+    env.reset()
+    for bad in (-1, env.n_discrete, 99):
+        with pytest.raises(ValueError):
+            env.step(bad)
+    env.step(0)  # gecerli indeks calismaya devam eder
+
+
+def test_bankruptcy_path_terminates_and_penalizes():
+    """P7 guvenlik agi: iflas dali (onceden hic test edilmiyordu — kesif bulgusu).
+    Yuksek esikle ilk adimda iflas tetiklenir: bankrupt=True, ceza uygulanir,
+    done=True, NAV esik alti."""
+    prices, feats = _toy_market(seed=4)
+    env = PortfolioEnv(prices, feats, horizon="short", max_steps=40,
+                       bankruptcy_nav=0.999, bankruptcy_penalty=7.0)
+    env.reset()
+    a = np.full(env.action_dim, 0.1, dtype=np.float32)
+    done = trunc = False
+    bankrupted = False
+    for _ in range(40):
+        _, r, done, trunc, info = env.step(a)
+        rt = info["reward_terms"]
+        if rt["bankrupt"]:
+            bankrupted = True
+            assert rt["bankruptcy_penalty"] == 7.0
+            assert env.nav < 0.999
+            # ceza toplam odule eklendi (negatif yonde)
+            recomputed = (rt["log_return"] - rt["tx_cost"]
+                          - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
+                          + rt["dsr_term"])
+            assert abs(rt["total"] - recomputed) < 1e-9
+            assert done
+            break
+        if done or trunc:
+            break
+    assert bankrupted, "iflas dali tetiklenmedi (esik 0.999 ile beklenirdi)"

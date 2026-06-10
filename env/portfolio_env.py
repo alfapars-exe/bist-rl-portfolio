@@ -17,11 +17,17 @@ Sonlandırma koşulları:
 """
 from __future__ import annotations
 
-from typing import Dict, Literal, Tuple
+from typing import Dict, Literal
 import numpy as np
 import pandas as pd
 
 from config import HORIZON_PRESETS, RewardConfig
+# P7 (SRP): odul siniflari env/reward.py'ye tasindi; buradan re-export edilir
+# (test_env ve dis kullanicilar `from env.portfolio_env import DifferentialSharpe`
+# yapmaya devam edebilir).
+from env.reward import (  # noqa: F401
+    AdaptiveRewardShaper, DifferentialSharpe, RewardEngine, RewardOutcome,
+)
 
 
 # ---------------------------------------------------------------------
@@ -51,91 +57,6 @@ def softmax(x: np.ndarray, temp: float = 1.0) -> np.ndarray:
     z = z - z.max()
     e = np.exp(z)
     return e / e.sum()
-
-
-# ---------------------------------------------------------------------
-# Adaptif Ödül Şekillendirici
-# ---------------------------------------------------------------------
-class AdaptiveRewardShaper:
-    """Rolling realized vol + rolling turnover EWMA'larına göre (η, λ, τ) ölçekler.
-
-    - turnover_ewma büyürse → η_t büyür (fazla işlem yapan ajana artan ceza).
-    - vol_ewma büyürse       → λ_t büyür & τ_t daralır (volatil rejimde sert DD cezası).
-
-    Toggle OFF ise `update_and_shape` base değerleri döndürür (ölçekleme yok).
-    """
-
-    def __init__(self, eta_base: float, lambda_base: float, tau_base: float,
-                 vol_target: float = 0.02, turnover_target: float = 0.05,
-                 ema_alpha: float = 0.05, enabled: bool = True):
-        self.eta_base = float(eta_base)
-        self.lambda_base = float(lambda_base)
-        self.tau_base = float(tau_base)
-        self.vol_target = float(vol_target)
-        self.turnover_target = float(turnover_target)
-        self.alpha = float(ema_alpha)
-        self.enabled = bool(enabled)
-        self.vol_ewma = float(vol_target)
-        self.turnover_ewma = float(turnover_target)
-
-    def reset(self):
-        self.vol_ewma = self.vol_target
-        self.turnover_ewma = self.turnover_target
-
-    def update_and_shape(self, port_r: float, delta_w_l1: float) -> Tuple[float, float, float, float, float]:
-        a = self.alpha
-        self.vol_ewma      = (1 - a) * self.vol_ewma      + a * abs(float(port_r))
-        self.turnover_ewma = (1 - a) * self.turnover_ewma + a * float(delta_w_l1)
-
-        if not self.enabled:
-            return (self.eta_base, self.lambda_base, self.tau_base,
-                    self.vol_ewma, self.turnover_ewma)
-
-        vol_ratio      = self.vol_ewma / max(self.vol_target, 1e-9)
-        turnover_ratio = self.turnover_ewma / max(self.turnover_target, 1e-9)
-
-        eta_t    = self.eta_base    * max(1.0, turnover_ratio)
-        lambda_t = self.lambda_base * (1.0 + max(0.0, vol_ratio - 1.0))
-        tau_t    = self.tau_base    * max(0.7, 1.0 / max(vol_ratio, 1e-9))
-        return eta_t, lambda_t, tau_t, self.vol_ewma, self.turnover_ewma
-
-
-# ---------------------------------------------------------------------
-# Diferansiyel Sharpe (Moody & Saffell) — çevrim-içi risk-ayarlı ödül terimi
-# ---------------------------------------------------------------------
-class DifferentialSharpe:
-    """Her adımda Sharpe oranındaki marjinal değişimi (DSR) döndürür.
-
-    EWMA tahminleri A (ortalama getiri), B (ortalama kare getiri) ile:
-      ΔA = R − A,  ΔB = R² − B
-      DSR = (B·ΔA − ½·A·ΔB) / (B − A²)^{3/2}
-    Sonra A,B η ile güncellenir. Sabit-pencere Sharpe'ın türevlenebilir, adım-bazlı
-    (online) hâli — RL-in-finance'te risk-ayarlı ödül için standart.
-    """
-
-    def __init__(self, eta: float = 0.01, clip: float = 5.0):
-        self.eta = float(eta)
-        self.clip = float(clip)
-        self.reset()
-
-    def reset(self):
-        self.A = 0.0
-        self.B = 0.0
-        self.initialized = False
-
-    def update(self, r: float) -> float:
-        r = float(r)
-        if not self.initialized:
-            self.A, self.B, self.initialized = r, r * r, True
-            return 0.0
-        dA = r - self.A
-        dB = r * r - self.B
-        denom = self.B - self.A * self.A
-        dsr = 0.0 if denom <= 1e-12 else (self.B * dA - 0.5 * self.A * dB) / (denom ** 1.5)
-        dsr = float(np.clip(dsr, -self.clip, self.clip))
-        self.A += self.eta * dA
-        self.B += self.eta * dB
-        return dsr
 
 
 # ---------------------------------------------------------------------
@@ -178,18 +99,22 @@ class PortfolioEnv:
         lambda_base = preset["lam"] if lambda_base is None else float(lambda_base)
         tau_base    = preset["tau"] if tau_base    is None else float(tau_base)
 
-        self.shaper = AdaptiveRewardShaper(
+        # P7 (SRP): odul hesabi RewardEngine'de — shaper + DSR + iflas parametreleri
+        # tek motorda toplanir; step() yalniz piyasa/portfoy mekanigini yurutur.
+        shaper = AdaptiveRewardShaper(
             eta_base=eta_base, lambda_base=lambda_base, tau_base=tau_base,
             vol_target=vol_target, turnover_target=turnover_target,
             ema_alpha=ema_alpha, enabled=adaptive,
         )
-        # v2: çevrim-içi risk-ayarlı ödül (Diferansiyel Sharpe)
-        self.w_dsr = float(w_dsr)
-        self.dsharpe = DifferentialSharpe(eta=dsr_eta)
-        # Ayarlanabilir iflas parametreleri — None ise modül-düzeyi default'lar
-        self.bankruptcy_nav = float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV
-        self.bankruptcy_penalty = (float(bankruptcy_penalty)
-                                   if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY)
+        self.reward = RewardEngine(
+            shaper=shaper,
+            dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
+            w_dsr=float(w_dsr),
+            # Ayarlanabilir iflas parametreleri — None ise modul-duzeyi default'lar
+            bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
+            bankruptcy_penalty=(float(bankruptcy_penalty)
+                                if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
+        )
 
         self.N_assets = prices.shape[1]
         self.cash_asset = cash_asset
@@ -209,9 +134,14 @@ class PortfolioEnv:
     def _reset_state(self):
         lo = max(self.window, 21)
         if self.random_start:
-            # episode'un max_steps adim + bir sonraki gun erisimi icin yer birak
+            # episode'un max_steps adim + bir sonraki gun erisimi icin yer birak.
+            # DIKKAT: rng.integers yalniz hi > lo iken cagrilir (RNG tuketimi /
+            # golden-duyarli); degenerate pencerede deterministik lo'ya duser.
             hi = self.T - self.max_steps - 1
-            self.t = int(self.rng.integers(lo, hi)) if hi > lo else lo
+            if hi > lo:
+                self.t = int(self.rng.integers(lo, hi))
+            else:
+                self.t = lo
         else:
             self.t = lo
         self.step_count = 0
@@ -223,8 +153,7 @@ class PortfolioEnv:
         self.weight_history = [self.w.copy()]
         self.ret_history = []
         self.reward_terms_history = []
-        self.shaper.reset()
-        self.dsharpe.reset()
+        self.reward.reset()
 
     def reset(self, seed: int | None = None):
         if seed is not None:
@@ -256,56 +185,31 @@ class PortfolioEnv:
         return self.w.copy()
 
     def step(self, action):
+        # Piyasa/portfoy mekanigi burada; odul aritmetigi RewardEngine'de (P7, SRP).
         w_new = self._apply_action(action)
         delta_w_l1 = float(np.abs(w_new - self.w).sum())
         r_vec = self._risky_returns()
         gross_port_r = float((w_new * r_vec).sum())
 
-        eta_t, lambda_t, tau_t, vol_ewma, to_ewma = \
-            self.shaper.update_and_shape(gross_port_r, delta_w_l1)
-
-        tx_cost = eta_t * delta_w_l1
-        port_r_net = gross_port_r - tx_cost
-        self.nav *= (1.0 + port_r_net)
-        # Matematiksel olarak nav <= 0 olmamalı (çarpım süreci), ama extreme tx/return
-        # kombinasyonunda ölçülebilir şekilde sıfıra yakın ya da negatif olabilir.
-        # İflas eşiğinin altına düşerse clamp et ve episodu sonlandırıp ceza uygula.
-        self.nav = max(self.nav, 0.0)
-        bankrupt = bool(self.nav < self.bankruptcy_nav)
-        bankruptcy_penalty = self.bankruptcy_penalty if bankrupt else 0.0
-
-        self.peak = max(self.peak, self.nav)
-        dd = (self.peak - self.nav) / max(self.peak, 1e-9)
-        log_r = float(np.log(max(1.0 + gross_port_r, 1e-6)))
-        dd_penalty = lambda_t * max(0.0, dd - tau_t)
-        dsr = self.dsharpe.update(port_r_net)
-        dsr_term = self.w_dsr * dsr
-        total = log_r - tx_cost - dd_penalty - bankruptcy_penalty + dsr_term
+        outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
+                                      nav=self.nav, peak=self.peak)
+        self.nav, self.peak = outcome.nav, outcome.peak
+        reward_terms = outcome.terms
 
         self.w = w_new
         self.t += 1
         self.step_count += 1
         self.nav_history.append(self.nav)
         self.weight_history.append(self.w.copy())
-        self.ret_history.append(port_r_net)
-
-        reward_terms = dict(
-            log_return=log_r, tx_cost=tx_cost,
-            drawdown_penalty=dd_penalty, total=total,
-            dsr=dsr, dsr_term=dsr_term,
-            eta_t=eta_t, lambda_t=lambda_t, tau_t=tau_t,
-            vol_ewma=vol_ewma, turnover_ewma=to_ewma,
-            dd=dd, gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-            bankruptcy_penalty=bankruptcy_penalty, bankrupt=bankrupt,
-        )
+        self.ret_history.append(outcome.port_r_net)
         self.reward_terms_history.append(reward_terms)
 
         # İflas veya veri sonu → done; 252 adım tavanı → trunc
-        done = (self.t >= (self.T - 1)) or bankrupt
+        done = (self.t >= (self.T - 1)) or reward_terms["bankrupt"]
         trunc = (self.step_count >= self.max_steps)
-        info = dict(nav=self.nav, dd=dd, port_r=port_r_net, reward_terms=reward_terms,
-                    prices_t=self.prices[self.t].copy())
-        return self._obs(), float(total), bool(done), bool(trunc), info
+        info = dict(nav=self.nav, dd=reward_terms["dd"], port_r=outcome.port_r_net,
+                    reward_terms=reward_terms, prices_t=self.prices[self.t].copy())
+        return self._obs(), float(outcome.total), bool(done), bool(trunc), info
 
 
 # ---------------------------------------------------------------------
@@ -351,6 +255,12 @@ class DiscretePortfolioEnv(PortfolioEnv):
         # Rebalans günü değilse üst sınıfın _apply_action'ı aksiyonu zaten
         # yok sayar (w_{t-1} korunur); yine de boyutu doğru aksiyon geçmeliyiz.
         a_idx = int(action_idx)
+        # P7 + Copilot PR #2: aralik-disi indeks onceden sessizce near-uniform
+        # portfoye donusuyordu (tum logitler -1e6). Acik hata ver — DQN her zaman
+        # gecerli indeks urettigi icin golden etkilenmez.
+        if not (0 <= a_idx < self.n_discrete):
+            raise ValueError(
+                f"action_idx={a_idx} aralik disi; [0, {self.n_discrete}) bekleniyor")
         if self._should_rebalance():
             logits = self._discrete_to_logits(a_idx)
         else:

@@ -21,7 +21,7 @@ from typing import Dict, Literal
 import numpy as np
 import pandas as pd
 
-from config import HORIZON_PRESETS, RewardConfig
+from config import EnvConfig, HORIZON_PRESETS, RewardConfig
 # P7 (SRP): odul siniflari env/reward.py'ye tasindi; buradan re-export edilir
 # (test_env ve dis kullanicilar `from env.portfolio_env import DifferentialSharpe`
 # yapmaya devam edebilir).
@@ -44,12 +44,14 @@ ACTION_NAMES = [
 
 # HORIZON_PRESETS config.py'ye tasindi (Faz 2, H3) — dosya basinda import edildi.
 
-MAX_EPISODE_STEPS = 252
+# Tek dogruluk kaynagi config.EnvConfig (kesif bulgusu: degerler burada kopyalanmisti
+# ve EnvConfig degisikligi sessizce yok sayiliyordu). Degerler birebir ayni.
+MAX_EPISODE_STEPS = EnvConfig.max_episode_steps      # 252 (1 is yili)
 # NAV bu eşiğin altına düşerse episod iflas olarak sonlandırılır.
 # 0.01 = başlangıç sermayesinin %1'ine inmek (pratikte "para bitti").
-BANKRUPTCY_NAV    = 0.01
+BANKRUPTCY_NAV    = EnvConfig.bankruptcy_nav
 # İflas gerçekleştiğinde ajan'a uygulanan ek ödül cezası (log-ölçeğinde çok büyük).
-BANKRUPTCY_PENALTY = 10.0
+BANKRUPTCY_PENALTY = EnvConfig.bankruptcy_penalty
 
 
 def softmax(x: np.ndarray, temp: float = 1.0) -> np.ndarray:
@@ -66,14 +68,15 @@ class PortfolioEnv:
     """Sürekli aksiyon portföy ortamı — softmax ile N+1 simplex ağırlıkları."""
 
     def __init__(self, prices: pd.DataFrame, features: Dict[str, pd.DataFrame],
-                 window: int = 20, cash_asset: bool = True,
+                 window: int = EnvConfig.window, cash_asset: bool = True,
                  horizon: Literal["short", "medium", "long"] = "medium",
                  adaptive: bool = True,
                  eta_base: float | None = None,
                  lambda_base: float | None = None,
                  tau_base: float | None = None,
-                 vol_target: float = 0.02, turnover_target: float = 0.05,
-                 ema_alpha: float = 0.05,
+                 vol_target: float = EnvConfig.vol_target,
+                 turnover_target: float = EnvConfig.turnover_target,
+                 ema_alpha: float = EnvConfig.ema_alpha,
                  max_steps: int = MAX_EPISODE_STEPS,
                  bankruptcy_nav: float | None = None,
                  bankruptcy_penalty: float | None = None,

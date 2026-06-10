@@ -31,11 +31,14 @@ dev = ["pytest>=7.0", "pytest-cov>=4.0"]
 py-modules = ["config", "data", "train", "main", "app", "plots"]
 
 [tool.setuptools.packages.find]
-include = ["agents*", "env*", "utils*", "core*", "forecast*"]
+include = ["agents*", "env*", "utils*", "core*", "forecast*", "ui*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "slow: uzun suren UI/entegrasyon testleri (hizli yerel dongu: pytest -m 'not slow')",
+]
 
 # ── Coverage (pytest-cov) ────────────────────────────────────────
 # CI: pytest --cov=. --cov-report=xml:coverage.xml  → SonarCloud'a Cobertura XML.

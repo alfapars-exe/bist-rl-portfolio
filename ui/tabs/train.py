@@ -17,6 +17,12 @@ from utils.portfolio_tl import (
     build_portfolio_table, compute_tl_series, step_rows_for_training,
 )
 
+# Grafik/tablo serilestirme her N iterde bir (performans — kesif bulgusu:
+# onceki surum her iterde 6 plotly + 2 dataframe serialize ediyordu, bu canli
+# egitimde %10-40 ek yuk demekti). Metrikler/durum/stop butonu her iter guncel
+# kalir; egitim bitiminde son durum HER ZAMAN render edilir.
+RENDER_EVERY = 5
+
 
 def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     st.header(f"🎓 Eğitim — {algo} · {horizon.upper()} · "
@@ -93,39 +99,21 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     stopped_early = False
     initial_capital = float(st.session_state.initial_capital)
 
+    last_rec = None
     for rec in gen:
         iter_start_elapsed = time.time() - t0
         trained_agent = rec["agent"]
         env = rec["env"]
+        last_rec = rec
         curve.append({k: v for k, v in rec.items() if k not in ("agent", "env", "actions")})
         # Her iter sonunda session'a yaz → kullanıcı durdurursa veya refresh etse bile son hali kalır
         st.session_state.trained_agents[key] = (trained_agent, list(curve))
-        df = pd.DataFrame(curve)
 
-        fig_r = px.line(df, x="iter", y="reward",
-                        title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
-                        markers=True)
-        fig_r.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_reward.plotly_chart(fig_r, use_container_width=True)
-
-        fig_g = px.line(df, x="iter", y="gain",
-                        title="Kazanç (nihai NAV − 1.0)",
-                        markers=True)
-        fig_g.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_gain.plotly_chart(fig_g, use_container_width=True)
-
-        fig_s = px.bar(df, x="iter", y="success",
-                       title="Başarı (EW benchmark'a göre 0/1)")
-        fig_s.update_layout(height=260, margin=dict(t=40, b=20),
-                            yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
-        ph_success.plotly_chart(fig_s, use_container_width=True)
-
-        if "loss" in df.columns:
-            fig_l = px.line(df, x="iter", y="loss",
-                            title="Ortalama loss (düşüş beklenir)",
-                            markers=True)
-            fig_l.update_layout(height=260, margin=dict(t=40, b=20))
-            ph_loss.plotly_chart(fig_l, use_container_width=True)
+        # Agir serilestirme (4 egri + TL paneli) yalniz her RENDER_EVERY iterde
+        render_now = (len(curve) == 1) or (len(curve) % RENDER_EVERY == 0)
+        if render_now:
+            _render_live_curves(pd.DataFrame(curve),
+                                ph_reward, ph_gain, ph_success, ph_loss)
 
         # --- Throughput metrikleri ---
         iter_end_elapsed = time.time() - t0
@@ -140,14 +128,15 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         ph_elapsed.metric("Toplam elapsed", f"{mm:02d}:{ss:02d}")
 
         # --- Canlı TL paneli (son episod için env.nav_history / weight_history kullan) ---
-        _render_train_tl_panel(
-            env=env, algo=algo, rec=rec, initial_capital=initial_capital,
-            ph_tl_start=ph_tl_start, ph_tl_end=ph_tl_end, ph_tl_net=ph_tl_net,
-            ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
-            ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
-            ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-            ph_bankrupt=ph_bankrupt,
-        )
+        if render_now:
+            _render_train_tl_panel(
+                env=env, algo=algo, rec=rec, initial_capital=initial_capital,
+                ph_tl_start=ph_tl_start, ph_tl_end=ph_tl_end, ph_tl_net=ph_tl_net,
+                ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
+                ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
+                ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
+                ph_bankrupt=ph_bankrupt,
+            )
 
         status.info(f"Iter {rec['iter']+1} · NAV={rec['nav']:.3f} · "
                     f"elapsed {iter_end_elapsed:.1f}s — "
@@ -167,12 +156,52 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     st.session_state.trained_agents[key] = (trained_agent, curve)
     elapsed = time.time() - t0
     stop_slot.empty()
+    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir)
+    if curve:
+        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss)
+    if last_rec is not None:
+        _render_train_tl_panel(
+            env=last_rec["env"], algo=algo, rec=last_rec, initial_capital=initial_capital,
+            ph_tl_start=ph_tl_start, ph_tl_end=ph_tl_end, ph_tl_net=ph_tl_net,
+            ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
+            ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
+            ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
+            ph_bankrupt=ph_bankrupt,
+        )
     if stopped_early:
         status.warning(f"{algo} eğitimi {len(curve)}. iter sonunda durduruldu "
                        f"({elapsed:.1f}s) — son ajan session'a kaydedildi.")
     else:
         status.success(f"{algo} eğitildi ({len(curve)} iter, {elapsed:.1f}s) "
                        f"ve session'a kaydedildi. Tab 3'te test edebilirsiniz.")
+
+
+def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
+    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri)."""
+    fig_r = px.line(df, x="iter", y="reward",
+                    title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
+                    markers=True)
+    fig_r.update_layout(height=260, margin=dict(t=40, b=20))
+    ph_reward.plotly_chart(fig_r, use_container_width=True)
+
+    fig_g = px.line(df, x="iter", y="gain",
+                    title="Kazanç (nihai NAV − 1.0)",
+                    markers=True)
+    fig_g.update_layout(height=260, margin=dict(t=40, b=20))
+    ph_gain.plotly_chart(fig_g, use_container_width=True)
+
+    fig_s = px.bar(df, x="iter", y="success",
+                   title="Başarı (EW benchmark'a göre 0/1)")
+    fig_s.update_layout(height=260, margin=dict(t=40, b=20),
+                        yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
+    ph_success.plotly_chart(fig_s, use_container_width=True)
+
+    if "loss" in df.columns:
+        fig_l = px.line(df, x="iter", y="loss",
+                        title="Ortalama loss (düşüş beklenir)",
+                        markers=True)
+        fig_l.update_layout(height=260, margin=dict(t=40, b=20))
+        ph_loss.plotly_chart(fig_l, use_container_width=True)
 
 
 def _render_train_tl_panel(env, algo, rec, initial_capital,

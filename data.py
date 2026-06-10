@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -52,6 +54,7 @@ def download_bist(tickers=BIST28, start=START, end=END,
         except Exception as exc:
             print(f"[WARN] parquet okunamadı ({exc!r}); yeniden indiriliyor")
 
+    synthetic = False
     try:
         import yfinance as yf
         data = yf.download(
@@ -68,8 +71,23 @@ def download_bist(tickers=BIST28, start=START, end=END,
             raise RuntimeError("Too few tickers returned")
         px = px[[c for c in tickers if c in px.columns]]
     except Exception as exc:
+        # Sessiz yutma yok: stderr'e gorunur uyari (CI loglari + kullanici).
+        warnings.warn(
+            f"yfinance basarisiz ({exc!r}); SENTETIK GBM verisi uretiliyor — "
+            "bu GERCEK BIST fiyati DEGIL, sonuclar yalnizca demo amaclidir!",
+            RuntimeWarning, stacklevel=2,
+        )
         print(f"[WARN] yfinance başarısız ({exc!r}); sentetik BIST verisi üretiliyor")
         px = _synthetic_bist(tickers, start, end)
+        synthetic = True
+        px.attrs["synthetic"] = True   # programatik kaynak izi (provenance)
+
+    if synthetic:
+        # KRITIK: sentetik veri CACHE'E YAZILMAZ. Onceki surum yaziyordu;
+        # bir kez ag hatasi -> sonraki TUM calistirmalar cache'ten sessizce
+        # sahte veri okuyordu (cache zehirlenmesi).
+        print("[WARN] sentetik veri cache'e yazılmadı; ağ gelince gerçek veri indirilecek")
+        return px
 
     try:
         px.to_parquet(PARQUET_PATH)

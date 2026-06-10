@@ -11,6 +11,7 @@ import pytest
 pytest.importorskip("streamlit.testing.v1")
 
 
+@pytest.mark.slow
 def test_app_initial_render_no_exception():
     from streamlit.testing.v1 import AppTest
     at = AppTest.from_file("app.py", default_timeout=90).run()

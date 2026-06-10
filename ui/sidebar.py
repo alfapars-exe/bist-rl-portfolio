@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from config import SEED
+from config import SEED, EnvConfig
 from env.portfolio_env import HORIZON_PRESETS
 from ui.services import _load_data
 
@@ -47,14 +47,14 @@ def _sidebar_reward_editor(preset: dict):
         st.markdown("**İflas (simülasyonu durdurma)**")
         cfg["bankruptcy_nav"] = st.number_input(
             "İflas NAV eşiği",
-            value=float(cfg.get("bankruptcy_nav", 0.01)),
+            value=float(cfg.get("bankruptcy_nav", EnvConfig.bankruptcy_nav)),
             min_value=0.0, max_value=0.9, step=0.01, format="%.2f",
             help="NAV bu eşiğin altına düşerse episod iflas olarak sonlandırılır. "
                  "Örn. 0.01 = başlangıç sermayesinin %1'ine inmek.",
         )
         cfg["bankruptcy_penalty"] = st.number_input(
             "İflas ek ceza değeri",
-            value=float(cfg.get("bankruptcy_penalty", 10.0)),
+            value=float(cfg.get("bankruptcy_penalty", EnvConfig.bankruptcy_penalty)),
             min_value=0.0, max_value=1000.0, step=1.0, format="%.1f",
             help="İflas anında toplam ödüle eklenen negatif terim. Log-ölçeğinde büyük değer "
                  "(normal adım ödülü ~±0.01). Ajan iflasa gitmemeyi öğrenir.",
@@ -63,19 +63,19 @@ def _sidebar_reward_editor(preset: dict):
         st.markdown("**Adaptif şekillendirici hedefleri**")
         cfg["vol_target"] = st.number_input(
             "vol_target (hedef realize vol)",
-            value=float(cfg.get("vol_target", 0.02)),
+            value=float(cfg.get("vol_target", EnvConfig.vol_target)),
             min_value=0.0001, max_value=0.5, step=0.001, format="%.4f",
             help="Adaptif mod açıkken λ ve τ bu hedefe göre ölçeklenir.",
         )
         cfg["turnover_target"] = st.number_input(
             "turnover_target (hedef turnover)",
-            value=float(cfg.get("turnover_target", 0.05)),
+            value=float(cfg.get("turnover_target", EnvConfig.turnover_target)),
             min_value=0.001, max_value=1.0, step=0.005, format="%.3f",
             help="Adaptif mod açıkken η bu hedefe göre ölçeklenir.",
         )
         cfg["ema_alpha"] = st.slider(
             "EMA α (adaptif hafıza)",
-            min_value=0.001, max_value=0.5, value=float(cfg.get("ema_alpha", 0.05)),
+            min_value=0.001, max_value=0.5, value=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
             step=0.005, format="%.3f",
             help="Büyük α = daha hızlı uyum, küçük α = daha stabil.",
         )

@@ -24,7 +24,7 @@ from typing import Callable, Dict
 import pandas as pd
 
 from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, PPOConfig, SACConfig
+from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig
 from core.features import select_features
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 
@@ -99,9 +99,9 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         eta_base=cfg.get("eta_base"),
         lambda_base=cfg.get("lambda_base"),
         tau_base=cfg.get("tau_base"),
-        vol_target=float(cfg.get("vol_target", 0.02)),
-        turnover_target=float(cfg.get("turnover_target", 0.05)),
-        ema_alpha=float(cfg.get("ema_alpha", 0.05)),
+        vol_target=float(cfg.get("vol_target", EnvConfig.vol_target)),
+        turnover_target=float(cfg.get("turnover_target", EnvConfig.turnover_target)),
+        ema_alpha=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
     )

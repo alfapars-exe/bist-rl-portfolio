@@ -15,27 +15,12 @@ from __future__ import annotations
 from collections import deque
 from typing import Sequence
 
-import random
-
 import numpy as np
-import torch
 import torch.nn as nn
 
-
-def set_seed(seed: int) -> None:
-    """Global RNG'leri (random, numpy, torch) seed'ler.
-
-    Onceki ajan-ici `_set_seed` ile birebir ayni. Ajan ctor'unda, aglar
-    olusturulmadan ONCE cagrilmali (agirlik init'i bu seed'e baglidir).
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-
-def get_device(device: str | None = None) -> torch.device:
-    """Verilen device ya da otomatik (cuda varsa cuda, yoksa cpu)."""
-    return torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+# SOLID P1 (DIP): set_seed/get_device notr utils/torch_utils.py'ye tasindi.
+# Eski import yollari (agents.common.set_seed vb.) calismaya devam eder.
+from utils.torch_utils import get_device, set_seed  # noqa: F401
 
 
 def mlp(sizes: Sequence[int], activation: type[nn.Module],

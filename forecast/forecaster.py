@@ -17,7 +17,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from agents.common import get_device, set_seed
+from utils.torch_utils import get_device, set_seed
 
 
 class ReturnForecaster(nn.Module):

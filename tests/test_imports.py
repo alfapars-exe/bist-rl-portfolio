@@ -17,7 +17,8 @@ SAFE_MODULES = [
     "agents", "agents.base", "agents.common",
     "agents.dqn", "agents.ppo", "agents.sac",
     "utils", "utils.features", "utils.metrics",
-    "utils.baselines", "utils.portfolio_tl",
+    "utils.baselines", "utils.portfolio_tl", "utils.torch_utils",
+    "forecast", "forecast.forecaster",
     "core", "core.trainer", "core.rollout",
     "train", "plots", "main",
 ]

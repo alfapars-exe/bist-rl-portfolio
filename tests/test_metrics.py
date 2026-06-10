@@ -4,8 +4,35 @@ Refactor sirasinda metrik formulleri sessizce degisirse bu testler yakalar.
 """
 import numpy as np
 
-from utils.metrics import (cagr, sharpe, max_drawdown, calmar, turnover,
-                           success_vs_benchmark, summary)
+from utils.metrics import (cagr, sharpe, sortino, max_drawdown, calmar,
+                           turnover, success_vs_benchmark, summary)
+
+
+def test_sortino_known_value():
+    """Kanonik downside deviation: sqrt(mean(min(r,0)^2)) TUM gozlemlerle.
+    rets=[0.02, -0.01, 0.03, -0.02] -> dd = sqrt((0.0001+0.0004)/4) = sqrt(0.000125)
+    mu = 0.005 -> sortino = sqrt(252)*0.005/0.011180..."""
+    rets = np.array([0.02, -0.01, 0.03, -0.02])
+    dd = np.sqrt((0.01**2 + 0.02**2) / 4)
+    expected = np.sqrt(252) * 0.005 / dd
+    assert abs(sortino(rets) - expected) < 1e-9
+
+
+def test_sortino_uniform_losses_not_inflated():
+    """Eski formulun hatasi: her kaybi ayni olan seri (alt-orneklem std=0)
+    oranı sisiriyordu. Kanonik formda payda > 0 kalir ve oran sonlu/negatif."""
+    rets = np.array([0.01, -0.05, 0.01, -0.05, 0.01, -0.05])
+    s = sortino(rets)
+    assert np.isfinite(s)
+    assert s < 0  # ortalama negatif -> oran negatif olmali
+
+
+def test_sortino_no_downside_is_inf_not_nan():
+    """Hic negatif getiri yokken eski surum NaN donuyordu (np.std bos dizi)."""
+    s = sortino(np.array([0.01, 0.02, 0.005]))
+    assert not np.isnan(s)
+    assert s == float("inf")
+    assert sortino(np.zeros(5)) == 0.0
 
 
 def test_max_drawdown_known():

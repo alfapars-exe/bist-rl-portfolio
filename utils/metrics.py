@@ -18,10 +18,21 @@ def sharpe(rets: np.ndarray, rf: float = 0.0) -> float:
 
 
 def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
-    downside = rets[rets < 0]
-    sd = np.std(downside) + 1e-9
-    mu = np.mean(rets) - rf / TRADING_DAYS
-    return float(np.sqrt(TRADING_DAYS) * mu / sd)
+    """Sortino orani — payda kanonik downside deviation (Sortino/Price):
+    sqrt(mean(min(r - hedef, 0)^2)), TUM gozlemler uzerinden (empyrical uyumu).
+
+    Onceki surum np.std(negatif altkume) kullaniyordu — iki hata: (1) sapma
+    negatif altkumenin KENDI ortalamasina goreydi (hedefe degil), (2) yalniz
+    negatif gun sayisina bolunuyordu. Uniform kayiplarda payda ~0 olup orani
+    sisiriyor, hic negatif getiri yokken NaN donuyordu (kesif bulgusu, HIGH).
+    """
+    target = rf / TRADING_DAYS
+    mu = np.mean(rets) - target
+    downside_dev = float(np.sqrt(np.mean(np.minimum(rets - target, 0.0) ** 2)))
+    if downside_dev < 1e-12:
+        # Hic asagi-yonlu sapma yok: pozitif ortalamada sonsuz, aksi halde 0.
+        return float("inf") if mu > 0 else 0.0
+    return float(np.sqrt(TRADING_DAYS) * mu / downside_dev)
 
 
 def max_drawdown(nav: np.ndarray) -> float:

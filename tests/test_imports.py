@@ -19,7 +19,7 @@ SAFE_MODULES = [
     "utils", "utils.features", "utils.metrics",
     "utils.baselines", "utils.portfolio_tl", "utils.torch_utils",
     "forecast", "forecast.forecaster",
-    "core", "core.trainer", "core.rollout", "core.features",
+    "core", "core.trainer", "core.rollout", "core.features", "core.factory",
     "train", "plots", "main",
 ]
 

@@ -17,9 +17,8 @@ from data import download_bist, train_test_split
 from utils.features import add_features, TrainScaler
 from utils.metrics import summary
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
-from env.portfolio_env import PortfolioEnv, DiscretePortfolioEnv
-from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, PPOConfig, SACConfig, TrainConfig, EnvConfig, ForecastConfig
+from config import SEED, TrainConfig, EnvConfig, ForecastConfig
+from core.factory import build_agent, build_env
 from core.features import select_features
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
@@ -53,17 +52,6 @@ def prepare_data():
     print(f"Train: {px_tr.shape}, Test: {px_te.shape}, tickers: {px.shape[1]}")
 
 
-def make_env(px_, feats_, discrete: bool, horizon: str = "medium",
-             adaptive: bool = True, max_steps: int = 10_000,
-             random_start: bool = False, seed: int = SEED):
-    cls = DiscretePortfolioEnv if discrete else PortfolioEnv
-    return cls(
-        px_, feats_,
-        horizon=horizon, adaptive=adaptive,
-        max_steps=max_steps, random_start=random_start, seed=seed,
-    )
-
-
 def _feats_for(feats: dict, algo: str) -> dict:
     """Shim — SOLID P2: tek dogruluk kaynagi core.features.select_features.
     (test_env bu adi cagirir; geriye-uyumluluk icin korunur.)"""
@@ -72,14 +60,9 @@ def _feats_for(feats: dict, algo: str) -> dict:
 
 # -------------------- DQN training --------------------
 def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_tr, _feats_for(feats_tr, "DQN"), discrete=True, horizon=horizon,
-                   adaptive=adaptive, max_steps=252,
-                   random_start=EnvConfig.random_start, seed=SEED)
-    agent = DQNAgent(
-        env.state_dim, env.n_discrete,
-        hidden=DQNConfig.hidden, lr=DQNConfig.lr, eps_decay=DQNConfig.eps_decay,
-        batch_size=DQNConfig.batch_size, target_update=DQNConfig.target_update, seed=SEED,
-    )
+    env = build_env("DQN", px_tr, feats_tr, horizon=horizon, adaptive=adaptive,
+                    max_steps=252, random_start=EnvConfig.random_start, seed=SEED)
+    agent = build_agent("DQN", env.state_dim, env.n_discrete, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
         curve.append(dict(episode=rec["episode"], reward=rec["reward"],
@@ -92,12 +75,9 @@ def train_dqn(n_episodes: int = TrainConfig.dqn_episodes, horizon: str = "medium
 # -------------------- PPO training --------------------
 def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = TrainConfig.ppo_rollout_len,
               horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_tr, _feats_for(feats_tr, "PPO"), discrete=False, horizon=horizon,
-                   adaptive=adaptive, max_steps=10_000,
-                   random_start=EnvConfig.random_start, seed=SEED)
-    agent = PPOAgent(env.state_dim, env.action_dim, hidden=PPOConfig.hidden,
-                     lr_p=PPOConfig.lr_p, lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
-                     n_epochs=PPOConfig.n_epochs, seed=SEED)
+    env = build_env("PPO", px_tr, feats_tr, horizon=horizon, adaptive=adaptive,
+                    max_steps=10_000, random_start=EnvConfig.random_start, seed=SEED)
+    agent = build_agent("PPO", env.state_dim, env.action_dim, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len):
         curve.append(dict(update=rec["update"], p_loss=rec["p_loss"], v_loss=rec["v_loss"],
@@ -110,12 +90,10 @@ def train_ppo(n_updates: int = TrainConfig.ppo_updates, rollout_len: int = Train
 # -------------------- SAC training --------------------
 def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode: int = TrainConfig.sac_episode_len,
               horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_tr, _feats_for(feats_tr, "SAC"), discrete=False, horizon=horizon,
-                   adaptive=adaptive, max_steps=max_steps_per_episode,
-                   random_start=EnvConfig.random_start, seed=SEED)
-    agent = SACAgent(env.state_dim, env.action_dim, hidden=SACConfig.hidden,
-                     lr_pi=SACConfig.lr_pi, lr_q=SACConfig.lr_q, alpha=SACConfig.alpha,
-                     seed=SEED, batch_size=SACConfig.batch_size)
+    env = build_env("SAC", px_tr, feats_tr, horizon=horizon, adaptive=adaptive,
+                    max_steps=max_steps_per_episode,
+                    random_start=EnvConfig.random_start, seed=SEED)
+    agent = build_agent("SAC", env.state_dim, env.action_dim, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
         curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"]))
@@ -125,8 +103,8 @@ def train_sac(n_episodes: int = TrainConfig.sac_episodes, max_steps_per_episode:
 
 # -------------------- Evaluation --------------------
 def evaluate(agent, algo: str, horizon: str = "medium", adaptive: bool = True):
-    env = make_env(px_te, _feats_for(feats_te, algo), discrete=(algo == "DQN"),
-                   horizon=horizon, adaptive=adaptive, max_steps=10_000)
+    env = build_env(algo, px_te, feats_te, horizon=horizon, adaptive=adaptive,
+                    max_steps=10_000)
     return rollout_evaluate(agent, env)
 
 

@@ -36,7 +36,7 @@ from env.portfolio_env import (
 )
 from agents import DQNAgent, PPOAgent, SACAgent
 from config import SEED, FEATURES, DQNConfig, PPOConfig, SACConfig, ForecastConfig
-from core.features import select_features
+from core.factory import build_agent, build_env
 from core.trainer import train as train_loop
 from utils.features import TrainScaler, add_features
 from utils.baselines import buy_and_hold_index, equal_weight, mean_variance
@@ -113,52 +113,20 @@ def _load_data():
 
 
 def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
-    px_df   = st.session_state.px_tr if is_train else st.session_state.px_te
-    feats   = st.session_state.feats_tr if is_train else st.session_state.feats_te
-    feats = select_features(feats, algo)   # v2: PPO forecast almaz (P2: tek kaynak core.features)
-    cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
-    cfg = st.session_state.get("reward_cfg", {}) or {}
-    return cls(
-        px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
+    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3)."""
+    px_df = st.session_state.px_tr if is_train else st.session_state.px_te
+    feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
+    return build_env(
+        algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
-        eta_base=cfg.get("eta_base"),
-        lambda_base=cfg.get("lambda_base"),
-        tau_base=cfg.get("tau_base"),
-        vol_target=float(cfg.get("vol_target", 0.02)),
-        turnover_target=float(cfg.get("turnover_target", 0.05)),
-        ema_alpha=float(cfg.get("ema_alpha", 0.05)),
-        bankruptcy_nav=cfg.get("bankruptcy_nav"),
-        bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
+        reward_overrides=st.session_state.get("reward_cfg", {}) or {},
     )
 
 
 def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
-    if algo == "DQN":
-        return DQNAgent(
-            state_dim, action_dim,
-            hidden=tuple(hp.get("hidden", DQNConfig.hidden)),
-            lr=hp.get("lr", DQNConfig.lr),
-            eps_decay=hp.get("eps_decay", DQNConfig.eps_decay),
-            batch_size=hp.get("batch_size", DQNConfig.batch_size),
-            target_update=hp.get("target_update", DQNConfig.target_update),
-            seed=SEED,
-        )
-    if algo == "PPO":
-        return PPOAgent(
-            state_dim, action_dim,
-            hidden=tuple(hp.get("hidden", PPOConfig.hidden)),
-            lr_p=hp.get("lr_p", PPOConfig.lr_p), lr_v=hp.get("lr_v", PPOConfig.lr_v),
-            clip=hp.get("clip", PPOConfig.clip), ent_coef=hp.get("ent_coef", PPOConfig.ent_coef),
-            batch_size=hp.get("batch_size", PPOConfig.batch_size), n_epochs=hp.get("n_epochs", PPOConfig.n_epochs),
-            seed=SEED,
-        )
-    return SACAgent(
-        state_dim, action_dim,
-        hidden=tuple(hp.get("hidden", SACConfig.hidden)),
-        lr_pi=hp.get("lr_pi", SACConfig.lr_pi), lr_q=hp.get("lr_q", SACConfig.lr_q),
-        alpha=hp.get("alpha", SACConfig.alpha), tau=hp.get("tau", SACConfig.tau),
-        batch_size=hp.get("batch_size", SACConfig.batch_size), seed=SEED,
-    )
+    """Shim — SOLID P3: tek dogruluk kaynagi core.factory.build_agent.
+    (test_config_wiring bu adi cagirir; geriye-uyumluluk icin korunur.)"""
+    return build_agent(algo, state_dim, action_dim, hp)
 
 
 # =====================================================================

@@ -151,7 +151,7 @@ def test_bankruptcy_path_terminates_and_penalizes():
         rt = info["reward_terms"]
         if rt["bankrupt"]:
             bankrupted = True
-            assert rt["bankruptcy_penalty"] == 7.0
+            assert abs(rt["bankruptcy_penalty"] - 7.0) < 1e-9
             assert env.nav < 0.999
             # ceza toplam odule eklendi (negatif yonde)
             recomputed = (rt["log_return"] - rt["tx_cost"]

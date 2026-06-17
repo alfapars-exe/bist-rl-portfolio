@@ -19,12 +19,13 @@
 | Problem türü | Sürekli kontrol — portföy tahsisi (continuous control / allocation) |
 | Evren | BIST 30'dan 28 hisse (KOZAA.IS, KOZAL.IS hariç) |
 | Veri aralığı | 2015-01-01 → 2024-12-31, train/test ayrımı 2022-01-01 |
-| Durum uzayı | ℝ³⁹³ (DQN/SAC: 13 öznitelik×28 + 29 ağırlık) · ℝ³⁶⁵ (PPO: 12×28 + 29) |
+| Durum uzayı | ℝ³⁹⁷ (DQN/SAC: 13 öznitelik×28 + **4 makro** + 29 ağırlık) · ℝ³⁶⁹ (PPO: 12×28 + 4 makro + 29) |
 | Eylem uzayı | Ayrık 6 şablon (DQN) **veya** sürekli ℝ²⁹ → softmax simpleks (PPO/SAC) |
-| Ödül | `log(1+w·r) − η·‖Δw‖₁ − λ·max(0,DD−τ) − iflas + w_dsr·DSR` (adaptif şekillendirme) |
+| Ödül | `log(1+w·r) − η·‖Δw‖₁ − λ·max(0,DD−τ) − iflas + w_dsr·DSR − κ·CVaR` (adaptif + **rejim-amplified**) |
+| Makro rejim (V6) | faiz (getiri eğrisi), dolar (USD/TRY), altın (gram-altın/TL) + bileşik rejim skoru |
 | Algoritmalar | DQN (ayrık), PPO (sürekli, on-policy), SAC (sürekli, off-policy) |
 | Tahmin katmanı | CNN-LSTM bir-adım getiri tahmincisi (predict-then-optimize, sadece DQN/SAC) |
-| Doğrulama | 71 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) |
+| Doğrulama | 80 pytest + golden-master regresyon (1e-6, iterasyon-başı re-baseline) + walk-forward (3 kat) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
 ---
@@ -95,7 +96,8 @@ max_π  E_π [ Σ_t γ^t ( log(1 + wₜ·r_{t+1})           ← risk-getiri (log
                        − ηₜ·‖Δwₜ‖₁                    ← işlem maliyeti
                        − λₜ·max(0, DDₜ − τₜ)          ← düşüş cezası
                        − C_iflas·𝟙[NAV<NAV_min]       ← iflas cezası
-                       + w_dsr·DSRₜ ) ]               ← çevrim-içi risk-ayarı (Diferansiyel Sharpe)
+                       + w_dsr·DSRₜ                   ← çevrim-içi risk-ayarı (Diferansiyel Sharpe)
+                       − κₜ·CVaRₜ ) ]                 ← rejim-amplified kuyruk-riski cezası (V7)
 ```
 
 Yani ajan; **log-büyümeyi ve risk-ayarlı getiriyi artırmaya**, **işlem maliyetini, düşüşü ve
@@ -122,21 +124,25 @@ Durum vektörü `sₜ`, her hisse için bir öznitelik bloğu ile mevcut portfö
 birleşimidir:
 
 ```
-sₜ = [ z-skorlu öznitelikler (F × 28) ‖ mevcut ağırlıklar (29) ]
+sₜ = [ z-skorlu teknik öznitelikler (F × 28) ‖ makro rejim (4) ‖ mevcut ağırlıklar (29) ]
 ```
 
-- **F = 13** (DQN/SAC): 12 teknik öznitelik + 1 CNN-LSTM getiri tahmini → `state_dim = 13×28 + 29 = 393`
-- **F = 12** (PPO): forecast özelliği hariç (ablation kararı) → `state_dim = 12×28 + 29 = 365`
+- **F = 13** (DQN/SAC): 12 teknik öznitelik + 1 CNN-LSTM getiri tahmini → `13×28 + 4 makro + 29 = 397`
+- **F = 12** (PPO): forecast özelliği hariç (ablation kararı) → `12×28 + 4 makro + 29 = 369`
 
 **12 teknik öznitelik** (`config.FEATURES`, hepsi yalnız geçmişe bakar, ölçek-bağımsız):
 `logret, ma5, ma20, vol20, rsi, macd_hist, bb_pctb, bb_bw, roc10, mom60, vol60, ema_dist`
+
+**4 makro rejim özniteliği (V6)** (`config.MacroConfig`, causal, train-only z-score):
+`regime` (bileşik omurga: VIX+S&P) · `slope` (**faiz**: TNX−IRX) · `usd_try_mom` (**dolar**) ·
+`gold_tl_mom` (**altın**: gram-altın/TL). Ham `regime` ayrıca V7 ödül amplifikasyonunu besler.
 
 | Soru (PDF §5.1) | Cevap |
 |---|---|
 | Ajan hangi bilgileri gözlüyor? | Teknik göstergeler (momentum/trend/volatilite/RSI/MACD/Bollinger), bir-adım getiri tahmini, mevcut ağırlıklar |
 | Markov özelliğini sağlıyor mu? | Evet — işlem maliyeti `‖wₜ−w_{t−1}‖₁`'e bağlı olduğundan **mevcut ağırlık state'e dahildir**; geçmiş, kayan-pencere göstergelerle özetlenir |
-| Eksik bilgi var mı? | Ham fiyat tarihçesi yerine özetlenmiş göstergeler kullanılır (boyut/eğitim verimliliği dengesi); rejim bilgisi adaptif shaper'ın EWMA'larıyla dolaylı temsil edilir |
-| Durum vektörü kaç boyutlu? | 393 (DQN/SAC) / 365 (PPO) |
+| Eksik bilgi var mı? | Ham fiyat tarihçesi yerine özetlenmiş göstergeler kullanılır; **V6'dan önce makro rejim eksikti** (faiz/dolar/altın) → eklendi |
+| Durum vektörü kaç boyutlu? | 397 (DQN/SAC) / 369 (PPO) — makro blok dahil |
 | Görsel girdi var mı? | Hayır — durum sayısal öznitelik vektörüdür |
 
 Tüm öznitelikler `utils.features.TrainScaler` ile **yalnız train (2015–2021) istatistikleriyle**
@@ -170,6 +176,7 @@ z-skorlanır; aynı ortalama/std test dönemine uygulanır → veri sızıntıs�
 | Düşüş cezası `λₜ·max(0, DD − τₜ)` | **−** (yüksek düşüşü cezalandırır) |
 | İflas cezası (NAV<eşik) | **−** büyük sabit (≈10) |
 | Diferansiyel Sharpe `w_dsr·DSR` | **±** (çevrim-içi risk-ayarı) |
+| CVaR kuyruk cezası `κ·CVaR` (V7) | **−** (krizde rejim ile amplify: `κ=w_cvar·(1+β·max(0,regime))^a`) |
 
 `AdaptiveRewardShaper`: `ηₜ = η·max(1, turnover_ewma/turnover_hedef)`,
 `λₜ = λ·(1 + max(0, vol_oranı−1))`, `τₜ = τ·max(0.7, 1/vol_oranı)`.
@@ -233,9 +240,13 @@ Projenin gerçek evrimi (v1→v5) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 | **V3** | + adaptif shaper hedefleri (vol/turnover EWMA) | η, λ, τ **adaptif** (rejime göre ölçeklenir) + Diferansiyel Sharpe terimi | Sabit ceza volatil rejimde ya çok sert ya çok gevşek; risk-ayarı yok | `AdaptiveRewardShaper` + çevrim-içi `DifferentialSharpe` (w_dsr·DSR) | Rejime-duyarlı ceza, risk-ayarlı ödül |
 | **V4** | + CNN-LSTM **forecast** özelliği (bir-adım getiri tahmini) → 393 boyut | — | Ajan yalnız geçmişe bakıyor; ileri-görü yok (predict-then-optimize eksik) | Train-only fit CNN-LSTM tahmini state'e eklendi. **Ablation:** DQN/SAC'a yaradı, PPO'ya zarar verdi → forecast yalnız (DQN, SAC) | DQN/SAC'ta belirgin iyileşme |
 | **V5** | (değişmez) | (değişmez) | Tek test dönemine aşırı-uyum riski; genelleme ölçülemiyor | **Walk-forward** doğrulama (3 kat, fold-yerel ölçekleme) + eğitimde **random-start** pencere | Düşük fold-arası std = stabil genelleme |
+| **V6** | + **makro rejim** bloğu (4 yalın öznitelik): `regime` omurgası + `slope` (faiz: TNX−IRX) + `usd_try_mom` (dolar) + `gold_tl_mom` (altın). 393→397 / 365→369 boyut | (değişmez) | Ajan makro rejim körüydü (krizde geç tepki); BIST'in baskın sürücüsü USD/TRY ve risk-on/off state'te yoktu | Tek mühendislik **rejim skoru** (`tanh(vix_rel+4·(−spx_dd)−0.10)`) state'e eklendi; train-only z-score (leak-safe) | Ajan **daha savunmacı** (DQN MaxDD −53%→−41%) ama makro algı *tek başına* getiriyi düşürdü (Sharpe ↓) — algıyı kullanan ödül eksikti |
+| **V7** | (V6 omurgasını tüketir) | + **rejim-amplified CVaR** kuyruk cezası: `κ·CVaR`, `κ=w_cvar·(1+β·max(0,regime))^a`; ileri-parametrik `CVaR≈vol_ewma·φ(z_α)/α`; vade-bağlı `w_cvar` | V6'da ajan rejimi *görüyordu* ama ödülde karşılığı yoktu; ortalama iyi olsa da kuyruk (kriz) davranışı zayıftı | Aynı rejim skoru kuyruk cezasını krizde **otomatik sertleştirir** (omurga 2. kez kullanıldı) | **En zayıf ajan dönüştü**: DQN Sharpe 0.36→**0.78** (2×+), Calmar 0.15→**0.67**, MaxDD daha da düştü. PPO/SAC zaten optimale yakın → küçük değişim |
 
-> PDF en az **3 iterasyon** ister; yukarıdaki tablo gerçek 5 aşamalı evrimi kapsar. Çekirdek
-> öğrenme döngüsü: *gözlemle → eksiği gerekçelendir → state/reward'ı geliştir → ölç.*
+> PDF en az **3 iterasyon** ister; yukarıdaki tablo gerçek **7 aşamalı** evrimi kapsar. Çekirdek
+> öğrenme döngüsü: *gözlemle → eksiği gerekçelendir → state/reward'ı geliştir → ölç.* **V6→V7
+> dersi (dürüst):** makro *algı* (V6) tek başına yetmedi; algıyı *kullanan ödül* (V7) eklenince
+> en zayıf ajan belirgin iyileşti — "rejim skoru = omurga" (bir kez üret, iki kez kullan).
 
 ---
 
@@ -273,6 +284,26 @@ Projenin gerçek evrimi (v1→v5) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 
 Değerler `tests/golden/metrics_baseline.csv` içinde 1e-6 toleransta kilitlidir; her refactor
 sonrası `python main.py` ile yeniden üretilip doğrulanır. (Güncel değerler için `results/metrics.csv`.)
+Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metrics_baseline.csv`.
+
+### 8.4. İterasyon karşılaştırması — V5 → V6 → V7 (test dönemi, DQN)
+
+State/reward geliştirme döngüsünün (§7) **ölçülen** etkisi. En zayıf ajan DQN, makro+CVaR
+iterasyonlarından en çok faydalanan; PPO/SAC zaten optimale yakın olduğundan az değişti.
+
+| Metrik (DQN) | V5 (teknik) | V6 (+makro algı) | V7 (+CVaR ödülü) |
+|---|---|---|---|
+| Sharpe | +0.57 | +0.36 | **+0.78** |
+| Sortino | +0.84 | +0.53 | **+1.12** |
+| MaxDD | −53% | −41% | **−34%** |
+| Calmar | +0.28 | +0.15 | **+0.67** |
+| CAGR | +14.9% | +6.3% | **+22.4%** |
+
+**Dürüst okuma:** V6 makro *algısı* tek başına ajanı daha savunmacı yaptı (MaxDD ↓) ama
+getiriyi düşürdü — algının ödülde karşılığı yoktu. V7'de aynı rejim skoru kuyruk cezasını
+krizde sertleştirince DQN hem düşüşü azalttı hem getiriyi belirgin artırdı (Sharpe 2×+). Bu,
+"rejim skoru = omurga" tezinin doğrulanmasıdır. Tek test dönemi sınırlı; gerçek hakem
+`python main.py --walkforward` (fold-arası CVaR/MaxDD stabilitesi).
 
 ---
 

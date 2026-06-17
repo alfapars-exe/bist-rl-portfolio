@@ -110,6 +110,8 @@ class PortfolioEnv:
             vol_target=vol_target, turnover_target=turnover_target,
             ema_alpha=ema_alpha, enabled=adaptive,
         )
+        # v7: CVaR kuyruk cezasi vade-bagli olceklenir (kisa->yuksek tail-bilinci).
+        cvar_factor = {"short": 1.6, "medium": 1.0, "long": 0.6}.get(horizon, 1.0)
         self.reward = RewardEngine(
             shaper=shaper,
             dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
@@ -118,6 +120,10 @@ class PortfolioEnv:
             bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
             bankruptcy_penalty=(float(bankruptcy_penalty)
                                 if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
+            w_cvar=RewardConfig.w_cvar * cvar_factor,   # v7: rejim-amplified kuyruk cezasi
+            cvar_alpha=RewardConfig.cvar_alpha,
+            regime_beta=RewardConfig.regime_beta,
+            cvar_amp=RewardConfig.cvar_amp,
         )
 
         self.N_assets = prices.shape[1]
@@ -206,8 +212,9 @@ class PortfolioEnv:
         r_vec = self._risky_returns()
         gross_port_r = float((w_new * r_vec).sum())
 
+        regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-                                      nav=self.nav, peak=self.peak)
+                                      nav=self.nav, peak=self.peak, regime=regime_t)
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 

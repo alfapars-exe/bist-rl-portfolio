@@ -128,6 +128,12 @@ class TrainConfig:
 class RewardConfig:
     w_dsr: float = 0.05      # Diferansiyel Sharpe agirligi (0 -> kapali)
     dsr_eta: float = 0.01    # DSR EWMA orani
+    # v7: rejim-amplified kuyruk-riski (CVaR) cezasi. w_cvar vade-bagli olceklenir
+    # (env: kisa->yuksek, uzun->dusuk). kappa = w_cvar*(1+regime_beta*max(0,regime))^cvar_amp.
+    w_cvar: float = 0.06        # CVaR base agirligi (0 -> kapali)
+    cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
+    regime_beta: float = 1.0    # kriz amplifikasyon gucu
+    cvar_amp: float = 1.0       # rejim amplifikasyon usteli
 
 
 # ---------------------------------------------------------------------

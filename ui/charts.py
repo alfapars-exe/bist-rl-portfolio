@@ -37,9 +37,9 @@ def _q_bar(q_values: np.ndarray, chosen: int):
 
 
 def _reward_bar(rt: dict):
-    names = ["log_return", "tx_cost", "dd_penalty", "dsr", "total"]
+    names = ["log_return", "tx_cost", "dd_penalty", "cvar", "dsr", "total"]
     vals = [rt["log_return"], -rt["tx_cost"], -rt["drawdown_penalty"],
-            rt.get("dsr_term", 0.0), rt["total"]]
+            -rt.get("cvar_penalty", 0.0), rt.get("dsr_term", 0.0), rt["total"]]
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in vals]
     fig = go.Figure(go.Bar(x=names, y=vals, marker_color=colors,
                            text=[f"{v:+.5f}" for v in vals], textposition="outside"))

@@ -1,7 +1,13 @@
-"""Backtest metrikleri — CAGR, Sharpe, Sortino, MaxDD, Calmar, Turnover + başarı metriği."""
+"""Backtest metrikleri — CAGR, Sharpe, Sortino, MaxDD, Calmar, Turnover + başarı metriği.
+
+Ayrica PDF §9.7 egitim teshisleri (moving_average + training_diagnostics): episode
+getirisi hareketli ortalamasi, basari orani, ortalama adim, ceza/iflas sayisi. Bunlar
+GOZLEMSEL'dir — egitim/odul/eval sayisal yolunu degistirmez (golden-master korunur).
+"""
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 TRADING_DAYS = 252
 
@@ -66,6 +72,44 @@ def summary(nav: np.ndarray, rets: np.ndarray, weights=None) -> dict:
         out["Turnover"] = turnover(np.asarray(weights))
     else:
         out["Turnover"] = 0.0
+    return out
+
+
+def moving_average(x, window: int = 5) -> np.ndarray:
+    """Basit hareketli ortalama (PDF §9.7 'moving average return' — ogrenme egilimi).
+    Pencere diziden buyukse pencere dizi boyuna kisilir; bos dizi bos doner."""
+    x = np.asarray(x, dtype=float)
+    if x.size == 0:
+        return x
+    w = max(1, min(int(window), x.size))
+    return np.convolve(x, np.ones(w) / w, mode="valid")
+
+
+def training_diagnostics(curve, reward_terms_history=None, ma_window: int = 5) -> dict:
+    """PDF §9.7 toplu egitim metrikleri.
+
+    curve: egitim telemetri kayitlari (dict listesi ya da DataFrame; 'reward',
+    'success', 'steps' alanlari beklenir). reward_terms_history: test backtest'inin
+    adim-adim odul terimleri (iflas/tx-cost/dusus-ceza sayimi icin).
+    Tum ciktilar gozlemseldir; egitimi etkilemez.
+    """
+    df = curve if isinstance(curve, pd.DataFrame) else pd.DataFrame(curve)
+    out: dict = {"episodes": int(len(df))}
+    if "reward" in df.columns and len(df):
+        r = df["reward"].to_numpy(dtype=float)
+        out["mean_return"] = float(np.mean(r))
+        ma = moving_average(r, ma_window)
+        out["ma_return_last"] = float(ma[-1]) if ma.size else 0.0
+    if "success" in df.columns and len(df):
+        out["success_rate"] = float(np.mean(df["success"].to_numpy(dtype=float)))
+    if "steps" in df.columns and len(df):
+        out["avg_steps"] = float(np.mean(df["steps"].to_numpy(dtype=float)))
+    if reward_terms_history:
+        out["bankrupt_count"] = int(sum(1 for rt in reward_terms_history if rt.get("bankrupt")))
+        out["drawdown_penalty_steps"] = int(
+            sum(1 for rt in reward_terms_history if float(rt.get("drawdown_penalty", 0.0)) > 0))
+        tx = [float(rt.get("tx_cost", 0.0)) for rt in reward_terms_history]
+        out["mean_tx_cost"] = float(np.mean(tx)) if tx else 0.0
     return out
 
 

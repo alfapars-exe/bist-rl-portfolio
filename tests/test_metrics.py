@@ -5,7 +5,29 @@ Refactor sirasinda metrik formulleri sessizce degisirse bu testler yakalar.
 import numpy as np
 
 from utils.metrics import (cagr, sharpe, sortino, max_drawdown, calmar,
-                           turnover, success_vs_benchmark, summary)
+                           turnover, success_vs_benchmark, summary,
+                           moving_average, training_diagnostics)
+
+
+def test_moving_average_basic_and_edge():
+    ma = moving_average([1.0, 2.0, 3.0, 4.0], window=2)
+    assert np.allclose(ma, [1.5, 2.5, 3.5])
+    assert moving_average([], window=3).size == 0          # bos dizi
+    assert np.allclose(moving_average([5.0], window=4), [5.0])  # pencere kisilir
+
+
+def test_training_diagnostics_keys_and_values():
+    curve = [{"reward": 1.0, "success": 1, "steps": 100},
+             {"reward": -1.0, "success": 0, "steps": 200}]
+    rth = [{"bankrupt": False, "drawdown_penalty": 0.0, "tx_cost": 0.001},
+           {"bankrupt": True, "drawdown_penalty": 0.5, "tx_cost": 0.003}]
+    d = training_diagnostics(curve, rth, ma_window=2)
+    assert d["episodes"] == 2
+    assert abs(d["success_rate"] - 0.5) < 1e-12
+    assert abs(d["avg_steps"] - 150.0) < 1e-12
+    assert d["bankrupt_count"] == 1
+    assert d["drawdown_penalty_steps"] == 1
+    assert abs(d["mean_tx_cost"] - 0.002) < 1e-12
 
 
 def test_sortino_known_value():

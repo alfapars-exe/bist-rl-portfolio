@@ -62,7 +62,9 @@ def load_agent(path):
     build_agent ile ayni mimaride iskelet kurulur (config default hidden=(256,128)
     egitimdekiyle ayni), sonra state_dict'ler ad'a gore yuklenir.
     """
-    ckpt = torch.load(Path(path), map_location="cpu", weights_only=False)
+    # weights_only=True (guvenli unpickler): checkpoint yalniz metadata (str/int/bool)
+    # + tensor state_dict'leri icerir; rastgele kod calistirma riski yok (SonarCloud S5042).
+    ckpt = torch.load(Path(path), map_location="cpu", weights_only=True)
     agent = build_agent(ckpt["algo"], int(ckpt["state_dim"]), int(ckpt["action_dim"]))
     for name, sd in ckpt["modules"].items():
         module = getattr(agent, name, None)

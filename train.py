@@ -21,12 +21,15 @@ from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from config import SEED, TrainConfig, EnvConfig, ForecastConfig
 from core.factory import build_agent, build_env
 from core.features import select_features
+from core.persistence import save_agent
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
 
 BASE = Path(__file__).resolve().parent
 RES  = BASE / "results"
 RES.mkdir(exist_ok=True)
+MODELS = BASE / "models"
+MODELS.mkdir(exist_ok=True)
 
 # -------------------- veri (P6: modul-global state yerine acik DataBundle) --------------------
 @dataclass
@@ -185,6 +188,11 @@ def run():
             for n in ("DQN", "PPO", "SAC")}
     pd.DataFrame(diag).T.to_csv(RES / "training_diagnostics.csv")
     print(pd.DataFrame(diag).T.round(4))
+
+    # PDF §11: egitilmis modelleri diske kaydet (sunumda yeniden egitmeden test).
+    for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent), ("SAC", sac_agent)]:
+        save_agent(agent, name, MODELS / f"{name}.pt", horizon="medium", adaptive=True)
+    print("Modeller kaydedildi:", MODELS)
 
     for name in ["DQN", "PPO", "SAC"]:
         W = results[name]["backtest"]["weights"]

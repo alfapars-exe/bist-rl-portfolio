@@ -38,19 +38,26 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         st.success(f"Bu konfigürasyon daha önce eğitildi. "
                    f"({len(st.session_state.trained_agents[key][1])} iterasyon)")
 
-    col_run, col_clear = st.columns([1, 1])
+    # G4: 'Devam Et' yalnız in-memory eğitilmiş + eğrisi olan ajan için anlamlı.
+    can_resume = already and bool(st.session_state.trained_agents[key][1])
+    col_run, col_resume, col_clear = st.columns([1, 1, 1])
     with col_run:
         run = st.button(f"{'Yeniden Eğit' if already else 'Eğit'}", type="primary")
+    resume = False
+    with col_resume:
+        if can_resume:
+            resume = st.button("▶ Devam Et",
+                               help="Durdurulan eğitime AYNI ajanla (ağırlık+optimizer+buffer) kaldığı yerden devam")
     with col_clear:
         if already and st.button("Bu konfigürasyonu unut"):
             st.session_state.trained_agents.pop(key, None)
             st.session_state.test_traces.pop(key, None)
             st.rerun()
 
-    st.caption("💡 Eğitim başladıktan sonra her iter sonunda **⏹ Eğitimi Durdur** butonu çıkar — "
-               "istediğin noktada kesebilirsin, son ajan otomatik kaydedilir.")
+    st.caption("💡 'Eğit' sıfırdan başlatır · '▶ Devam Et' durdurulan eğitimi aynı ajanla sürdürür · "
+               "eğitim sırasında **⏹ Eğitimi Durdur** ile istediğin noktada kesebilirsin.")
 
-    if not run:
+    if not (run or resume):
         if already:
             _render_training_curves(st.session_state.trained_agents[key][1], algo)
         return
@@ -90,9 +97,13 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     ph_tl_port  = st.empty()
     ph_bankrupt = st.empty()
 
-    curve = []
+    # G4: 'Devam Et' ise mevcut ajanı + curve'ü taşı; iter ofseti = önceki iter sayısı.
+    resume_agent = st.session_state.trained_agents[key][0] if resume else None
+    curve = list(st.session_state.trained_agents[key][1]) if resume else []
+    iter_offset = len(curve)
     gen = train_generator(algo, horizon, adaptive, hp,
-                          rollout_len=int(hp.get("rollout_len", 400)))
+                          rollout_len=int(hp.get("rollout_len", 400)),
+                          resume_agent=resume_agent)
     t0 = time.time()
     iter_times = []  # son N iter süresi (iter/sn için)
     trained_agent = None
@@ -105,7 +116,9 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         trained_agent = rec["agent"]
         env = rec["env"]
         last_rec = rec
-        curve.append({k: v for k, v in rec.items() if k not in ("agent", "env", "actions")})
+        d = {k: v for k, v in rec.items() if k not in ("agent", "env", "actions")}
+        d["iter"] = iter_offset + rec["iter"]      # G4: devam'da iterasyon numarası süreklilik
+        curve.append(d)
         # Her iter sonunda session'a yaz → kullanıcı durdurursa veya refresh etse bile son hali kalır
         st.session_state.trained_agents[key] = (trained_agent, list(curve))
 
@@ -121,7 +134,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         recent = iter_times[-5:]
         rate = (len(recent) / sum(recent)) if sum(recent) > 0 else 0.0
         avg = sum(iter_times) / len(iter_times)
-        ph_iter.metric("Iter", rec["iter"] + 1)
+        ph_iter.metric("Iter", iter_offset + rec["iter"] + 1)
         ph_rate.metric("Iter/sn", f"{rate:.2f}")
         ph_avg.metric("Ort. iter süresi", f"{avg:.2f}s")
         mm = int(iter_end_elapsed // 60); ss = int(iter_end_elapsed % 60)
@@ -138,7 +151,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
                 ph_bankrupt=ph_bankrupt,
             )
 
-        status.info(f"Iter {rec['iter']+1} · NAV={rec['nav']:.3f} · "
+        status.info(f"Iter {iter_offset + rec['iter'] + 1} · NAV={rec['nav']:.3f} · "
                     f"elapsed {iter_end_elapsed:.1f}s — "
                     f"istediğin yerde 'Eğitimi Durdur' butonuna basabilirsin")
 
@@ -149,7 +162,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
 
         # Döngü içi durdurma — her iter sonunda placeholder'a buton render eder.
         # Kullanıcı basarsa bir sonraki iter başlamaz, o ana kadar eğitilen ajan session'da kalmış olur.
-        if stop_slot.button("⏹ Eğitimi Durdur", key=f"stop_loop_{rec['iter']}"):
+        if stop_slot.button("⏹ Eğitimi Durdur", key=f"stop_loop_{iter_offset}_{rec['iter']}"):
             stopped_early = True
             break
 
@@ -303,6 +316,10 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
 
 
 def _render_training_curves(curve: list, algo: str):
+    if not curve:   # diskten yüklenen model — eğitim eğrisi yok
+        st.info("Bu model diskten yüklendi (eğitim eğrisi yok). "
+                "Test sekmesinde doğrudan çalıştırabilir veya '▶ Devam Et' ile eğitebilirsiniz.")
+        return
     df = pd.DataFrame(curve)
     c1, c2 = st.columns(2)
     c3, c4 = st.columns(2)

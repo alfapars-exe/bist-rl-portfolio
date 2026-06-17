@@ -5,7 +5,8 @@ import streamlit as st
 
 from config import SEED, EnvConfig
 from env.portfolio_env import HORIZON_PRESETS
-from ui.services import _load_data
+from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
+from ui.state import _agent_key
 
 
 def _sidebar_reward_editor(preset: dict):
@@ -177,6 +178,23 @@ def sidebar_controls():
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
             options=[0.005, 0.01, 0.05], value=0.01)
         hp["batch_size"] = st.sidebar.select_slider("Batch", options=[64, 128, 256], value=128)
+
+    # 💾 Model kalıcılığı (PDF §11): eğitilmiş modeli diske kaydet / diskten yükle.
+    st.sidebar.divider()
+    st.sidebar.subheader("💾 Model (kaydet / yükle)")
+    cur_key = _agent_key(algo, st.session_state.horizon, st.session_state.adaptive)
+    has_trained = (cur_key in st.session_state.trained_agents
+                   and st.session_state.trained_agents[cur_key][0] is not None)
+    if has_trained and st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
+        p = save_trained_agent(algo, st.session_state.horizon, st.session_state.adaptive)
+        st.sidebar.success(f"Kaydedildi: {p}")
+    if model_path(algo).exists():
+        if st.sidebar.button(f"📂 Kaydedilmiş {algo} modelini yükle", use_container_width=True):
+            load_saved_agent(algo)
+            st.sidebar.success(f"{algo} modeli yüklendi — Test sekmesinde çalıştırılabilir.")
+            st.rerun()
+    else:
+        st.sidebar.caption(f"Kayıtlı {algo} modeli yok (CLI ile üret: python main.py).")
 
     st.sidebar.caption(f"Seed: {SEED} (sabit)")
     return algo, st.session_state.horizon, st.session_state.adaptive, hp

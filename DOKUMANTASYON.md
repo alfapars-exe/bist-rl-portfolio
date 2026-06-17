@@ -360,7 +360,7 @@ kod/
 | PDF §7 bileşeni | Uygulamadaki karşılığı |
 |---|---|
 | **Eğitim başlatma düğmesi** | Eğitim sekmesi → "Eğit" / "Yeniden Eğit" (type=primary) |
-| **Durdurma / devam** | Her iterasyon sonunda **⏹ Eğitimi Durdur**; durdurulan ajan session'a kaydedilir, "Yeniden Eğit" ile yeni koşu başlatılır |
+| **Durdurma / devam** | Her iterasyon sonunda **⏹ Eğitimi Durdur**; durdurulan ajan session'a kaydedilir. **▶ Devam Et** aynı ajanla (ağırlık+optimizer+buffer) kaldığı yerden sürdürür; "Yeniden Eğit" sıfırdan başlatır |
 | **Test düğmesi** | Test sekmesi → "Test dönemini çalıştır (rollout + trajectory)" |
 | **Görsel ortam (ajan hareketi)** | Test sekmesi adım-adım oynatma (⏮ ◀ ▶ ▶▶ + kaydırıcı): portföy ağırlık pastası, ağırlık ısı haritası, işlem logu, adım-adım NAV/TL — ajanın "hareketi" = portföy tahsisinin zaman içindeki değişimi |
 | **Performans grafiği (return vs episode)** | Eğitim sekmesi canlı eğrileri: kümülatif ödül, kazanç, başarı (0/1), loss |
@@ -368,6 +368,35 @@ kod/
 
 Ek paneller: Q-değeri çubuğu (DQN), ödül-terim dekompozisyonu, adaptif katsayı zaman serileri
 (ηₜ/λₜ/τₜ), TL bazlı kâr/zarar ve kümülatif işlem geçmişi.
+
+**💾 Model kalıcılığı (sunum):** Sidebar'daki **💾 Eğitilmiş modeli kaydet** / **📂 Kaydedilmiş
+modeli yükle** ile eğitilmiş ajan diske (`models/{algo}.pt`) yazılır/okunur — sunumda yeniden
+eğitmeden Test çalıştırılabilir. `python main.py` üç ajanı otomatik kaydeder.
+
+### Arayüz ekran görüntüleri
+
+**1) Veri & MDP sekmesi** — evren, MDP tuple, vade preset'leri, adaptif ödül açıklaması:
+
+![Veri & MDP sekmesi](docs/screenshots/01_mdp.png)
+
+**2) Eğitim sekmesi (canlı)** — return-vs-episode eğrileri (kümülatif ödül / kazanç / başarı /
+loss), canlı throughput metrikleri ve **⏹ Eğitimi Durdur** / **▶ Devam Et** kontrolleri:
+
+![Eğitim sekmesi](docs/screenshots/02_train.png)
+
+**3) Test sekmesi (adım-adım ajan hareketi)** — ⏮◀▶▶▶ oynatma + kaydırıcı, portföy ağırlık
+pastası, durum öznitelikleri, ödül dekompozisyonu, TL bazlı P&L; ajanın "hareketi" = portföy
+tahsisinin zaman içindeki değişimi. Solda **💾 Model kaydet/yükle** paneli:
+
+![Test sekmesi — adım-adım oynatma](docs/screenshots/03_test.png)
+
+**4) Karşılaştırma sekmesi** — metrik tablosu, test dönemi NAV eğrileri, ağırlık ısı haritası,
+DQN aksiyon dağılımı:
+
+![Karşılaştırma sekmesi](docs/screenshots/04_compare.png)
+
+> Ekran görüntüleri `streamlit run app.py` üzerinden alınmıştır; "test animasyonu" Test
+> sekmesindeki ▶ oynatma ile canlı izlenir.
 
 ---
 

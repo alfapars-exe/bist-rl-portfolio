@@ -31,8 +31,8 @@ def test_sortino_no_downside_is_inf_not_nan():
     """Hic negatif getiri yokken eski surum NaN donuyordu (np.std bos dizi)."""
     s = sortino(np.array([0.01, 0.02, 0.005]))
     assert not np.isnan(s)
-    assert s == float("inf")
-    assert sortino(np.zeros(5)) == 0.0
+    assert np.isinf(s) and s > 0          # pozitif sonsuz (float == yerine np.isinf)
+    assert abs(sortino(np.zeros(5))) < 1e-12   # tum-sifir -> tam 0.0
 
 
 def test_max_drawdown_known():

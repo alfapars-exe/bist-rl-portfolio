@@ -126,7 +126,9 @@ class PortfolioEnv:
         self.F = self.feat_tensor.shape[2]
         self.state_dim = self.F * self.N_assets + self.N
         self.action_dim = self.N
-        self.T = prices.shape[0]
+        # n_days: toplam zaman adimi (satir). 't' ile yalniz buyuk/kucuk harfle
+        # ayrilan 'T' adi karisikliga yol aciyordu (SonarCloud python:S1845) -> n_days.
+        self.n_days = prices.shape[0]
         self.max_steps = max_steps
         # v2: env-yerel RNG — global np.random'a bagimli degil (tekrar-uretilebilirlik
         # kurulum sirasindan bagimsiz) + tohumlu rastgele-baslangic destegi.
@@ -140,7 +142,7 @@ class PortfolioEnv:
             # episode'un max_steps adim + bir sonraki gun erisimi icin yer birak.
             # DIKKAT: rng.integers yalniz hi > lo iken cagrilir (RNG tuketimi /
             # golden-duyarli); degenerate pencerede deterministik lo'ya duser.
-            hi = self.T - self.max_steps - 1
+            hi = self.n_days - self.max_steps - 1
             if hi > lo:
                 self.t = int(self.rng.integers(lo, hi))
             else:
@@ -208,7 +210,7 @@ class PortfolioEnv:
         self.reward_terms_history.append(reward_terms)
 
         # İflas veya veri sonu → done; 252 adım tavanı → trunc
-        done = (self.t >= (self.T - 1)) or reward_terms["bankrupt"]
+        done = (self.t >= (self.n_days - 1)) or reward_terms["bankrupt"]
         trunc = (self.step_count >= self.max_steps)
         info = dict(nav=self.nav, dd=reward_terms["dd"], port_r=outcome.port_r_net,
                     reward_terms=reward_terms, prices_t=self.prices[self.t].copy())

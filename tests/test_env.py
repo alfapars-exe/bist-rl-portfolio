@@ -94,7 +94,7 @@ def test_random_start_within_bounds_and_seeded():
         out = []
         for _ in range(30):
             env.reset()
-            assert env.window <= env.t < env.T - env.max_steps - 1   # sinir icinde
+            assert env.window <= env.t < env.n_days - env.max_steps - 1   # sinir icinde
             out.append(env.t)
         return out
 

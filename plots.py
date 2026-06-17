@@ -215,6 +215,24 @@ def run():
     plt.tight_layout(); plt.savefig(FIG/"f9_arch.png", bbox_inches="tight"); plt.close()
     print("f9 ok")
 
+    # ---------- F10: Moving-average episode return (PDF §9.7 ogrenme egilimi) ----------
+    from utils.metrics import moving_average
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    for algo, c in [("DQN", dqn_c), ("PPO", ppo_c), ("SAC", sac_c)]:
+        if "reward" not in c.columns:
+            continue
+        r = c["reward"].to_numpy(dtype=float)
+        ax.plot(range(len(r)), r, color=PAL[algo], alpha=0.30, lw=1.0)
+        ma = moving_average(r, 5)
+        if ma.size:
+            x_ma = range(len(r) - ma.size, len(r))
+            ax.plot(list(x_ma), ma, color=PAL[algo], lw=2.2, label=f"{algo} (MA-5)")
+    ax.set_title("Hareketli Ortalama Episode Getirisi (öğrenme eğilimi)")
+    ax.set_xlabel("İterasyon (episode / güncelleme)"); ax.set_ylabel("Çevre Ödülü Σr")
+    ax.legend(fontsize=9); plt.tight_layout()
+    plt.savefig(FIG/"f10_moving_avg_return.png"); plt.close()
+    print("f10 ok")
+
     print(f"\nAll figures saved in {FIG}")
 
 

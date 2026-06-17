@@ -5,6 +5,9 @@ UYİK 2026 bildirisi için hazırlanan DQN/PPO/SAC portföy RL ortamının
 adım adım gözleyebildiğiniz, vade preset'leri (Kısa/Orta/Uzun) ve
 adaptif ödül şekillendirici içeren bir demo uygulama.
 
+> 📘 **Tam proje dokümantasyonu** (mimari, çalışma mantığı, teknolojiler,
+> algoritmalar + RL Final Projesi rapor başlıkları §9.1–§9.9): **[DOKUMANTASYON.md](DOKUMANTASYON.md)**
+
 ## Öne Çıkanlar
 
 - **Evren**: 28 BIST hissesi (`KOZAA.IS` ve `KOZAL.IS` hariç), 2015-01-01 → 2024-12-31

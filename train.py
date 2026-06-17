@@ -16,7 +16,7 @@ import pandas as pd
 
 from data import download_bist, train_test_split
 from utils.features import add_features, TrainScaler
-from utils.metrics import summary
+from utils.metrics import summary, training_diagnostics
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
 from config import SEED, TrainConfig, EnvConfig, ForecastConfig
 from core.factory import build_agent, build_env
@@ -78,7 +78,9 @@ def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
         curve.append(dict(episode=rec["episode"], reward=rec["reward"],
-                          train_nav=rec["train_nav"], eps=rec["eps"]))
+                          train_nav=rec["train_nav"], eps=rec["eps"],
+                          gain=rec["gain"], success=int(rec["nav"] > 1.0),
+                          steps=len(rec.get("actions") or [])))
         print(f"[DQN] ep {rec['episode']:02d}  ret={rec['reward']:+.3f}  "
               f"NAV={rec['train_nav']:.3f}  eps={rec['eps']:.3f}")
     return agent, curve
@@ -94,7 +96,9 @@ def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
     curve = []
     for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len):
         curve.append(dict(update=rec["update"], p_loss=rec["p_loss"], v_loss=rec["v_loss"],
-                          ent=rec["ent"], kl=rec["kl"], mean_nav=rec["mean_nav"]))
+                          ent=rec["ent"], kl=rec["kl"], mean_nav=rec["mean_nav"],
+                          reward=rec["reward"], gain=rec["gain"],
+                          success=int(rec["mean_nav"] > 1.0), steps=rollout_len))
         print(f"[PPO] upd {rec['update']:02d}  p_loss={rec['p_loss']:.3f} "
               f"v_loss={rec['v_loss']:.3f} ent={rec['ent']:.2f} kl={rec['kl']:.3f}")
     return agent, curve
@@ -110,7 +114,9 @@ def train_sac(bundle: DataBundle, n_episodes: int = TrainConfig.sac_episodes,
     agent = build_agent("SAC", env.state_dim, env.action_dim, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
-        curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"]))
+        curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"],
+                          reward=rec["reward"], gain=rec["gain"],
+                          success=int(rec["nav"] > 1.0)))
         print(f"[SAC] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 
@@ -172,6 +178,13 @@ def run():
     pd.DataFrame(dqn_curve).to_csv(RES / "dqn_curve.csv", index=False)
     pd.DataFrame(ppo_curve).to_csv(RES / "ppo_curve.csv", index=False)
     pd.DataFrame(sac_curve).to_csv(RES / "sac_curve.csv", index=False)
+
+    # PDF §9.7 toplu egitim teshisleri (gozlemsel; golden metriklerini etkilemez).
+    curves = {"DQN": dqn_curve, "PPO": ppo_curve, "SAC": sac_curve}
+    diag = {n: training_diagnostics(curves[n], results[n]["backtest"].get("reward_terms_history"))
+            for n in ("DQN", "PPO", "SAC")}
+    pd.DataFrame(diag).T.to_csv(RES / "training_diagnostics.csv")
+    print(pd.DataFrame(diag).T.round(4))
 
     for name in ["DQN", "PPO", "SAC"]:
         W = results[name]["backtest"]["weights"]

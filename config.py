@@ -146,3 +146,19 @@ class ForecastConfig:
     # Hangi ajanlar forecast feature'ini kullansin? V3<->V4 ablation'a gore forecast
     # DQN/SAC'a yaradi (+10pp DQN), PPO'ya zarar verdi (-7.5pp) -> PPO haric tutulur.
     forecast_agents: tuple = ("DQN", "SAC")
+
+
+# ---------------------------------------------------------------------
+# v6: Makro rejim algisi (YALIN OMURGA) — faiz/dolar/altin + bilesik rejim.
+# Tek bir 'regime' skoru hem state'e (algi) hem RewardEngine'e (V7 kriz-amplified
+# kuyruk cezasi) girer. enabled=False -> V5 davranisi (makrosuz). Yalin tutuldu
+# (4 oznitelik) — sinirli BIST verisinde overfitting'e karsi.
+# series: indirilen ham makro tickerlari (yfinance). BIST takvimine hizalanir.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class MacroConfig:
+    enabled: bool = True
+    series: tuple = ("^VIX", "^GSPC", "^TNX", "^IRX", "USDTRY=X", "GC=F")
+    # State'e eklenen 4 yalin oznitelik: rejim omurgasi + faiz/dolar/altin.
+    features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
+    mom_window: int = 20      # momentum/degisim penceresi (gun)

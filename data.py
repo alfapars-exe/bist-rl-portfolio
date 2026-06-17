@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from config import MacroConfig
+
 # BIST 30 tickers — KOZAA.IS ve KOZAL.IS prompt gereği hariç tutuldu (28 hisse).
 BIST28 = [
     "AKBNK.IS", "ARCLK.IS", "ASELS.IS", "BIMAS.IS", "EKGYO.IS",
@@ -34,6 +36,7 @@ RESULTS_DIR  = BASE_DIR / "results"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 PARQUET_PATH = DATA_DIR / "prices.parquet"
+MACRO_PARQUET = DATA_DIR / "macro_raw.parquet"
 
 
 def download_bist(tickers=BIST28, start=START, end=END,
@@ -117,6 +120,77 @@ def _synthetic_bist(tickers, start, end) -> pd.DataFrame:
     logret[rally] += 0.0012
     price = 100.0 * np.exp(np.cumsum(logret, axis=0))
     return pd.DataFrame(price, index=idx, columns=tickers)
+
+
+# ---------------------------------------------------------------------
+# v6: Makro rejim verisi (faiz/dolar/altin) — egzojen, BIST takvimine hizali.
+# ---------------------------------------------------------------------
+def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
+                   use_cache: bool = True) -> pd.DataFrame:
+    """Ham makro seri matrisi (T, M): VIX, S&P, faiz (TNX/IRX), USDTRY, altin (GC=F).
+
+    parquet cache -> yfinance -> sentetik fallback. Sentetik veri CACHE'E YAZILMAZ
+    (download_bist ile ayni zehirlenme korumasi)."""
+    series = list(series)
+    if use_cache and MACRO_PARQUET.exists():
+        try:
+            mc = pd.read_parquet(MACRO_PARQUET)
+            mc.index = pd.to_datetime(mc.index)
+            have = [s for s in series if s in mc.columns]
+            if len(have) >= 3 and len(mc) > 500:
+                return mc[have]
+        except Exception as exc:
+            print(f"[WARN] makro cache okunamadı ({exc!r}); yeniden indiriliyor")
+
+    synthetic = False
+    try:
+        import yfinance as yf
+        data = yf.download(series, start=start, end=end, auto_adjust=True,
+                           progress=False, threads=True)
+        mc = (data["Close"].copy() if isinstance(data.columns, pd.MultiIndex)
+              else data[["Close"]].copy())
+        mc = mc.ffill().bfill().dropna(axis=1, how="all")
+        mc = mc[[s for s in series if s in mc.columns]]
+        if mc.shape[1] < 3:
+            raise RuntimeError("Too few macro series returned")
+    except Exception as exc:
+        warnings.warn(
+            f"yfinance makro basarisiz ({exc!r}); SENTETIK makro uretiliyor — "
+            "gercek piyasa verisi DEGIL!", RuntimeWarning, stacklevel=2)
+        print(f"[WARN] yfinance makro başarısız ({exc!r}); sentetik makro üretiliyor")
+        mc = _synthetic_macro(series, start, end)
+        synthetic = True
+
+    if synthetic:
+        print("[WARN] sentetik makro cache'e yazılmadı")
+        return mc
+    try:
+        mc.to_parquet(MACRO_PARQUET)
+    except Exception as exc:
+        print(f"[WARN] makro parquet yazılamadı ({exc!r})")
+    return mc
+
+
+def _synthetic_macro(series, start, end) -> pd.DataFrame:
+    """Determinist sentetik makro (offline + testler). TL sürekli zayıflar (gerçekçi)."""
+    rng = np.random.default_rng(7)
+    idx = pd.bdate_range(start=start, end=end)
+    T = len(idx)
+    vix    = np.clip(18 + 9 * np.abs(np.cumsum(rng.normal(0, 0.25, T)) % 3.0), 9.0, 80.0)
+    gspc   = 1500.0 * np.exp(np.cumsum(rng.normal(0.0003, 0.012, T)))
+    tnx    = np.clip(3.0 + np.cumsum(rng.normal(0, 0.02, T)), 0.5, 6.0)
+    irx    = np.clip(tnx - 0.5 + rng.normal(0, 0.1, T), 0.05, None)
+    usdtry = 2.0 * np.exp(np.cumsum(rng.normal(0.0008, 0.012, T)))   # TL erir
+    gold   = 1300.0 * np.exp(np.cumsum(rng.normal(0.0002, 0.009, T)))  # altın USD/oz
+    full = {"^VIX": vix, "^GSPC": gspc, "^TNX": tnx, "^IRX": irx,
+            "USDTRY=X": usdtry, "GC=F": gold}
+    df = pd.DataFrame(full, index=idx)
+    return df[[s for s in series if s in df.columns]]
+
+
+def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
+    """Makroyu BIST işlem takvimine (index) reindex + ffill/bfill (causal)."""
+    return macro_raw.reindex(index).ffill().bfill()
 
 
 def train_test_split(df: pd.DataFrame, split=SPLIT):

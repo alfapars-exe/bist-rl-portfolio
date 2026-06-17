@@ -10,7 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from config import FEATURES
+from config import FEATURES, MacroConfig
 from data import BIST28
 from env.portfolio_env import ACTION_NAMES, HORIZON_PRESETS
 from ui.state import ASSET_NAMES
@@ -52,7 +52,10 @@ def _state_top_features(state_vec: np.ndarray, top_k: int = 8) -> pd.DataFrame:
     """Durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı). Feature
     sayısı config.FEATURES'tan dinamik okunur (v2: 12 özellik)."""
     n_assets = len(BIST28)
-    F = (len(state_vec) - (n_assets + 1)) // n_assets   # state'ten türet (12 ya da 13)
+    # v6: state = [F teknik × n_assets] + [M makro] + [n_assets+1 agirlik]. Makro blogunu
+    # cikararak teknik oznitelik sayisi F'i state uzunlugundan turet.
+    M = len(MacroConfig.features) if MacroConfig.enabled else 0
+    F = (len(state_vec) - M - (n_assets + 1)) // n_assets   # 12 (PPO) ya da 13 (DQN/SAC)
     names = list(FEATURES) + ["forecast"]
     feat_names = (names + [f"f{i}" for i in range(F)])[:F]
     snap = state_vec[: F * n_assets].reshape(F, n_assets)

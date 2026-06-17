@@ -84,7 +84,8 @@ def build_agent(algo: str, state_dim: int, action_dim: int,
 def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               horizon: str = "medium", adaptive: bool = True,
               max_steps: int, random_start: bool = False, seed: int = SEED,
-              reward_overrides: dict | None = None) -> PortfolioEnv:
+              reward_overrides: dict | None = None,
+              macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
     reward_overrides (UI'nin reward_cfg'i): None/eksik anahtarlar env'in preset
@@ -104,4 +105,5 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         ema_alpha=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
+        macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
     )

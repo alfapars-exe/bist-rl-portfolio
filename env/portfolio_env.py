@@ -83,7 +83,8 @@ class PortfolioEnv:
                  random_start: bool = False,
                  seed: int | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
-                 dsr_eta: float = RewardConfig.dsr_eta):
+                 dsr_eta: float = RewardConfig.dsr_eta,
+                 macro=None, regime=None):
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
         self.feat_names = list(features.keys())
@@ -124,7 +125,12 @@ class PortfolioEnv:
         self.N = self.N_assets + (1 if cash_asset else 0)
         self.window = max(window, self.minvol_window)
         self.F = self.feat_tensor.shape[2]
-        self.state_dim = self.F * self.N_assets + self.N
+        # v6: makro rejim blogu (z-skorlu (T,M), state'e eklenir) + HAM regime
+        # (T,) ∈[-1,1] — V7 odul kriz-amplifikasyonu icin step()'te kullanilir.
+        self.macro = None if macro is None else np.asarray(macro, dtype=np.float32)
+        self.regime = None if regime is None else np.asarray(regime, dtype=np.float32)
+        self.M = 0 if self.macro is None else int(self.macro.shape[1])
+        self.state_dim = self.F * self.N_assets + self.M + self.N
         self.action_dim = self.N
         # n_days: toplam zaman adimi (satir). 't' ile yalniz buyuk/kucuk harfle
         # ayrilan 'T' adi karisikliga yol aciyordu (SonarCloud python:S1845) -> n_days.
@@ -168,7 +174,11 @@ class PortfolioEnv:
 
     def _obs(self) -> np.ndarray:
         snap = self.feat_tensor[self.t].reshape(-1)
-        return np.concatenate([snap, self.w]).astype(np.float32)
+        parts = [snap]
+        if self.macro is not None:                 # v6: makro rejim blogu
+            parts.append(self.macro[self.t])
+        parts.append(self.w)
+        return np.concatenate(parts).astype(np.float32)
 
     def _risky_returns(self) -> np.ndarray:
         p0 = self.prices[self.t]

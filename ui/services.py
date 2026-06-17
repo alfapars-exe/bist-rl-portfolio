@@ -11,13 +11,14 @@ import pandas as pd
 import streamlit as st
 
 from agents.base import SupportsQValues
-from config import SEED, ForecastConfig
+from config import SEED, ForecastConfig, MacroConfig
 from core.factory import build_agent, build_env
 from core.trainer import train as train_loop
-from data import download_bist, train_test_split
+from data import align_macro, download_bist, download_macro, train_test_split
 from env.portfolio_env import ACTION_NAMES
 from utils.baselines import equal_weight
 from utils.features import TrainScaler, add_features
+from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
 
 
@@ -43,6 +44,21 @@ def _load_data():
     st.session_state.feats_tr = scaler.transform(feats_tr_raw)
     st.session_state.feats_te = scaler.transform(feats_te_raw)
     st.session_state.scaler = scaler
+
+    # v6: makro rejim (faiz/dolar/altin) — train-only z-score; ham regime ayri (V7).
+    macro_tr = macro_te = regime_tr = regime_te = None
+    if MacroConfig.enabled:
+        mfeat = add_macro_features(align_macro(download_macro(), prices.index))
+        regime_full = mfeat["regime"]
+        macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
+        macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
+        macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
+        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
+        regime_te = regime_full.loc[px_te.index].to_numpy(np.float32)
+    st.session_state.macro_tr = macro_tr
+    st.session_state.macro_te = macro_te
+    st.session_state.regime_tr = regime_tr
+    st.session_state.regime_te = regime_te
     st.session_state.data_loaded = True
 
 
@@ -50,10 +66,13 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3)."""
     px_df = st.session_state.px_tr if is_train else st.session_state.px_te
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
+    macro = st.session_state.get("macro_tr" if is_train else "macro_te")
+    regime = st.session_state.get("regime_tr" if is_train else "regime_te")
     return build_env(
         algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
     )
 
 

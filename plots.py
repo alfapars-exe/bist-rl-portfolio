@@ -191,7 +191,7 @@ def run():
             ha="center", fontsize=10, color="#a64")
     ax.text(6.0, 4.5, "Portföy Yönetimi MDP Formülasyonu",
             ha="center", fontsize=14, fontweight="bold")
-    ax.text(6.0, 0.7, "S: 5 özellik × 28 hisse + mevcut ağırlıklar = 169 boyut        "
+    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 393 boyut        "
             "A: softmax(29-boyutlu simpleks)        γ = 0.99        T ≈ 760 gün/bölüm",
             ha="center", fontsize=9, color="#555")
     plt.tight_layout(); plt.savefig(FIG/"f8_mdp.png"); plt.close()

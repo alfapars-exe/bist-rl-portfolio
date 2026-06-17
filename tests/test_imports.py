@@ -13,12 +13,13 @@ import pytest
 SAFE_MODULES = [
     "config",
     "data",
-    "env", "env.portfolio_env",
+    "env", "env.portfolio_env", "env.reward",
     "agents", "agents.base", "agents.common",
     "agents.dqn", "agents.ppo", "agents.sac",
     "utils", "utils.features", "utils.metrics",
-    "utils.baselines", "utils.portfolio_tl",
-    "core", "core.trainer", "core.rollout",
+    "utils.baselines", "utils.portfolio_tl", "utils.torch_utils",
+    "forecast", "forecast.forecaster",
+    "core", "core.trainer", "core.rollout", "core.features", "core.factory",
     "train", "plots", "main",
 ]
 

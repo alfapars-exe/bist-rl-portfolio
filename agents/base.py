@@ -14,8 +14,22 @@ tum tuketicilerin ortak kullandigi eval yuzeyini sabitliyoruz.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Protocol, runtime_checkable
 
 import numpy as np
+
+
+@runtime_checkable
+class SupportsQValues(Protocol):
+    """Q-deger introspeksiyonu sunan ajanlarin yapisal arayuzu — SOLID P5 (ISP).
+
+    UI'nin `hasattr(agent, "q_values")` yoklamasini resmilestirir: runtime_checkable
+    Protocol ile `isinstance(agent, SupportsQValues)` ayni anlami tasir ama niyet
+    artik tipte gorunur. Su an yalniz DQNAgent saglar; baska bir ajan q_values
+    eklerse UI paneli otomatik calisir (yeni if'e gerek yok).
+    """
+
+    def q_values(self, s: np.ndarray) -> np.ndarray: ...
 
 
 class BaseAgent(ABC):

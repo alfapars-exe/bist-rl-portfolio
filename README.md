@@ -104,7 +104,7 @@ kod/
 │   ├── __init__.py
 │   ├── base.py                 # BaseAgent arayüzü (act_eval)
 │   ├── common.py               # ReplayBuffer, mlp, get_device, set_seed
-│   ├── dqn.py                  # PyTorch DQN (169→256→128→6, Huber, lr=1e-3)
+│   ├── dqn.py                  # PyTorch DQN (393→256→128→6, Huber, lr=1e-3)
 │   ├── ppo.py                  # PyTorch PPO (GAE, clipped surrogate)
 │   └── sac.py                  # PyTorch SAC (twin-Q, tanh-squashed Gaussian)
 ├── utils/
@@ -123,7 +123,7 @@ kod/
 
 | Parametre | Değer |
 |---|---|
-| Ağ mimarisi | `Linear(169, 256) → ReLU → Linear(256, 128) → ReLU → Linear(128, 6)` |
+| Ağ mimarisi | `Linear(393, 256) → ReLU → Linear(256, 128) → ReLU → Linear(128, 6)` |
 | Öğrenme oranı | 1e-3 (Adam) |
 | Kayıp | Huber (δ=1.0) |
 | Replay buffer | 50.000, uniform, batch 64 |
@@ -180,15 +180,18 @@ kalır — A/B karşılaştırması için.
 
 ## S1 — Durum Temsili Neden Bu Şekilde?
 
-Durum vektörümüz 169 boyutludur: 28 hisse × 5 teknik öznitelik + 29 boyutlu
-önceki ağırlık vektörü (28 riskli varlık + nakit). Bu boyut, **bilgi zenginliği
-ile öğrenme verimliliği arasında bilinçli bir denge**dir. 5 özellik (log getiri,
-5g/20g hareketli değişim, 20g volatilite, RSI-14) kısa vadeli ivme, orta vadeli
-trend ve risk rejimini eşzamanlı yakalar; daha uzun LSTM/CNN mimarilerinin
-ihtiyaç duyduğu ham fiyat tarihçesini feature engineering ile özetler.
+Durum vektörümüz 393 boyutludur (DQN/SAC): 28 hisse × 13 öznitelik (12 teknik
++ 1 CNN-LSTM forecast) + 29 boyutlu önceki ağırlık vektörü (28 riskli varlık +
+nakit). PPO forecast özelliğini almaz (v2 ablation kararı) → onun durumu
+12×28+29 = 365 boyuttur. Bu boyut, **bilgi zenginliği ile öğrenme verimliliği
+arasında bilinçli bir denge**dir. 12 teknik özellik (log getiri, 5g/20g hareketli
+değişim, 20g/60g volatilite, RSI-14, MACD-hist, Bollinger %b/bant genişliği,
+ROC-10, momentum-60, EMA-uzaklık) kısa vadeli ivme, orta vadeli trend ve risk
+rejimini eşzamanlı yakalar; daha uzun LSTM/CNN mimarilerinin ihtiyaç duyduğu ham
+fiyat tarihçesini feature engineering ile özetler.
 Önceki ağırlıkların duruma eklenmesi MDP'nin **Markov özelliğini korumak için
 kritiktir**: işlem maliyeti `‖w_t − w_{t−1}‖₁`'e bağlı olduğundan mevcut
-ağırlık bilinmeden optimal eylem tanımlanamaz. 169 boyut, 256-128 hidden
+ağırlık bilinmeden optimal eylem tanımlanamaz. 393 boyut, 256-128 hidden
 MLP ile 15 dakika altında CPU üzerinde eğitilebilir büyüklüktedir; daha
 büyük ham pencere (ör. 60-günlük fiyat dizisi) durum boyutunu 1.700+'a
 çıkarır ve model eğitilemez hâle gelir. **Veri sızıntısına karşı** tüm

@@ -6,6 +6,8 @@ trajectory yakalama.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -13,13 +15,41 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import SEED, ForecastConfig, MacroConfig
 from core.factory import build_agent, build_env
+from core.persistence import load_agent, save_agent
 from core.trainer import train as train_loop
 from data import align_macro, download_bist, download_macro, train_test_split
 from env.portfolio_env import ACTION_NAMES
+from ui.state import _agent_key
 from utils.baselines import equal_weight
 from utils.features import TrainScaler, add_features
 from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
+
+# PDF §11: egitilmis modeller diske burada kaydedilir/yuklenir (sunum kaliciligi).
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+
+def model_path(algo: str) -> Path:
+    return MODELS_DIR / f"{algo}.pt"
+
+
+def save_trained_agent(algo: str, horizon: str, adaptive: bool):
+    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None)."""
+    entry = st.session_state.trained_agents.get(_agent_key(algo, horizon, adaptive))
+    if not entry or entry[0] is None:
+        return None
+    return save_agent(entry[0], algo, model_path(algo), horizon=horizon, adaptive=adaptive)
+
+
+def load_saved_agent(algo: str):
+    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner."""
+    path = model_path(algo)
+    if not path.exists():
+        return None
+    agent, meta = load_agent(path)
+    key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
+    st.session_state.trained_agents[key] = (agent, [])   # disk'ten geldi; egitim egrisi yok
+    return key
 
 
 def _load_data():
@@ -86,13 +116,19 @@ def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
 # Eğitim jeneratörü — canlı UI için episod başına yield
 # =====================================================================
 def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
-                    rollout_len: int = 400):
+                    rollout_len: int = 400, resume_agent=None):
     """Episod/update başına bir telemetri kaydı yield eder. Sonsuz akış —
-    tüketici (tab_train) 'Durdur' butonuyla keser."""
+    tüketici (tab_train) 'Durdur' butonuyla keser.
+
+    resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
+    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
     max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}[algo]
     env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
-    action_dim = env.n_discrete if algo == "DQN" else env.action_dim
-    agent = _make_agent(algo, env.state_dim, action_dim, hp)
+    if resume_agent is not None:
+        agent = resume_agent
+    else:
+        action_dim = env.n_discrete if algo == "DQN" else env.action_dim
+        agent = _make_agent(algo, env.state_dim, action_dim, hp)
     # Başarı kıyası için tren EW NAV'ı (core.trainer success'i bununla hesaplar)
     ew_tr = equal_weight(st.session_state.px_tr)["nav"]
     # Sonsuz akış (n_iters=None) — core.trainer.train ajan tipine göre dispatch eder;

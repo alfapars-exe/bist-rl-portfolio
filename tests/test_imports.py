@@ -21,6 +21,7 @@ SAFE_MODULES = [
     "utils.deflated_sharpe", "utils.stress_mc",
     "forecast", "forecast.forecaster",
     "core", "core.trainer", "core.rollout", "core.features", "core.factory",
+    "core.persistence",
     "train", "plots", "main",
     "scripts", "scripts.rigor_analysis",
 ]

@@ -4,7 +4,7 @@ Golden gate train.py yolunu kapsar; app.py (UI) yolunu burada kilitleriz:
 bos hp ile app._make_agent, config dataclass degerlerini kullanmali. Ayrica
 env'in HORIZON_PRESETS'i config ile AYNI nesne olmali (tek kaynak kaniti).
 """
-from config import DQNConfig, PPOConfig, SACConfig, HORIZON_PRESETS
+from config import DQNConfig, PPOConfig, SACConfig, TD3Config, HORIZON_PRESETS
 
 
 def test_env_horizon_presets_is_config_object():
@@ -29,3 +29,9 @@ def test_make_agent_uses_config_defaults():
     assert sac.batch_size == SACConfig.batch_size
     assert abs(sac.tau - SACConfig.tau) < 1e-12
     assert abs(sac.alpha - SACConfig.alpha) < 1e-12
+
+    td3 = app._make_agent("TD3", 169, 29, {})
+    assert td3.batch_size == TD3Config.batch_size
+    assert abs(td3.tau - TD3Config.tau) < 1e-12
+    assert abs(td3.policy_noise - TD3Config.policy_noise) < 1e-12
+    assert td3.policy_delay == TD3Config.policy_delay

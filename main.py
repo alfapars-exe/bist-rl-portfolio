@@ -1,9 +1,10 @@
 """Tek komutla tüm deneyi çalıştırır.
 
 Akış:
-  1) BIST 30 fiyatlarını yfinance ile indir (veya varsa CSV'den yükle)
-  2) DQN + PPO + SAC eğit, test setinde tüm stratejileri backtest et
-  3) 9 figürü (f1..f9) figures/ klasörüne kaydet
+  1) BIST 28 fiyatlarını yfinance ile indir (veya varsa cache'den yükle)
+  2) DQN + PPO + SAC + TD3 eğit, test setinde tüm stratejileri backtest et
+  3) Titizlik (rigor) katmanı: Deflated Sharpe + PBO + Monte-Carlo stres + reel-NAV
+  4) 13 figürü (f1..f13) figures/ klasörüne kaydet
 
 Kullanım:
   python main.py                 # her şeyi çalıştır
@@ -45,15 +46,23 @@ def step_data():
 
 def step_train():
     print("=" * 70)
-    print("[2/3] DQN + PPO + SAC eğitimi ve backtest ...")
+    print("[2/4] DQN + PPO + SAC + TD3 eğitimi ve backtest ...")
     print("=" * 70)
     import train
     train.run()
 
 
+def step_rigor():
+    print("=" * 70)
+    print("[3/4] Titizlik katmanı: Deflated Sharpe + PBO + Monte-Carlo stres + reel-NAV ...")
+    print("=" * 70)
+    from scripts import rigor_analysis
+    rigor_analysis.run()
+
+
 def step_plots():
     print("=" * 70)
-    print("[3/3] 9 figür üretiliyor ...")
+    print("[4/4] 13 figür üretiliyor ...")
     print("=" * 70)
     import plots
     plots.run()
@@ -90,12 +99,14 @@ def main():
     ap.add_argument("--skip-data",  action="store_true", help="Veri indirme adımını atla")
     ap.add_argument("--skip-train", action="store_true", help="Eğitim + backtest adımını atla")
     ap.add_argument("--skip-plots", action="store_true", help="Çizim adımını atla")
+    ap.add_argument("--skip-rigor", action="store_true", help="Titizlik (DSR/PBO/stres) adımını atla")
     ap.add_argument("--walkforward", action="store_true", help="Walk-forward doğrulama çalıştır (v2)")
     args = ap.parse_args()
 
     t0 = time.time()
     if not args.skip_data:  step_data()
     if not args.skip_train: step_train()
+    if not args.skip_rigor: step_rigor()       # plot'tan ÖNCE (F11-F13 rigor çıktısını okur)
     if not args.skip_plots: step_plots()
     if args.walkforward:    step_walkforward()
 

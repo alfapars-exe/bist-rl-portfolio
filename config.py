@@ -120,6 +120,12 @@ class EnvConfig:
     bankruptcy_penalty: float = 10.0
     random_start: bool = True        # v2: egitimde rastgele pencere (eval'de False gecilir)
     seed: int = 42
+    # v8: fiyat gurultusu / slippage — hocanin ACIK sarti (anti-ezber). Gerceklesen
+    # getiriye kucuk Gauss gurultusu: "al dediginde tam o fiyattan alamazsin, yukaridan
+    # alirsin". YALNIZ egitimde (random_start=True) aktif; eval'de KAPALI -> golden eval
+    # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
+    price_noise_std: float = 0.001
+    price_noise_train_only: bool = True
 
 
 # ---------------------------------------------------------------------

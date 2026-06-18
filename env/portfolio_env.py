@@ -82,6 +82,8 @@ class PortfolioEnv:
                  bankruptcy_penalty: float | None = None,
                  random_start: bool = False,
                  seed: int | None = None,
+                 price_noise_std: float = EnvConfig.price_noise_std,
+                 price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
                  macro=None, regime=None):
@@ -146,6 +148,11 @@ class PortfolioEnv:
         # kurulum sirasindan bagimsiz) + tohumlu rastgele-baslangic destegi.
         self.random_start = bool(random_start)
         self.rng = np.random.default_rng(seed)
+        # v8: fiyat gurultusu/slippage (hocanin sarti). train_only -> yalniz random_start
+        # (egitim) acik; eval (random_start=False) -> kapali, golden eval determinizmi korunur.
+        self.price_noise_std = float(price_noise_std)
+        self._noise_active = (self.price_noise_std > 0.0 and
+                              (self.random_start if price_noise_train_only else True))
         self._reset_state()
 
     def _reset_state(self):
@@ -190,6 +197,11 @@ class PortfolioEnv:
         p0 = self.prices[self.t]
         p1 = self.prices[self.t + 1]
         r = (p1 - p0) / np.maximum(p0, 1e-9)
+        if self._noise_active:
+            # v8: slippage/fiyat gurultusu (hocanin sarti, anti-ezber) — gerceklesen
+            # riskli getiriye kucuk Gauss gurultusu. Env-yerel rng -> global RNG'ye
+            # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
+            r = r + self.rng.normal(0.0, self.price_noise_std, size=r.shape).astype(np.float32)
         if self.cash_asset:
             r = np.concatenate([r, [0.0]])
         return r

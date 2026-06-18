@@ -11,7 +11,7 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 ## Öne Çıkanlar
 
 - **Evren**: 28 BIST hissesi (`KOZAA.IS` ve `KOZAL.IS` hariç), 2015-01-01 → 2024-12-31
-- **Durum (v2)**: ℝ³⁹³ = 13 özellik (12 teknik + 1 CNN-LSTM forecast) × 28 hisse + 29 ağırlık (nakit dâhil), train-only z-score
+- **Durum (güncel)**: ℝ³⁹⁷ = 13 özellik (12 teknik + 1 CNN-LSTM forecast) × 28 hisse + 4 makro + 29 ağırlık (nakit dâhil), train-only z-score — DQN/SAC/TD3; PPO ℝ³⁶⁹ (forecast hariç, 12×28+4+29) (393/365 = makro-öncesi V5 tabanı)
 - **Eylem (DQN)**: 6 şablon (Nakit, Eşit, Top-3 Mom, Top-5 Mom, Ters-Vol, Min-Vol)
 - **Eylem (PPO/SAC)**: 29-boyutlu softmax (sürekli)
 - **Ödül**: `log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)` — 4 terim ayrı ayrı raporlanır
@@ -24,8 +24,8 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 | Değişiklik | Gerekçe / kaynak |
 |-----------|-------------------|
 | Zengin gözlem: 5 → 13 feature (MACD, Bollinger %b/bant, ROC, mom60, vol60, EMA-uzaklık + forecast) | FinRL standart TA seti (arXiv:2011.09607) |
-| CNN-LSTM forecast: bir-adım getiri tahmini state'e (predict-then-optimize) | LSTM→PPO hibrit (arXiv:2511.17963) |
-| Diferansiyel Sharpe ödülü: online risk-ayarlı terim | Moody & Saffell; çok-ödül (arXiv:2511.11481) |
+| CNN-LSTM forecast: bir-adım getiri tahmini state'e (predict-then-optimize) | LSTM→PPO hibrit portföy optimizasyonu (Kevin & Yugopuspito 2025, arXiv:2511.17963) |
+| Diferansiyel Sharpe ödülü: online risk-ayarlı terim | Moody & Saffell (1998) "Performance functions and reinforcement learning for trading systems"; risk-ayarlı DRL portföy optimizasyonu (arXiv:2511.11481) |
 | Rastgele-başlangıç ortam + env-yerel RNG → çeşitli, çok-episode | overfitting/genelleme (Velay 2023, arXiv:2306.10950) |
 | Walk-forward doğrulama: `python main.py --walkforward` | backtest overfitting (Liu 2022, arXiv:2209.05559) |
 
@@ -126,7 +126,7 @@ kod/
 
 | Parametre | Değer |
 |---|---|
-| Ağ mimarisi | `Linear(393, 256) → ReLU → Linear(256, 128) → ReLU → Linear(128, 6)` |
+| Ağ mimarisi | `Linear(397, 256) → ReLU → Linear(256, 128) → ReLU → Linear(128, 6)` (397 = V6+ makro dahil; 393 = makro-öncesi V5 tabanı) |
 | Öğrenme oranı | 1e-3 (Adam) |
 | Kayıp | Huber (δ=1.0) |
 | Replay buffer | 50.000, uniform, batch 64 |
@@ -183,10 +183,11 @@ kalır — A/B karşılaştırması için.
 
 ## S1 — Durum Temsili Neden Bu Şekilde?
 
-Durum vektörümüz 393 boyutludur (DQN/SAC): 28 hisse × 13 öznitelik (12 teknik
-+ 1 CNN-LSTM forecast) + 29 boyutlu önceki ağırlık vektörü (28 riskli varlık +
-nakit). PPO forecast özelliğini almaz (v2 ablation kararı) → onun durumu
-12×28+29 = 365 boyuttur. Bu boyut, **bilgi zenginliği ile öğrenme verimliliği
+Durum vektörümüz 397 boyutludur (DQN/SAC/TD3): 28 hisse × 13 öznitelik (12
+teknik + 1 CNN-LSTM forecast) + 4 makro rejim özniteliği + 29 boyutlu önceki
+ağırlık vektörü (28 riskli varlık + nakit). PPO forecast özelliğini almaz (v2
+ablation kararı) → onun durumu 12×28+4+29 = 369 boyuttur. (393/365 = makro-öncesi
+V5 tabanı; V6 ile +4 makro blok eklendi.) Bu boyut, **bilgi zenginliği ile öğrenme verimliliği
 arasında bilinçli bir denge**dir. 12 teknik özellik (log getiri, 5g/20g hareketli
 değişim, 20g/60g volatilite, RSI-14, MACD-hist, Bollinger %b/bant genişliği,
 ROC-10, momentum-60, EMA-uzaklık) kısa vadeli ivme, orta vadeli trend ve risk

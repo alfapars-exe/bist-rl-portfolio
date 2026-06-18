@@ -13,6 +13,7 @@ from data import BIST28
 from env.portfolio_env import ACTION_NAMES
 from ui.services import train_generator
 from ui.state import _agent_key
+from utils.metrics import training_diagnostics
 from utils.portfolio_tl import (
     build_portfolio_table, compute_tl_series, step_rows_for_training,
 )
@@ -188,6 +189,45 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         status.success(f"{algo} eğitildi ({len(curve)} iter, {elapsed:.1f}s) "
                        f"ve session'a kaydedildi. Tab 3'te test edebilirsiniz.")
 
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri ---
+    if curve:
+        rt_hist = list(last_rec["env"].reward_terms_history) if last_rec is not None else None
+        diag = training_diagnostics(curve, reward_terms_history=rt_hist)
+        st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+        d_cols = st.columns(5)
+        d_cols[0].metric(
+            "Hareketli Ort. Return",
+            f"{diag.get('ma_return_last', 0.0):.4f}",
+            help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+        )
+        d_cols[1].metric(
+            "Başarı Oranı",
+            f"{diag.get('success_rate', 0.0):.1%}",
+            help="EW benchmark'ı geçen episod oranı",
+        )
+        if "avg_steps" in diag:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                f"{diag['avg_steps']:.1f}",
+                help="Trainer 'steps' alanından hesaplandı",
+            )
+        else:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                "—",
+                help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+            )
+        d_cols[3].metric(
+            "Drawdown Ceza Adımı",
+            str(diag.get("drawdown_penalty_steps", "—")),
+            help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı",
+        )
+        d_cols[4].metric(
+            "Ort. İşlem Maliyeti",
+            f"{diag.get('mean_tx_cost', 0.0):.5f}",
+            help="reward_terms_history'den: adım başı ortalama tx_cost",
+        )
+
 
 def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
     """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri)."""
@@ -332,3 +372,40 @@ def _render_training_curves(curve: list, algo: str):
     if "loss" in df.columns:
         c4.plotly_chart(px.line(df, x="iter", y="loss", markers=True,
                                 title="Loss"), use_container_width=True)
+
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri (statik görüntüleme) ---
+    diag = training_diagnostics(curve)
+    st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+    d_cols = st.columns(5)
+    d_cols[0].metric(
+        "Hareketli Ort. Return",
+        f"{diag.get('ma_return_last', 0.0):.4f}",
+        help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+    )
+    d_cols[1].metric(
+        "Başarı Oranı",
+        f"{diag.get('success_rate', 0.0):.1%}",
+        help="EW benchmark'ı geçen episod oranı",
+    )
+    if "avg_steps" in diag:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            f"{diag['avg_steps']:.1f}",
+            help="Trainer 'steps' alanından hesaplandı",
+        )
+    else:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            "—",
+            help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+        )
+    d_cols[3].metric(
+        "Drawdown Ceza Adımı",
+        str(diag.get("drawdown_penalty_steps", "—")),
+        help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı (yeniden eğitimde mevcut)",
+    )
+    d_cols[4].metric(
+        "Ort. İşlem Maliyeti",
+        f"{diag.get('mean_tx_cost', 0.0):.5f}",
+        help="reward_terms_history'den: adım başı ortalama tx_cost (yeniden eğitimde mevcut)",
+    )

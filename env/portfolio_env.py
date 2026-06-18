@@ -2,7 +2,10 @@
 
 MDP tuple (S, A, P, r, γ):
 
-  S : ℝ^393 — 28 hisse × 13 özellik (12 teknik + 1 forecast, z-skorlu) + 29 boyutlu önceki ağırlık
+  S : ℝ^397 (DQN/SAC/TD3) / ℝ^369 (PPO) — 28 hisse × F özellik (z-skorlu)
+      + 4 makro (MacroConfig.enabled) + 29 boyutlu önceki ağırlık (nakit dâhil).
+      F=13 (12 teknik + 1 forecast) forecast ajanlarında; PPO forecast'ı dışlar -> F=12.
+      (393/365 = makro-öncesi V5 tabanı; +4 makro = 397/369)
   A : 6 ayrık şablon (DiscretePortfolioEnv) VEYA ℝ^29 sürekli softmax (PortfolioEnv)
   P : Piyasa tarafından belirlenen stokastik süreç; s_{t+1} sonraki günün
       öznitelikleri + işlem sonrası ağırlıklardan oluşur

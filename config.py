@@ -162,7 +162,9 @@ class RewardConfig:
 
 # ---------------------------------------------------------------------
 # v2: CNN-LSTM forecaster (predict-then-optimize). enabled=True ise state'e
-# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^393.
+# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^397 (DQN/SAC/TD3) /
+# R^369 (PPO; forecast haric F=12). Not: 393/365 = makro-oncesi V5 tabani; +4 makro
+# (MacroConfig.enabled, asagida) = 397/369.
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class ForecastConfig:

@@ -1,7 +1,8 @@
 """Deep Q-Network ajanı — PyTorch implementasyonu (ayrık aksiyonlu).
 
 Prompt spec'i:
-  - MLP: state_dim (393, v2) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+  - MLP: state_dim (397: 13×28 + 4 makro + 29 ağırlık) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+    (393 = makro-öncesi V5 tabanı; +4 makro [MacroConfig.enabled] = 397)
   - Replay buffer: 50_000, uniform örnekleme, batch = 64
   - Target network: her 500 adımda hard update (θ⁻ ← θ)
   - ε-greedy: 1.0 → 0.05, 10_000 adımda lineer decay

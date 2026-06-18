@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: (ilk seed — kurulumla birlikte)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (PDF uygunluk düzeltmeleri + V8 re-baseline)
 
 ---
 
@@ -69,12 +69,23 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
 > Yeni kararlar buraya tarih + gerekçe ile eklenir. (Ör. "TD3 eklendi — hoca tavsiyesi,
 > sürekli kontrol; SAC ile kıyas için." / "PPO forecast feature almaz — v2 ablation kararı.")
 
-- _(seed)_ TD3 sürekli kontrol için eklendi (hoca tavsiyesi); state ℝ³⁹³, eylem 29-softmax.
-- _(seed)_ PPO durumu ℝ³⁶⁵: forecast feature'ı dışlar (v2 ablation).
+- _(seed)_ TD3 sürekli kontrol için eklendi (hoca tavsiyesi); eylem 29-softmax.
+- _(seed)_ PPO forecast feature'ı dışlar (v2 ablation) → boyutu DQN/SAC/TD3'ten 28 düşük.
 - _(seed)_ Rigor modülleri (DSR/PBO/CSCV/MC) sibling `Reinforcement Learning Final/` (PARS)
   referansından port ediliyor; PARS kanonik teslim DEĞİL, referans.
+- _(2026-06-19)_ **Durum boyutu kanonik = 397 (DQN/SAC/TD3) / 369 (PPO)** — makro 4 feature
+  (`MacroConfig.enabled`) dahil. 393/365 = makro-öncesi V5 tabanı. Docstring/config/README/
+  DOKUMANTASYON hizalandı (yalnız metin; davranış değişmedi).
+- _(2026-06-19)_ **Golden-master V8'e re-baseline edildi (kullanıcı onaylı).** V8 slippage
+  terimi DQN'i baseline-altına itti (CAGR +%22.4 → −%15.5; FinalNAV 1.74 → 0.63).
+  `metrics_baseline.csv` + `navs_aligned_baseline.csv` güncellendi; V7 arşivi
+  `golden/v7_metrics_baseline.csv`'de korunuyor. 101 test yeşil.
+- _(2026-06-19)_ §9.7 RL-pedagojik metrikleri UI Tab 2'ye eklendi; §8.3'e statik V8 sonuç
+  tabloları gömüldü; §8.4'e "V7-referans, geçerli olan V8" notu eklendi.
 
 ## 6. Bilinen Riskler / Açık Konular
 
 - Ortam pyarrow/yfinance'a bağlı; bazı kabuklarda eksik olabilir (golden env-kilitli).
+- Golden artık **V8 referansı** (2026-06-19'da bu ortamda donduruldu); nöral satırlar
+  torch/numpy sürümüne duyarlı — başka ortamda kayarsa kanonik ortamda yeniden dondur.
 - `KOZAA.IS`, `KOZAL.IS` evrenden hariç (28 hisse).

@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 33 kaynak dosya, ~4770 satır.**
+**Toplam: 33 kaynak dosya, ~4853 satır.**
 
 ---
 
@@ -173,7 +173,9 @@ class RewardConfig:
 
 # ---------------------------------------------------------------------
 # v2: CNN-LSTM forecaster (predict-then-optimize). enabled=True ise state'e
-# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^393.
+# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^397 (DQN/SAC/TD3) /
+# R^369 (PPO; forecast haric F=12). Not: 393/365 = makro-oncesi V5 tabani; +4 makro
+# (MacroConfig.enabled, asagida) = 397/369.
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class ForecastConfig:
@@ -1179,7 +1181,10 @@ def build_forecast_feature(prices_full: pd.DataFrame, prices_train: pd.DataFrame
 
 MDP tuple (S, A, P, r, γ):
 
-  S : ℝ^393 — 28 hisse × 13 özellik (12 teknik + 1 forecast, z-skorlu) + 29 boyutlu önceki ağırlık
+  S : ℝ^397 (DQN/SAC/TD3) / ℝ^369 (PPO) — 28 hisse × F özellik (z-skorlu)
+      + 4 makro (MacroConfig.enabled) + 29 boyutlu önceki ağırlık (nakit dâhil).
+      F=13 (12 teknik + 1 forecast) forecast ajanlarında; PPO forecast'ı dışlar -> F=12.
+      (393/365 = makro-öncesi V5 tabanı; +4 makro = 397/369)
   A : 6 ayrık şablon (DiscretePortfolioEnv) VEYA ℝ^29 sürekli softmax (PortfolioEnv)
   P : Piyasa tarafından belirlenen stokastik süreç; s_{t+1} sonraki günün
       öznitelikleri + işlem sonrası ağırlıklardan oluşur
@@ -1837,7 +1842,8 @@ class ReplayBuffer:
 """Deep Q-Network ajanı — PyTorch implementasyonu (ayrık aksiyonlu).
 
 Prompt spec'i:
-  - MLP: state_dim (393, v2) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+  - MLP: state_dim (397: 13×28 + 4 makro + 29 ağırlık) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+    (393 = makro-öncesi V5 tabanı; +4 makro [MacroConfig.enabled] = 397)
   - Replay buffer: 50_000, uniform örnekleme, batch = 64
   - Target network: her 500 adımda hard update (θ⁻ ← θ)
   - ε-greedy: 1.0 → 0.05, 10_000 adımda lineer decay
@@ -3182,7 +3188,7 @@ FIG.mkdir(exist_ok=True)
 
 def step_data():
     print("=" * 70)
-    print("[1/3] BIST 28 fiyatları hazırlanıyor ...")
+    print("[1/4] BIST 28 fiyatları hazırlanıyor ...")
     print("=" * 70)
     from data import download_bist
     from utils.features import add_features
@@ -3477,7 +3483,7 @@ def run():
             ha="center", fontsize=10, color="#a64")
     ax.text(6.0, 4.5, "Portföy Yönetimi MDP Formülasyonu",
             ha="center", fontsize=14, fontweight="bold")
-    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 393 boyut        "
+    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 397 boyut (makro dâhil; 393 = makro-öncesi V5 tabanı)        "
             "A: softmax(29-boyutlu simpleks)        γ = 0.99        T ≈ 760 gün/bölüm",
             ha="center", fontsize=9, color="#555")
     plt.tight_layout(); plt.savefig(FIG/"f8_mdp.png"); plt.close()
@@ -3486,7 +3492,7 @@ def run():
     # ---------- F9: Algo architecture sketch ----------
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
     for ax, (name, desc) in zip(axes, [
-        ("DQN", "s -> MLP(64,64) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
+        ("DQN", "s -> MLP(256,128) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
         ("PPO", "s -> policy -> Normal(mu, sigma) -> softmax(w)\nGAE avantaji\nclipped surrogate loss"),
         ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac"),
         ("TD3", "s -> Actor -> tanh (deterministik)\ncift-Q min + gecikmeli politika\nhedef-politika yumusatma")
@@ -4345,6 +4351,7 @@ from data import BIST28
 from env.portfolio_env import ACTION_NAMES
 from ui.services import train_generator
 from ui.state import _agent_key
+from utils.metrics import training_diagnostics
 from utils.portfolio_tl import (
     build_portfolio_table, compute_tl_series, step_rows_for_training,
 )
@@ -4520,6 +4527,45 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         status.success(f"{algo} eğitildi ({len(curve)} iter, {elapsed:.1f}s) "
                        f"ve session'a kaydedildi. Tab 3'te test edebilirsiniz.")
 
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri ---
+    if curve:
+        rt_hist = list(last_rec["env"].reward_terms_history) if last_rec is not None else None
+        diag = training_diagnostics(curve, reward_terms_history=rt_hist)
+        st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+        d_cols = st.columns(5)
+        d_cols[0].metric(
+            "Hareketli Ort. Return",
+            f"{diag.get('ma_return_last', 0.0):.4f}",
+            help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+        )
+        d_cols[1].metric(
+            "Başarı Oranı",
+            f"{diag.get('success_rate', 0.0):.1%}",
+            help="EW benchmark'ı geçen episod oranı",
+        )
+        if "avg_steps" in diag:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                f"{diag['avg_steps']:.1f}",
+                help="Trainer 'steps' alanından hesaplandı",
+            )
+        else:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                "—",
+                help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+            )
+        d_cols[3].metric(
+            "Drawdown Ceza Adımı",
+            str(diag.get("drawdown_penalty_steps", "—")),
+            help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı",
+        )
+        d_cols[4].metric(
+            "Ort. İşlem Maliyeti",
+            f"{diag.get('mean_tx_cost', 0.0):.5f}",
+            help="reward_terms_history'den: adım başı ortalama tx_cost",
+        )
+
 
 def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
     """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri)."""
@@ -4664,6 +4710,43 @@ def _render_training_curves(curve: list, algo: str):
     if "loss" in df.columns:
         c4.plotly_chart(px.line(df, x="iter", y="loss", markers=True,
                                 title="Loss"), use_container_width=True)
+
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri (statik görüntüleme) ---
+    diag = training_diagnostics(curve)
+    st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+    d_cols = st.columns(5)
+    d_cols[0].metric(
+        "Hareketli Ort. Return",
+        f"{diag.get('ma_return_last', 0.0):.4f}",
+        help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+    )
+    d_cols[1].metric(
+        "Başarı Oranı",
+        f"{diag.get('success_rate', 0.0):.1%}",
+        help="EW benchmark'ı geçen episod oranı",
+    )
+    if "avg_steps" in diag:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            f"{diag['avg_steps']:.1f}",
+            help="Trainer 'steps' alanından hesaplandı",
+        )
+    else:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            "—",
+            help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+        )
+    d_cols[3].metric(
+        "Drawdown Ceza Adımı",
+        str(diag.get("drawdown_penalty_steps", "—")),
+        help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı (yeniden eğitimde mevcut)",
+    )
+    d_cols[4].metric(
+        "Ort. İşlem Maliyeti",
+        f"{diag.get('mean_tx_cost', 0.0):.5f}",
+        help="reward_terms_history'den: adım başı ortalama tx_cost (yeniden eğitimde mevcut)",
+    )
 
 ```
 

@@ -50,6 +50,11 @@ vektörünü** seçer. Öğrendiği politika: "hangi piyasa koşulunda, ne kadar
 hangi varlıklara ne ağırlık vermeliyim ki düşüşten korunup risk-ayarlı getiriyi
 büyüteyim?"
 
+**Bu çalışmanın katkısı:** Tek bir makro rejim skorunu hem duruma (V6) hem de ödüle
+(V7 CVaR kuyruk amplifikasyonu) bağlayan birleşik bir tasarım sunması ve López de Prado
+titizliğiyle (DSR/PBO) RL'in pasif baseline'ı dürüstçe geçemediğini gösteren bir BIST
+portföy-RL referansı olmasıdır.
+
 ---
 
 ## 2. Problem Tanımı (Rapor §9.2 / PDF §2)
@@ -236,6 +241,18 @@ eylem problemleri için açıkça tavsiye ettiği** (RL_12) algoritmadır.
 
 Ortak: `SEED=42`, CPU-PyTorch, train-only z-score, `random_start` eğitim çeşitliliği.
 
+### Uygulama notları (dürüst sınırlar)
+
+- **PPO eval örneklemesi:** PPO değerlendirmede politika dağılımından örnekler (deterministik-mean
+  kullanmaz); tekrar-üretilebilirlik `SEED=42` ile sağlanır, ancak stokastik örnekleme nedeniyle
+  farklı seed'lerde eval sonuçları hafifçe değişebilir.
+- **SAC sabit α:** SAC entropi katsayısı `α=0.05` sabit tutulmuştur; otomatik entropi ayarı
+  (hedef-entropi bazlı α güncellemesi) uygulanmamıştır. Bu, keşif-sömürü dengesini ortam
+  koşullarına göre otomatik ölçeklemeyen daha basit bir tasarımdır.
+- **DQN standart DQN:** Uygulama standart DQN'dir (Double DQN değil); hedef ağ max-Q ile
+  hesaplanır, bu da overestimation bias içerebilir. DDQN'in buradaki etkisi deneysel olarak
+  test edilmemiştir.
+
 ---
 
 ## 7. State ve Reward Geliştirme Süreci (Rapor §9.6 / PDF §8) — **EN KRİTİK BÖLÜM**
@@ -295,11 +312,34 @@ ve `figures/` altına 13 figürü üretir.
 | **F12** | **Monte-Carlo stres** (1-yıl ileri terminal getiri dağılımı + VaR/CVaR) |
 | **F13** | **Nominal (TL) vs Reel (USD) NAV** (lira illüzyonu — §9.9) |
 
-### 8.3. Test metrikleri (golden baseline, seed=42 deterministik)
+### 8.3. Test metrikleri (V8 kanonik, seed=42 deterministik)
 
-Değerler `tests/golden/metrics_baseline.csv` içinde 1e-6 toleransta kilitlidir; her refactor
-sonrası `python main.py` ile yeniden üretilip doğrulanır. (Güncel değerler için `results/metrics.csv`.)
+Değerler `results/metrics.csv`'den alınmıştır; `tests/golden/metrics_baseline.csv` içinde 1e-6
+toleransta kilitlidir. Her refactor sonrası `python main.py` ile yeniden üretilip doğrulanır.
 Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metrics_baseline.csv`.
+
+**Test dönemi performans tablosu (2022–2024, seed=42):**
+
+| Ajan | CAGR | Sharpe | Sortino | MaxDD | Calmar | Vol | FinalNAV | Turnover |
+|---|---|---|---|---|---|---|---|---|
+| DQN | **−0.155** | **−0.285** | **−0.398** | **−0.749** | **−0.206** | 0.360 | **0.632** | 0.299 |
+| PPO | +0.646 | +1.692 | +2.717 | −0.266 | +2.428 | 0.326 | 3.907 | 0.139 |
+| SAC | +0.868 | +2.102 | +3.413 | −0.255 | +3.406 | 0.322 | 5.517 | 0.010 |
+| TD3 | +0.866 | +2.045 | +3.292 | −0.259 | +3.338 | 0.332 | 5.503 | 0.041 |
+| BuyHold | +0.896 | +1.915 | +2.974 | −0.269 | +3.336 | 0.334 | 6.713 | 0.000 |
+| EqualWeight | +0.893 | +2.083 | +3.309 | −0.263 | +3.401 | 0.333 | 6.685 | 0.000 |
+| MeanVar | +0.912 | +1.973 | +3.153 | −0.335 | +2.726 | 0.362 | 6.888 | 0.030 |
+
+> DQN V8 sonrası zararla kapandı (FinalNAV 0.632, CAGR −15.5%) — ayrıntı için §8.4.
+
+**Eğitim özet tablosu (`results/training_diagnostics.csv`):**
+
+| Ajan | Episode sayısı | Ort. return | Hareketli ort. return (son) | Başarı oranı | Ort. adım | DD ceza adımı | Ort. işlem maliyeti |
+|---|---|---|---|---|---|---|---|
+| DQN | 12 | −9.33 | −8.35 | 0.167 | 252 | 545 | 0.00206 |
+| PPO | 24 | −5.33 | −5.63 | 0.958 | 400 | 292 | 0.00044 |
+| SAC | 8 | −5.55 | −10.70 | 0.875 | 600 | 250 | 1.9×10⁻⁵ |
+| TD3 | 8 | −1.81 | −7.63 | 1.000 | 600 | 257 | 5.5×10⁻⁵ |
 
 **Titizlik (rigor) katmanı (PARS referans ağacından port, golden-güvenli raporlama).**
 `scripts/rigor_analysis.py`, deterministik eval NAV'larını okuyup `results/rigor_metrics.csv`
@@ -315,6 +355,13 @@ Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metr
   en iyi RL ajanın 1-yıl ileri terminal dağılımı + VaR/CVaR + P(zarar), P(>%20 düşüş).
 
 ### 8.4. İterasyon karşılaştırması — V5 → V6 → V7 (test dönemi, DQN)
+
+> **Önemli not — V7 referans ölçümü:** Aşağıdaki tablo `tests/golden/v7_metrics_baseline.csv`
+> kaynaklı bir **V7 iterasyon-referansının** anlık görüntüsüdür. V8 anti-ezber slippage terimi
+> (`σ=0.001`, yalnız eğitimde) DQN davranışını köklü biçimde değiştirdi; **V8 sonrası DQN
+> baseline-altı / zarar eden bir ajandır** (FinalNAV 0.632, CAGR −15.5% — bkz. §8.3 tablosu).
+> V7 tarihi silinmemeli — meşru iterasyon kaydıdır; fakat **geçerli (GEÇERLİ) sonuçlar §8.3'te
+> verilmektedir**. Bu tablo yalnızca state/reward geliştirme döngüsünün ölçülen yönünü gösterir.
 
 State/reward geliştirme döngüsünün (§7) **ölçülen** etkisi. En zayıf ajan DQN, makro+CVaR
 iterasyonlarından en çok faydalanan; PPO/SAC zaten optimale yakın olduğundan az değişti.
@@ -473,8 +520,13 @@ DQN aksiyon dağılımı:
   ablation forecast'ı yalnız DQN/SAC'a vermeyi gerektirdi.
 - **Ajan hangi davranışı öğrendi?** Düşük-turnover, düşüş-bilinçli tahsis; volatil dönemde
   nakit/ters-volatilite ağırlıklı, sakin dönemde momentum ağırlıklı davranış.
-- **Ajan nerede başarısız kaldı?** Ani rejim kırılmalarında (ör. şok günleri) tepki gecikmeli;
-  PPO forecast özelliğinden faydalanamadı (on-policy + dağılım kayması).
+- **Ajan nerede başarısız kaldı?** Somut bulgular (V8, `results/metrics.csv`): DQN bu
+  ortamda baseline-altı ve zarar eden ajandır (FinalNAV 0.632, CAGR −15.5%); hiçbir RL
+  ajanı mutlak NAV'da pasif baseline'ı geçemedi (EqualWeight 6.69, BuyHold 6.71 — tüm RL
+  ajanlarının üstünde). SAC/TD3 risk-ayarlı metrikte rekabetçidir (Sharpe ~2.0–2.1, MaxDD
+  ~−0.25 — baseline'dan daha iyi Calmar) ancak mutlak getiride pasif kalmaktadır. Ani rejim
+  kırılmalarında (ör. şok günleri) tepki gecikmeli; PPO forecast özelliğinden faydalanamadı
+  (on-policy + dağılım kayması).
 - **Ezberi nasıl önledik (hocanın şartı)?** Hoca finansal projede gürültüyü açıkça şart koştu:
   *"al dediğinde alınmıyor, yukarıdan alırsın… hem gerçekçi olur HEM EZBERİ ÖNLER."* **V8**'de
   gerçekleşen getiriye eğitim-içi slippage (`σ=0.001`, env-yerel RNG) eklendi — ajan tek bir

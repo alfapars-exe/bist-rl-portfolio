@@ -26,7 +26,7 @@
 | Fiyat gürültüsü (V8) | Eğitimde gerçekleşen getiriye slippage (`σ=0.001`) — anti-ezber, hocanın şartı; eval'de kapalı |
 | Algoritmalar | DQN (ayrık), PPO (sürekli on-policy), SAC (sürekli off-policy stokastik), **TD3 (sürekli off-policy deterministik — hocanın tavsiyesi)** |
 | Tahmin katmanı | CNN-LSTM bir-adım getiri tahmincisi (predict-then-optimize, sadece DQN/SAC/TD3) |
-| Doğrulama | 98 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
+| Doğrulama | 101 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
 ---
@@ -373,7 +373,7 @@ kod/
 ├── ui/                   # Streamlit paketi (SRP)
 │   ├── state.py · services.py · charts.py · sidebar.py
 │   └── tabs/ (mdp · train · test · compare)
-└── tests/                # 98 test + golden-master (1e-6)
+└── tests/                # 101 test + golden-master (1e-6)
 ```
 
 ### 9.2. Çalışma mantığı (uçtan uca akış)
@@ -523,7 +523,7 @@ python main.py                  # tam akış: veri → eğitim → backtest → 
 python scripts/rigor_analysis.py # yalnız titizlik katmanı (DSR/PBO/stres/reel-NAV)
 python main.py --skip-data      # cache varsa veriyi atla
 python main.py --walkforward    # walk-forward genelleme doğrulaması (3 kat)
-pytest -q                       # 98 test
+pytest -q                       # 101 test
 pytest -m "not slow"            # hızlı yerel döngü (UI smoke hariç)
 ```
 

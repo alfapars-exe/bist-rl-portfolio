@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 33 kaynak dosya, ~4357 satır.**
+**Toplam: 33 kaynak dosya, ~4770 satır.**
 
 ---
 
@@ -101,6 +101,22 @@ class SACConfig:
     batch_size: int = 128
 
 
+@dataclass(frozen=True)
+class TD3Config:
+    # Twin Delayed DDPG (RL_12) — hocanin surekli-eylem icin TAVSIYE ettigi algoritma.
+    hidden: Tuple[int, int] = (256, 128)
+    lr_pi: float = 3e-4
+    lr_q: float = 3e-4
+    gamma: float = 0.99
+    tau: float = 0.005
+    policy_noise: float = 0.2     # hedef-politika yumusatma gurultusu
+    noise_clip: float = 0.5
+    policy_delay: int = 2         # gecikmeli politika guncellemesi
+    expl_noise: float = 0.1       # eylem kesif gurultusu
+    buffer_size: int = 50_000
+    batch_size: int = 128
+
+
 # ---------------------------------------------------------------------
 # Ortam (env) default'lari — odul sekillendirici hedefleri + iflas/episod.
 # ---------------------------------------------------------------------
@@ -115,6 +131,12 @@ class EnvConfig:
     bankruptcy_penalty: float = 10.0
     random_start: bool = True        # v2: egitimde rastgele pencere (eval'de False gecilir)
     seed: int = 42
+    # v8: fiyat gurultusu / slippage — hocanin ACIK sarti (anti-ezber). Gerceklesen
+    # getiriye kucuk Gauss gurultusu: "al dediginde tam o fiyattan alamazsin, yukaridan
+    # alirsin". YALNIZ egitimde (random_start=True) aktif; eval'de KAPALI -> golden eval
+    # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
+    price_noise_std: float = 0.001
+    price_noise_train_only: bool = True
 
 
 # ---------------------------------------------------------------------
@@ -128,6 +150,8 @@ class TrainConfig:
     ppo_rollout_len: int = 400
     sac_episodes: int = 8
     sac_episode_len: int = 600
+    td3_episodes: int = 8         # TD3 off-policy (SAC ile ayni rejim)
+    td3_episode_len: int = 600
 
 
 # ---------------------------------------------------------------------
@@ -139,6 +163,12 @@ class TrainConfig:
 class RewardConfig:
     w_dsr: float = 0.05      # Diferansiyel Sharpe agirligi (0 -> kapali)
     dsr_eta: float = 0.01    # DSR EWMA orani
+    # v7: rejim-amplified kuyruk-riski (CVaR) cezasi. w_cvar vade-bagli olceklenir
+    # (env: kisa->yuksek, uzun->dusuk). kappa = w_cvar*(1+regime_beta*max(0,regime))^cvar_amp.
+    w_cvar: float = 0.06        # CVaR base agirligi (0 -> kapali)
+    cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
+    regime_beta: float = 1.0    # kriz amplifikasyon gucu
+    cvar_amp: float = 1.0       # rejim amplifikasyon usteli
 
 
 # ---------------------------------------------------------------------
@@ -156,7 +186,24 @@ class ForecastConfig:
     batch: int = 256
     # Hangi ajanlar forecast feature'ini kullansin? V3<->V4 ablation'a gore forecast
     # DQN/SAC'a yaradi (+10pp DQN), PPO'ya zarar verdi (-7.5pp) -> PPO haric tutulur.
-    forecast_agents: tuple = ("DQN", "SAC")
+    # TD3 surekli-kontrolde SAC gibi davranir -> forecast ona da verilir.
+    forecast_agents: tuple = ("DQN", "SAC", "TD3")
+
+
+# ---------------------------------------------------------------------
+# v6: Makro rejim algisi (YALIN OMURGA) — faiz/dolar/altin + bilesik rejim.
+# Tek bir 'regime' skoru hem state'e (algi) hem RewardEngine'e (V7 kriz-amplified
+# kuyruk cezasi) girer. enabled=False -> V5 davranisi (makrosuz). Yalin tutuldu
+# (4 oznitelik) — sinirli BIST verisinde overfitting'e karsi.
+# series: indirilen ham makro tickerlari (yfinance). BIST takvimine hizalanir.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class MacroConfig:
+    enabled: bool = True
+    series: tuple = ("^VIX", "^GSPC", "^TNX", "^IRX", "USDTRY=X", "GC=F")
+    # State'e eklenen 4 yalin oznitelik: rejim omurgasi + faiz/dolar/altin.
+    features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
+    mom_window: int = 20      # momentum/degisim penceresi (gun)
 
 ```
 
@@ -178,6 +225,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from config import MacroConfig
 
 # BIST 30 tickers — KOZAA.IS ve KOZAL.IS prompt gereği hariç tutuldu (28 hisse).
 BIST28 = [
@@ -201,6 +250,7 @@ RESULTS_DIR  = BASE_DIR / "results"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 PARQUET_PATH = DATA_DIR / "prices.parquet"
+MACRO_PARQUET = DATA_DIR / "macro_raw.parquet"
 
 
 def download_bist(tickers=BIST28, start=START, end=END,
@@ -284,6 +334,77 @@ def _synthetic_bist(tickers, start, end) -> pd.DataFrame:
     logret[rally] += 0.0012
     price = 100.0 * np.exp(np.cumsum(logret, axis=0))
     return pd.DataFrame(price, index=idx, columns=tickers)
+
+
+# ---------------------------------------------------------------------
+# v6: Makro rejim verisi (faiz/dolar/altin) — egzojen, BIST takvimine hizali.
+# ---------------------------------------------------------------------
+def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
+                   use_cache: bool = True) -> pd.DataFrame:
+    """Ham makro seri matrisi (T, M): VIX, S&P, faiz (TNX/IRX), USDTRY, altin (GC=F).
+
+    parquet cache -> yfinance -> sentetik fallback. Sentetik veri CACHE'E YAZILMAZ
+    (download_bist ile ayni zehirlenme korumasi)."""
+    series = list(series)
+    if use_cache and MACRO_PARQUET.exists():
+        try:
+            mc = pd.read_parquet(MACRO_PARQUET)
+            mc.index = pd.to_datetime(mc.index)
+            have = [s for s in series if s in mc.columns]
+            if len(have) >= 3 and len(mc) > 500:
+                return mc[have]
+        except Exception as exc:
+            print(f"[WARN] makro cache okunamadı ({exc!r}); yeniden indiriliyor")
+
+    synthetic = False
+    try:
+        import yfinance as yf
+        data = yf.download(series, start=start, end=end, auto_adjust=True,
+                           progress=False, threads=True)
+        mc = (data["Close"].copy() if isinstance(data.columns, pd.MultiIndex)
+              else data[["Close"]].copy())
+        mc = mc.ffill().bfill().dropna(axis=1, how="all")
+        mc = mc[[s for s in series if s in mc.columns]]
+        if mc.shape[1] < 3:
+            raise RuntimeError("Too few macro series returned")
+    except Exception as exc:
+        warnings.warn(
+            f"yfinance makro basarisiz ({exc!r}); SENTETIK makro uretiliyor — "
+            "gercek piyasa verisi DEGIL!", RuntimeWarning, stacklevel=2)
+        print(f"[WARN] yfinance makro başarısız ({exc!r}); sentetik makro üretiliyor")
+        mc = _synthetic_macro(series, start, end)
+        synthetic = True
+
+    if synthetic:
+        print("[WARN] sentetik makro cache'e yazılmadı")
+        return mc
+    try:
+        mc.to_parquet(MACRO_PARQUET)
+    except Exception as exc:
+        print(f"[WARN] makro parquet yazılamadı ({exc!r})")
+    return mc
+
+
+def _synthetic_macro(series, start, end) -> pd.DataFrame:
+    """Determinist sentetik makro (offline + testler). TL sürekli zayıflar (gerçekçi)."""
+    rng = np.random.default_rng(7)
+    idx = pd.bdate_range(start=start, end=end)
+    T = len(idx)
+    vix    = np.clip(18 + 9 * np.abs(np.cumsum(rng.normal(0, 0.25, T)) % 3.0), 9.0, 80.0)
+    gspc   = 1500.0 * np.exp(np.cumsum(rng.normal(0.0003, 0.012, T)))
+    tnx    = np.clip(3.0 + np.cumsum(rng.normal(0, 0.02, T)), 0.5, 6.0)
+    irx    = np.clip(tnx - 0.5 + rng.normal(0, 0.1, T), 0.05, None)
+    usdtry = 2.0 * np.exp(np.cumsum(rng.normal(0.0008, 0.012, T)))   # TL erir
+    gold   = 1300.0 * np.exp(np.cumsum(rng.normal(0.0002, 0.009, T)))  # altın USD/oz
+    full = {"^VIX": vix, "^GSPC": gspc, "^TNX": tnx, "^IRX": irx,
+            "USDTRY=X": usdtry, "GC=F": gold}
+    df = pd.DataFrame(full, index=idx)
+    return df[[s for s in series if s in df.columns]]
+
+
+def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
+    """Makroyu BIST işlem takvimine (index) reindex + ffill/bfill (causal)."""
+    return macro_raw.reindex(index).ffill().bfill()
 
 
 def train_test_split(df: pd.DataFrame, split=SPLIT):
@@ -539,6 +660,31 @@ def success_vs_benchmark(nav_agent: np.ndarray, nav_bench: np.ndarray) -> int:
         return 0
     m = min(len(nav_agent), len(nav_bench))
     return int(nav_agent[m - 1] >= nav_bench[m - 1])
+
+
+def real_nav(nav: np.ndarray, usdtry: np.ndarray) -> np.ndarray:
+    """Reel (USD-bazli) NAV — nominal TL NAV'ini USD/TRY ile deflate eder (lira illuzyonu, §9.9).
+
+    Hoca: "baslangic paranı o yilin degerine gore normalize et." Nominal NAV TL
+    cinsindendir; test doneminde (2022-2024) TL hizla deger kaybettiginden nominal
+    kazanc satin-alma gucunu abartir ("lira illuzyonu"). Reel NAV baslangic USD/TRY'ye
+    normalize eder:  real_t = (nav_t / nav_0) / (usdtry_t / usdtry_0).
+    Baslangicta 1.0'dan baslar -> nominal NAV ile dogrudan kiyaslanabilir; TL deger
+    kaybettikce reel NAV nominalin altinda kalir.
+
+    GOZLEMSEL (yalniz raporlama) — egitim/eval/odul sayisal yolunu DEGISTIRMEZ; golden
+    metrikleri etkilenmez. Ajanlar-arasi GORELI siralama para biriminden bagimsizdir
+    (hepsi ayni TL evreni) -> reel donusum sirayi degistirmez, mutlak yorumu duzeltir.
+    """
+    nav = np.asarray(nav, dtype=float)
+    fx = np.asarray(usdtry, dtype=float)
+    if nav.size == 0 or fx.size == 0:
+        return nav.copy()
+    m = min(len(nav), len(fx))
+    nav, fx = nav[:m], fx[:m]
+    nav0 = nav[0] if abs(nav[0]) > 1e-12 else 1e-12
+    fx0 = fx[0] if abs(fx[0]) > 1e-12 else 1e-12
+    return (nav / nav0) / (fx / fx0)
 
 ```
 
@@ -1113,8 +1259,11 @@ class PortfolioEnv:
                  bankruptcy_penalty: float | None = None,
                  random_start: bool = False,
                  seed: int | None = None,
+                 price_noise_std: float = EnvConfig.price_noise_std,
+                 price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  w_dsr: float = RewardConfig.w_dsr,
-                 dsr_eta: float = RewardConfig.dsr_eta):
+                 dsr_eta: float = RewardConfig.dsr_eta,
+                 macro=None, regime=None):
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
         self.feat_names = list(features.keys())
@@ -1140,6 +1289,8 @@ class PortfolioEnv:
             vol_target=vol_target, turnover_target=turnover_target,
             ema_alpha=ema_alpha, enabled=adaptive,
         )
+        # v7: CVaR kuyruk cezasi vade-bagli olceklenir (kisa->yuksek tail-bilinci).
+        cvar_factor = {"short": 1.6, "medium": 1.0, "long": 0.6}.get(horizon, 1.0)
         self.reward = RewardEngine(
             shaper=shaper,
             dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
@@ -1148,6 +1299,10 @@ class PortfolioEnv:
             bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
             bankruptcy_penalty=(float(bankruptcy_penalty)
                                 if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
+            w_cvar=RewardConfig.w_cvar * cvar_factor,   # v7: rejim-amplified kuyruk cezasi
+            cvar_alpha=RewardConfig.cvar_alpha,
+            regime_beta=RewardConfig.regime_beta,
+            cvar_amp=RewardConfig.cvar_amp,
         )
 
         self.N_assets = prices.shape[1]
@@ -1155,7 +1310,12 @@ class PortfolioEnv:
         self.N = self.N_assets + (1 if cash_asset else 0)
         self.window = max(window, self.minvol_window)
         self.F = self.feat_tensor.shape[2]
-        self.state_dim = self.F * self.N_assets + self.N
+        # v6: makro rejim blogu (z-skorlu (T,M), state'e eklenir) + HAM regime
+        # (T,) ∈[-1,1] — V7 odul kriz-amplifikasyonu icin step()'te kullanilir.
+        self.macro = None if macro is None else np.asarray(macro, dtype=np.float32)
+        self.regime = None if regime is None else np.asarray(regime, dtype=np.float32)
+        self.M = 0 if self.macro is None else int(self.macro.shape[1])
+        self.state_dim = self.F * self.N_assets + self.M + self.N
         self.action_dim = self.N
         # n_days: toplam zaman adimi (satir). 't' ile yalniz buyuk/kucuk harfle
         # ayrilan 'T' adi karisikliga yol aciyordu (SonarCloud python:S1845) -> n_days.
@@ -1165,6 +1325,11 @@ class PortfolioEnv:
         # kurulum sirasindan bagimsiz) + tohumlu rastgele-baslangic destegi.
         self.random_start = bool(random_start)
         self.rng = np.random.default_rng(seed)
+        # v8: fiyat gurultusu/slippage (hocanin sarti). train_only -> yalniz random_start
+        # (egitim) acik; eval (random_start=False) -> kapali, golden eval determinizmi korunur.
+        self.price_noise_std = float(price_noise_std)
+        self._noise_active = (self.price_noise_std > 0.0 and
+                              (self.random_start if price_noise_train_only else True))
         self._reset_state()
 
     def _reset_state(self):
@@ -1199,12 +1364,21 @@ class PortfolioEnv:
 
     def _obs(self) -> np.ndarray:
         snap = self.feat_tensor[self.t].reshape(-1)
-        return np.concatenate([snap, self.w]).astype(np.float32)
+        parts = [snap]
+        if self.macro is not None:                 # v6: makro rejim blogu
+            parts.append(self.macro[self.t])
+        parts.append(self.w)
+        return np.concatenate(parts).astype(np.float32)
 
     def _risky_returns(self) -> np.ndarray:
         p0 = self.prices[self.t]
         p1 = self.prices[self.t + 1]
         r = (p1 - p0) / np.maximum(p0, 1e-9)
+        if self._noise_active:
+            # v8: slippage/fiyat gurultusu (hocanin sarti, anti-ezber) — gerceklesen
+            # riskli getiriye kucuk Gauss gurultusu. Env-yerel rng -> global RNG'ye
+            # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
+            r = r + self.rng.normal(0.0, self.price_noise_std, size=r.shape).astype(np.float32)
         if self.cash_asset:
             r = np.concatenate([r, [0.0]])
         return r
@@ -1227,8 +1401,9 @@ class PortfolioEnv:
         r_vec = self._risky_returns()
         gross_port_r = float((w_new * r_vec).sum())
 
+        regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-                                      nav=self.nav, peak=self.peak)
+                                      nav=self.nav, peak=self.peak, regime=regime_t)
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 
@@ -1328,6 +1503,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import numpy as np
+from scipy.stats import norm
 
 
 # ---------------------------------------------------------------------
@@ -1436,20 +1612,30 @@ class RewardEngine:
     """
 
     def __init__(self, shaper: AdaptiveRewardShaper, dsharpe: DifferentialSharpe,
-                 w_dsr: float, bankruptcy_nav: float, bankruptcy_penalty: float):
+                 w_dsr: float, bankruptcy_nav: float, bankruptcy_penalty: float,
+                 w_cvar: float = 0.0, cvar_alpha: float = 0.05,
+                 regime_beta: float = 1.0, cvar_amp: float = 1.0):
         self.shaper = shaper
         self.dsharpe = dsharpe
         self.w_dsr = float(w_dsr)
         self.bankruptcy_nav = float(bankruptcy_nav)
         self.bankruptcy_penalty = float(bankruptcy_penalty)
+        # v7: rejim-amplified kuyruk-riski (CVaR) cezasi.
+        self.w_cvar = float(w_cvar)
+        self.regime_beta = float(regime_beta)
+        self.cvar_amp = float(cvar_amp)
+        # Parametrik (Gauss) ileri CVaR/ES carpani: ES_alpha = sigma * phi(z_alpha)/alpha.
+        # vol_ewma'yi (mevcut makine) sigma proxy'si olarak yeniden kullanir (ileri-bakisli).
+        z = float(norm.ppf(cvar_alpha))
+        self._cvar_mult = float(norm.pdf(z) / max(cvar_alpha, 1e-9))
 
     def reset(self):
         self.shaper.reset()
         self.dsharpe.reset()
 
     def compute(self, *, gross_port_r: float, delta_w_l1: float,
-                nav: float, peak: float) -> RewardOutcome:
-        """Aritmetik sirasi onceki PortfolioEnv.step() ile BIREBIR aynidir."""
+                nav: float, peak: float, regime: float = 0.0) -> RewardOutcome:
+        """Aritmetik sirasi onceki PortfolioEnv.step() ile ayni; +CVaR terimi (V7)."""
         eta_t, lambda_t, tau_t, vol_ewma, to_ewma = \
             self.shaper.update_and_shape(gross_port_r, delta_w_l1)
 
@@ -1469,12 +1655,20 @@ class RewardEngine:
         dd_penalty = lambda_t * max(0.0, dd - tau_t)
         dsr = self.dsharpe.update(port_r_net)
         dsr_term = self.w_dsr * dsr
-        total = log_r - tx_cost - dd_penalty - bankruptcy_penalty + dsr_term
+
+        # v7: ileri-parametrik CVaR kuyruk cezasi; krizde (regime>0) kappa amplify olur.
+        cvar = vol_ewma * self._cvar_mult                       # ES_alpha ~ sigma·mult
+        rm = 1.0 + self.regime_beta * max(0.0, float(regime))   # kriz amplifikasyonu
+        cvar_penalty = self.w_cvar * (rm ** self.cvar_amp) * cvar
+
+        total = (log_r - tx_cost - dd_penalty - bankruptcy_penalty
+                 + dsr_term - cvar_penalty)
 
         terms = dict(
             log_return=log_r, tx_cost=tx_cost,
             drawdown_penalty=dd_penalty, total=total,
             dsr=dsr, dsr_term=dsr_term,
+            cvar_penalty=cvar_penalty, regime=float(regime),   # v7
             eta_t=eta_t, lambda_t=lambda_t, tau_t=tau_t,
             vol_ewma=vol_ewma, turnover_ewma=to_ewma,
             dd=dd, gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
@@ -2153,8 +2347,8 @@ from typing import Callable, Dict
 
 import pandas as pd
 
-from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig
+from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
+from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig, TD3Config
 from core.features import select_features
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 
@@ -2193,11 +2387,26 @@ def _build_sac(state_dim: int, action_dim: int, hp: dict, seed: int) -> SACAgent
     )
 
 
+def _build_td3(state_dim: int, action_dim: int, hp: dict, seed: int) -> TD3Agent:
+    return TD3Agent(
+        state_dim, action_dim,
+        hidden=tuple(hp.get("hidden", TD3Config.hidden)),
+        lr_pi=hp.get("lr_pi", TD3Config.lr_pi), lr_q=hp.get("lr_q", TD3Config.lr_q),
+        gamma=hp.get("gamma", TD3Config.gamma), tau=hp.get("tau", TD3Config.tau),
+        policy_noise=hp.get("policy_noise", TD3Config.policy_noise),
+        noise_clip=hp.get("noise_clip", TD3Config.noise_clip),
+        policy_delay=hp.get("policy_delay", TD3Config.policy_delay),
+        expl_noise=hp.get("expl_noise", TD3Config.expl_noise),
+        batch_size=hp.get("batch_size", TD3Config.batch_size), seed=seed,
+    )
+
+
 # OCP: yeni algoritma eklemek = bu registry'ye kayit eklemek.
 AGENT_BUILDERS: Dict[str, Callable] = {
     "DQN": _build_dqn,
     "PPO": _build_ppo,
     "SAC": _build_sac,
+    "TD3": _build_td3,
 }
 
 
@@ -2214,7 +2423,8 @@ def build_agent(algo: str, state_dim: int, action_dim: int,
 def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               horizon: str = "medium", adaptive: bool = True,
               max_steps: int, random_start: bool = False, seed: int = SEED,
-              reward_overrides: dict | None = None) -> PortfolioEnv:
+              reward_overrides: dict | None = None,
+              macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
     reward_overrides (UI'nin reward_cfg'i): None/eksik anahtarlar env'in preset
@@ -2234,6 +2444,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         ema_alpha=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
+        macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
     )
 
 ```
@@ -2266,7 +2477,7 @@ from typing import Iterator, Optional
 
 import numpy as np
 
-from agents import DQNAgent, PPOAgent, SACAgent
+from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
 from utils.metrics import success_vs_benchmark
 
 
@@ -2349,10 +2560,28 @@ def train_ppo(agent, env, n_updates: Optional[int] = None,
         }
 
 
-# --------------------------------------------------------------------- SAC
-def train_sac(agent, env, n_episodes: Optional[int] = None,
-              warmup: int = 500, train_every: int = 4,
-              ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
+# --------------------------------------------------- SAC / TD3 (off-policy, ortak)
+def _offpolicy_step(agent, env, s, step: int, warmup: int, train_every: int):
+    """Tek off-policy adim: aksiyon sec (warmup'ta rastgele) -> env.step -> remember
+    -> kosullu train_step. Donguden cikarildi (SonarCloud S3776 bilissel karmasiklik).
+    RNG tuketim sirasi onceki SAC/TD3 donguleriyle birebir aynidir (golden-duyarli)."""
+    if len(agent.buffer) < warmup:
+        a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
+    else:
+        a = agent.act(s)
+    s2, r, done, trunc, _ = env.step(a)
+    agent.remember(s, a, r, s2, float(done))
+    loss = None
+    if len(agent.buffer) > warmup and step % train_every == 0:
+        loss = agent.train_step()
+    return s2, r, done, trunc, loss
+
+
+def _train_offpolicy(agent, env, algo: str, n_episodes: Optional[int],
+                     warmup: int, train_every: int,
+                     ew_nav: Optional[np.ndarray]) -> Iterator[dict]:
+    """SAC ve TD3 icin ORTAK adim-bazli off-policy generator (DRY). Tek fark 'algo'
+    etiketi; SAC stokastik, TD3 deterministik politikayi ajan icinde uygular."""
     for ep in _counter(n_episodes):
         s, _ = env.reset()
         done = trunc = False
@@ -2360,24 +2589,16 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
         ep_reward = 0.0
         losses = []
         while not (done or trunc):
-            if len(agent.buffer) < warmup:
-                a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
-            else:
-                a = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
-            if len(agent.buffer) > warmup and step % train_every == 0:
-                loss = agent.train_step()
-                if loss is not None:
-                    losses.append(loss)
-            s = s2
+            s, r, done, trunc, loss = _offpolicy_step(agent, env, s, step, warmup, train_every)
+            if loss is not None:
+                losses.append(loss)
             step += 1
             ep_reward += r
         nav_agent = np.array(env.nav_history[1:])
         success = (success_vs_benchmark(nav_agent, ew_nav[:len(nav_agent)])
                    if ew_nav is not None else 0)
         yield {
-            "algo": "SAC", "iter": ep, "episode": ep,
+            "algo": algo, "iter": ep, "episode": ep,
             "reward": float(ep_reward),  # L3: tum ajanlarda = iterasyon boyu toplam cevre odulu
             "nav": float(env.nav), "train_nav": float(env.nav),
             "gain": float(env.nav) - 1.0,
@@ -2386,6 +2607,20 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
             "success": int(success),
             "agent": agent, "env": env,
         }
+
+
+def train_sac(agent, env, n_episodes: Optional[int] = None,
+              warmup: int = 500, train_every: int = 4,
+              ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
+    yield from _train_offpolicy(agent, env, "SAC", n_episodes, warmup, train_every, ew_nav)
+
+
+def train_td3(agent, env, n_episodes: Optional[int] = None,
+              warmup: int = 500, train_every: int = 4,
+              ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
+    """TD3 off-policy — SAC ile ayni adim-bazli semayi (`_train_offpolicy`) paylasir;
+    politika ajan icinde deterministiktir (hedef-politika yumusatma + gecikmeli guncelleme)."""
+    yield from _train_offpolicy(agent, env, "TD3", n_episodes, warmup, train_every, ew_nav)
 
 
 # --------------------------------------------------------------------- dispatch
@@ -2401,12 +2636,17 @@ def _launch_sac(agent, env, n_iters, rollout_len, ew_nav):
     return train_sac(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
 
 
+def _launch_td3(agent, env, n_iters, rollout_len, ew_nav):
+    return train_td3(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
+
+
 # SOLID P4 (OCP): yeni ajan tipi eklemek = bu registry'ye kayit eklemek;
 # train() govdesi degismez. Kayit yoksa TypeError (onceki davranisla ayni).
 _TRAINERS: dict = {
     DQNAgent: _launch_dqn,
     PPOAgent: _launch_ppo,
     SACAgent: _launch_sac,
+    TD3Agent: _launch_td3,
 }
 
 
@@ -2621,7 +2861,9 @@ def load_agent(path):
     build_agent ile ayni mimaride iskelet kurulur (config default hidden=(256,128)
     egitimdekiyle ayni), sonra state_dict'ler ad'a gore yuklenir.
     """
-    ckpt = torch.load(Path(path), map_location="cpu", weights_only=False)
+    # weights_only=True (guvenli unpickler): checkpoint yalniz metadata (str/int/bool)
+    # + tensor state_dict'leri icerir; rastgele kod calistirma riski yok (SonarCloud S5042).
+    ckpt = torch.load(Path(path), map_location="cpu", weights_only=True)
     agent = build_agent(ckpt["algo"], int(ckpt["state_dim"]), int(ckpt["action_dim"]))
     for name, sd in ckpt["modules"].items():
         module = getattr(agent, name, None)
@@ -2641,8 +2883,9 @@ def load_agent(path):
 ```python
 """Main training + backtest driver — yeni paket yapısı + horizon + adaptive reward.
 
-Trains DQN (discrete, 6 templates), PPO (continuous), SAC (continuous) on BIST 28
-2015-2021 ve 2022-2024 test setinde backtest eder. Tüm ajanlar PyTorch'tadır ve
+Trains DQN (discrete, 6 templates), PPO (continuous), SAC (continuous) ve TD3
+(continuous, hocanin tavsiyesi) on BIST 28 — 2015-2021 train, 2022-2024 test
+setinde backtest eder. Tüm ajanlar PyTorch'tadır ve
 özellikler `utils.features.TrainScaler` ile train-only z-score standardize edilir.
 """
 from __future__ import annotations
@@ -2655,11 +2898,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from data import download_bist, train_test_split
+from data import download_bist, train_test_split, download_macro, align_macro
 from utils.features import add_features, TrainScaler
+from utils.macro import add_macro_features, MacroScaler
 from utils.metrics import summary, training_diagnostics
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
-from config import SEED, TrainConfig, EnvConfig, ForecastConfig
+from config import SEED, TrainConfig, EnvConfig, ForecastConfig, MacroConfig, TD3Config  # noqa: F401
 from core.factory import build_agent, build_env
 from core.features import select_features
 from core.persistence import save_agent
@@ -2683,6 +2927,11 @@ class DataBundle:
     feats_tr: dict
     feats_te: dict
     scaler: TrainScaler
+    # v6: makro rejim blogu (z-skorlu state) + ham regime (V7 odul amplify). None -> V5.
+    macro_tr: "np.ndarray | None" = None
+    macro_te: "np.ndarray | None" = None
+    regime_tr: "np.ndarray | None" = None
+    regime_te: "np.ndarray | None" = None
 
 
 def prepare_data() -> DataBundle:
@@ -2703,8 +2952,25 @@ def prepare_data() -> DataBundle:
     feats_tr = scaler.transform(feats_tr_raw)
     feats_te = scaler.transform(feats_te_raw)
     print(f"Train: {px_tr.shape}, Test: {px_te.shape}, tickers: {px.shape[1]}")
+
+    # v6: makro rejim (faiz/dolar/altin) — train-only z-score (leak-safe), ham regime ayri.
+    macro_tr = macro_te = regime_tr = regime_te = None
+    if MacroConfig.enabled:
+        mraw = align_macro(download_macro(), px.index)
+        mfeat = add_macro_features(mraw)                       # (T,4) ham
+        regime_full = mfeat["regime"]                          # ham ∈[-1,1] -> V7 amplify
+        msc = MacroScaler().fit(mfeat.loc[px_tr.index])        # YALNIZ train (sizintisiz)
+        macro_z = msc.transform(mfeat)                         # (T,4) z-skorlu -> state
+        macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
+        macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
+        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
+        regime_te = regime_full.loc[px_te.index].to_numpy(np.float32)
+        print(f"Makro: {macro_z.shape[1]} oznitelik (regime/slope/usd_try/gold_tl)")
+
     return DataBundle(px=px, px_tr=px_tr, px_te=px_te,
-                      feats_tr=feats_tr, feats_te=feats_te, scaler=scaler)
+                      feats_tr=feats_tr, feats_te=feats_te, scaler=scaler,
+                      macro_tr=macro_tr, macro_te=macro_te,
+                      regime_tr=regime_tr, regime_te=regime_te)
 
 
 def _feats_for(feats: dict, algo: str) -> dict:
@@ -2717,7 +2983,8 @@ def _feats_for(feats: dict, algo: str) -> dict:
 def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
               horizon: str = "medium", adaptive: bool = True):
     env = build_env("DQN", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=252, random_start=EnvConfig.random_start, seed=SEED)
+                    max_steps=252, random_start=EnvConfig.random_start, seed=SEED,
+                    macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("DQN", env.state_dim, env.n_discrete, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
@@ -2735,7 +3002,8 @@ def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
               rollout_len: int = TrainConfig.ppo_rollout_len,
               horizon: str = "medium", adaptive: bool = True):
     env = build_env("PPO", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=10_000, random_start=EnvConfig.random_start, seed=SEED)
+                    max_steps=10_000, random_start=EnvConfig.random_start, seed=SEED,
+                    macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("PPO", env.state_dim, env.action_dim, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len):
@@ -2754,7 +3022,8 @@ def train_sac(bundle: DataBundle, n_episodes: int = TrainConfig.sac_episodes,
               horizon: str = "medium", adaptive: bool = True):
     env = build_env("SAC", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
                     max_steps=max_steps_per_episode,
-                    random_start=EnvConfig.random_start, seed=SEED)
+                    random_start=EnvConfig.random_start, seed=SEED,
+                    macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("SAC", env.state_dim, env.action_dim, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
@@ -2765,10 +3034,29 @@ def train_sac(bundle: DataBundle, n_episodes: int = TrainConfig.sac_episodes,
     return agent, curve
 
 
+# -------------------- TD3 training --------------------
+def train_td3(bundle: DataBundle, n_episodes: int = TrainConfig.td3_episodes,
+              max_steps_per_episode: int = TrainConfig.td3_episode_len,
+              horizon: str = "medium", adaptive: bool = True):
+    # TD3 surekli-kontrol (hocanin tavsiyesi) — SAC ile ayni off-policy rejim.
+    env = build_env("TD3", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
+                    max_steps=max_steps_per_episode,
+                    random_start=EnvConfig.random_start, seed=SEED,
+                    macro=bundle.macro_tr, regime=bundle.regime_tr)
+    agent = build_agent("TD3", env.state_dim, env.action_dim, seed=SEED)
+    curve = []
+    for rec in train_loop(agent, env, n_iters=n_episodes):
+        curve.append({"episode": rec["episode"], "train_nav": rec["train_nav"], "steps": rec["steps"],
+                      "reward": rec["reward"], "gain": rec["gain"],
+                      "success": int(rec["nav"] > 1.0)})
+        print(f"[TD3] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
+    return agent, curve
+
+
 # -------------------- Evaluation --------------------
 def evaluate(bundle: DataBundle, agent, algo: str, horizon: str = "medium", adaptive: bool = True):
     env = build_env(algo, bundle.px_te, bundle.feats_te, horizon=horizon, adaptive=adaptive,
-                    max_steps=10_000)
+                    max_steps=10_000, macro=bundle.macro_te, regime=bundle.regime_te)
     return rollout_evaluate(agent, env)
 
 
@@ -2791,9 +3079,14 @@ def run():
     sac_agent, sac_curve = train_sac(bundle)
     print("SAC total time:", round(time.time() - t2, 1), "s")
 
+    t3 = time.time()
+    td3_agent, td3_curve = train_td3(bundle)          # hocanin tavsiyesi — SAC'tan SONRA
+    print("TD3 total time:", round(time.time() - t3, 1), "s")
+
     print("=" * 60)
     results = {}
-    for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent), ("SAC", sac_agent)]:
+    for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent),
+                        ("SAC", sac_agent), ("TD3", td3_agent)]:
         bt = evaluate(bundle, agent, name)
         m = summary(bt["nav"], bt["rets"], bt["weights"])
         results[name] = dict(backtest=bt, metrics=m)
@@ -2822,20 +3115,22 @@ def run():
     pd.DataFrame(dqn_curve).to_csv(RES / "dqn_curve.csv", index=False)
     pd.DataFrame(ppo_curve).to_csv(RES / "ppo_curve.csv", index=False)
     pd.DataFrame(sac_curve).to_csv(RES / "sac_curve.csv", index=False)
+    pd.DataFrame(td3_curve).to_csv(RES / "td3_curve.csv", index=False)
 
     # PDF §9.7 toplu egitim teshisleri (gozlemsel; golden metriklerini etkilemez).
-    curves = {"DQN": dqn_curve, "PPO": ppo_curve, "SAC": sac_curve}
+    curves = {"DQN": dqn_curve, "PPO": ppo_curve, "SAC": sac_curve, "TD3": td3_curve}
     diag = {n: training_diagnostics(curves[n], results[n]["backtest"].get("reward_terms_history"))
-            for n in ("DQN", "PPO", "SAC")}
+            for n in ("DQN", "PPO", "SAC", "TD3")}
     pd.DataFrame(diag).T.to_csv(RES / "training_diagnostics.csv")
     print(pd.DataFrame(diag).T.round(4))
 
     # PDF §11: egitilmis modelleri diske kaydet (sunumda yeniden egitmeden test).
-    for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent), ("SAC", sac_agent)]:
+    for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent),
+                        ("SAC", sac_agent), ("TD3", td3_agent)]:
         save_agent(agent, name, MODELS / f"{name}.pt", horizon="medium", adaptive=True)
     print("Modeller kaydedildi:", MODELS)
 
-    for name in ["DQN", "PPO", "SAC"]:
+    for name in ["DQN", "PPO", "SAC", "TD3"]:
         W = results[name]["backtest"]["weights"]
         cols = list(bundle.px_te.columns) + ["CASH"]
         pd.DataFrame(W, columns=cols).to_csv(RES / f"weights_{name}.csv", index=False)
@@ -2857,9 +3152,10 @@ if __name__ == "__main__":
 """Tek komutla tüm deneyi çalıştırır.
 
 Akış:
-  1) BIST 30 fiyatlarını yfinance ile indir (veya varsa CSV'den yükle)
-  2) DQN + PPO + SAC eğit, test setinde tüm stratejileri backtest et
-  3) 9 figürü (f1..f9) figures/ klasörüne kaydet
+  1) BIST 28 fiyatlarını yfinance ile indir (veya varsa cache'den yükle)
+  2) DQN + PPO + SAC + TD3 eğit, test setinde tüm stratejileri backtest et
+  3) Titizlik (rigor) katmanı: Deflated Sharpe + PBO + Monte-Carlo stres + reel-NAV
+  4) 13 figürü (f1..f13) figures/ klasörüne kaydet
 
 Kullanım:
   python main.py                 # her şeyi çalıştır
@@ -2901,15 +3197,23 @@ def step_data():
 
 def step_train():
     print("=" * 70)
-    print("[2/3] DQN + PPO + SAC eğitimi ve backtest ...")
+    print("[2/4] DQN + PPO + SAC + TD3 eğitimi ve backtest ...")
     print("=" * 70)
     import train
     train.run()
 
 
+def step_rigor():
+    print("=" * 70)
+    print("[3/4] Titizlik katmanı: Deflated Sharpe + PBO + Monte-Carlo stres + reel-NAV ...")
+    print("=" * 70)
+    from scripts import rigor_analysis
+    rigor_analysis.run()
+
+
 def step_plots():
     print("=" * 70)
-    print("[3/3] 9 figür üretiliyor ...")
+    print("[4/4] 13 figür üretiliyor ...")
     print("=" * 70)
     import plots
     plots.run()
@@ -2946,12 +3250,14 @@ def main():
     ap.add_argument("--skip-data",  action="store_true", help="Veri indirme adımını atla")
     ap.add_argument("--skip-train", action="store_true", help="Eğitim + backtest adımını atla")
     ap.add_argument("--skip-plots", action="store_true", help="Çizim adımını atla")
+    ap.add_argument("--skip-rigor", action="store_true", help="Titizlik (DSR/PBO/stres) adımını atla")
     ap.add_argument("--walkforward", action="store_true", help="Walk-forward doğrulama çalıştır (v2)")
     args = ap.parse_args()
 
     t0 = time.time()
     if not args.skip_data:  step_data()
     if not args.skip_train: step_train()
+    if not args.skip_rigor: step_rigor()       # plot'tan ÖNCE (F11-F13 rigor çıktısını okur)
     if not args.skip_plots: step_plots()
     if args.walkforward:    step_walkforward()
 
@@ -2995,8 +3301,10 @@ plt.rcParams.update({
     "figure.dpi": 140,
     "savefig.dpi": 200,
 })
-PAL = {"DQN":"#d62728", "PPO":"#1f77b4", "SAC":"#2ca02c",
+PAL = {"DQN":"#d62728", "PPO":"#1f77b4", "SAC":"#2ca02c", "TD3":"#17becf",
        "BuyHold":"#7f7f7f", "EqualWeight":"#ff7f0e", "MeanVar":"#9467bd"}
+# RL ajanlari (kalin/duz cizgi); baseline'lar ince/kesik. TD3 4. ajan olarak eklendi.
+RL_AGENTS = ["DQN", "PPO", "SAC", "TD3"]
 
 
 def run():
@@ -3005,8 +3313,8 @@ def run():
     fig, ax = plt.subplots(figsize=(10, 5))
     for c in navs.columns:
         ax.plot(navs.index, navs[c], label=c, color=PAL.get(c, None),
-                lw=1.8 if c in ["DQN", "PPO", "SAC"] else 1.2,
-                ls="-" if c in ["DQN", "PPO", "SAC"] else "--")
+                lw=1.8 if c in RL_AGENTS else 1.2,
+                ls="-" if c in RL_AGENTS else "--")
     ax.set_ylabel("Portföy Değeri (NAV, başlangıç=1)")
     ax.set_xlabel("Tarih"); ax.set_title("BIST 30 — RL vs Klasik Stratejiler (Test dönemi)")
     ax.legend(ncol=2, fontsize=9)
@@ -3031,8 +3339,8 @@ def run():
     fig, ax = plt.subplots(figsize=(10, 4))
     for c in roll_sh.columns:
         ax.plot(roll_sh.index, roll_sh[c], label=c, color=PAL.get(c, None),
-                lw=1.5 if c in ["DQN", "PPO", "SAC"] else 1.0,
-                ls="-" if c in ["DQN", "PPO", "SAC"] else "--")
+                lw=1.5 if c in RL_AGENTS else 1.0,
+                ls="-" if c in RL_AGENTS else "--")
     ax.axhline(0, color="k", lw=0.5)
     ax.set_ylabel("60-Gün Rolling Sharpe"); ax.set_title("Koşullu Risk-Getiri Dengesi")
     ax.legend(ncol=2, fontsize=9); plt.tight_layout()
@@ -3107,8 +3415,8 @@ def run():
     plt.tight_layout(); plt.savefig(FIG/"f5_risk_return.png", bbox_inches="tight"); plt.close()
     print("f5 ok")
 
-    # ---------- F6: PPO / SAC / DQN weights heatmap ----------
-    for algo in ["PPO", "SAC", "DQN"]:
+    # ---------- F6: PPO / SAC / DQN / TD3 weights heatmap ----------
+    for algo in ["PPO", "SAC", "DQN", "TD3"]:
         W = pd.read_csv(RES/f"weights_{algo}.csv")
         # sample every N days, transpose for display
         step = max(1, len(W) // 200)
@@ -3127,7 +3435,8 @@ def run():
     dqn_c = pd.read_csv(RES/"dqn_curve.csv")
     ppo_c = pd.read_csv(RES/"ppo_curve.csv")
     sac_c = pd.read_csv(RES/"sac_curve.csv")
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    td3_c = pd.read_csv(RES/"td3_curve.csv")
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
     axes[0].plot(dqn_c["episode"], dqn_c["reward"], "o-", color=PAL["DQN"])
     axes[0].set_title("DQN — Epizot Ödülü"); axes[0].set_xlabel("Epizot"); axes[0].set_ylabel("Kümülatif Ödül")
     ax2 = axes[0].twinx()
@@ -3143,6 +3452,9 @@ def run():
 
     axes[2].plot(sac_c["episode"], sac_c["train_nav"], "o-", color=PAL["SAC"])
     axes[2].set_title("SAC — Epizot Sonu NAV"); axes[2].set_xlabel("Epizot"); axes[2].set_ylabel("NAV (tren)")
+
+    axes[3].plot(td3_c["episode"], td3_c["train_nav"], "o-", color=PAL["TD3"])
+    axes[3].set_title("TD3 — Epizot Sonu NAV"); axes[3].set_xlabel("Epizot"); axes[3].set_ylabel("NAV (tren)")
     plt.tight_layout(); plt.savefig(FIG/"f7_training_curves.png"); plt.close()
     print("f7 ok")
 
@@ -3154,7 +3466,7 @@ def run():
     env_box   = patches.FancyBboxPatch((8.8, 1.8), 2.4, 1.3, boxstyle="round,pad=0.1",
                                         fc="#ffe5c8", ec="#a64", lw=1.5)
     ax.add_patch(agent_box); ax.add_patch(env_box)
-    ax.text(2.0, 2.45, "AJAN\n(DQN/PPO/SAC)", ha="center", va="center", fontsize=12, fontweight="bold")
+    ax.text(2.0, 2.45, "AJAN\n(DQN/PPO/SAC/TD3)", ha="center", va="center", fontsize=12, fontweight="bold")
     ax.text(10.0, 2.45, "ORTAM\n(BIST 30 Piyasa)", ha="center", va="center", fontsize=12, fontweight="bold")
     ax.annotate("", xy=(8.8, 2.7), xytext=(3.2, 2.7),
                 arrowprops=dict(arrowstyle="->", lw=2, color="#246"))
@@ -3172,11 +3484,12 @@ def run():
     print("f8 ok")
 
     # ---------- F9: Algo architecture sketch ----------
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
     for ax, (name, desc) in zip(axes, [
         ("DQN", "s -> MLP(64,64) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
         ("PPO", "s -> policy -> Normal(mu, sigma) -> softmax(w)\nGAE avantaji\nclipped surrogate loss"),
-        ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac")
+        ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac"),
+        ("TD3", "s -> Actor -> tanh (deterministik)\ncift-Q min + gecikmeli politika\nhedef-politika yumusatma")
     ]):
         ax.axis("off")
         ax.text(0.5, 0.88, name, ha="center", fontsize=20, fontweight="bold",
@@ -3185,14 +3498,14 @@ def run():
         rect = patches.FancyBboxPatch((0.05, 0.08), 0.9, 0.84, boxstyle="round,pad=0.02",
                                        fc="none", ec=PAL[name], lw=2)
         ax.add_patch(rect)
-    plt.suptitle("Üç Ajanın Mimari Özeti", y=1.02, fontsize=14, fontweight="bold")
+    plt.suptitle("Dört Ajanın Mimari Özeti", y=1.02, fontsize=14, fontweight="bold")
     plt.tight_layout(); plt.savefig(FIG/"f9_arch.png", bbox_inches="tight"); plt.close()
     print("f9 ok")
 
     # ---------- F10: Moving-average episode return (PDF §9.7 ogrenme egilimi) ----------
     from utils.metrics import moving_average
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    for algo, c in [("DQN", dqn_c), ("PPO", ppo_c), ("SAC", sac_c)]:
+    for algo, c in [("DQN", dqn_c), ("PPO", ppo_c), ("SAC", sac_c), ("TD3", td3_c)]:
         if "reward" not in c.columns:
             continue
         r = c["reward"].to_numpy(dtype=float)
@@ -3206,6 +3519,63 @@ def run():
     ax.legend(fontsize=9); plt.tight_layout()
     plt.savefig(FIG/"f10_moving_avg_return.png"); plt.close()
     print("f10 ok")
+
+    # ===== Titizlik (rigor) figürleri — scripts/rigor_analysis.py çıktıları (golden-güvenli) =====
+    # ---------- F11: Deflated & Probabilistic Sharpe (López de Prado) + PBO ----------
+    rp = RES/"rigor_metrics.csv"
+    if rp.exists():
+        rig = pd.read_csv(rp, index_col=0)
+        fig, ax = plt.subplots(figsize=(11, 4.5))
+        x = np.arange(len(rig.index)); wd = 0.38
+        ax.bar(x - wd/2, rig["PSR"], wd, label="PSR", color="#1f77b4", edgecolor="k", lw=0.5)
+        ax.bar(x + wd/2, rig["DSR"], wd, label="DSR (deflated)", color="#d62728", edgecolor="k", lw=0.5)
+        ax.axhline(0.95, ls="--", color="gray", lw=1)
+        ax.text(len(x) - 0.5, 0.965, "0.95 eşiği", fontsize=8, color="gray", ha="right")
+        ax.set_xticks(x); ax.set_xticklabels(rig.index, rotation=25); ax.set_ylim(0, 1.05)
+        ax.set_title("Probabilistic & Deflated Sharpe (çoklu-deneme düzeltmeli) — López de Prado")
+        ax.set_ylabel("Olasılık"); ax.legend(fontsize=9, loc="lower right")
+        sp = RES/"rigor_summary.csv"
+        if sp.exists():
+            s = pd.read_csv(sp, index_col=0, header=None).iloc[:, 0]
+            try:
+                ax.text(0.01, 0.93, f"PBO = {float(s.get('PBO')):.2f}", transform=ax.transAxes,
+                        fontsize=11, fontweight="bold", color="#555")
+            except (TypeError, ValueError):
+                pass
+        plt.tight_layout(); plt.savefig(FIG/"f11_deflated_sharpe.png"); plt.close()
+        print("f11 ok")
+
+    # ---------- F12: Monte-Carlo stres — terminal getiri dağılımı + VaR/CVaR ----------
+    mp = RES/"rigor_mc_terminal.csv"
+    if mp.exists():
+        mc = pd.read_csv(mp)
+        fig, ax = plt.subplots(figsize=(11, 4.5))
+        for col, color, lbl in [("block_bootstrap", "#2ca02c", "Blok bootstrap"),
+                                ("student_t", "#9467bd", "Student-t (ağır kuyruk)")]:
+            if col in mc.columns:
+                d = mc[col].dropna().to_numpy() * 100
+                ax.hist(d, bins=60, alpha=0.5, color=color, label=lbl, density=True)
+                ax.axvline(np.quantile(d, 0.05), ls="--", color=color, lw=1.2)   # %5 VaR
+        ax.axvline(0, color="k", lw=0.8)
+        ax.set_title("Monte-Carlo Stres — 1-yıl ileri terminal getiri dağılımı (en iyi RL ajan)")
+        ax.set_xlabel("Terminal getiri (%)  ·  kesik çizgi = %5 VaR")
+        ax.set_ylabel("Yoğunluk"); ax.legend(fontsize=9)
+        plt.tight_layout(); plt.savefig(FIG/"f12_mc_stress.png"); plt.close()
+        print("f12 ok")
+
+    # ---------- F13: Nominal (TL) vs Reel (USD-bazlı) NAV — lira illüzyonu (§9.9) ----------
+    nr = RES/"navs_real.csv"
+    if nr.exists():
+        real = pd.read_csv(nr, index_col=0, parse_dates=True)
+        fig, ax = plt.subplots(figsize=(11, 5))
+        for c in [a for a in RL_AGENTS if a in navs.columns and a in real.columns]:
+            ax.plot(navs.index, navs[c], color=PAL.get(c), lw=1.9, label=f"{c} nominal (TL)")
+            ax.plot(real.index, real[c], color=PAL.get(c), lw=1.4, ls="--", label=f"{c} reel (USD)")
+        ax.axhline(1.0, color="k", lw=0.5)
+        ax.set_title("Nominal (TL) vs Reel (USD-bazlı) NAV — Lira İllüzyonu (§9.9)")
+        ax.set_ylabel("NAV (başlangıç=1)"); ax.set_xlabel("Tarih"); ax.legend(fontsize=8, ncol=2)
+        plt.tight_layout(); plt.savefig(FIG/"f13_real_nav.png"); plt.close()
+        print("f13 ok")
 
     print(f"\nAll figures saved in {FIG}")
 
@@ -3325,6 +3695,8 @@ def _init_state():
         "feats_tr": None,
         "feats_te": None,
         "scaler": None,
+        "macro_tr": None, "macro_te": None,      # v6: makro rejim blogu (z-skorlu)
+        "regime_tr": None, "regime_te": None,    # v6: ham regime (V7 amplify)
         "trained_agents": {},     # {(algo, horizon, adaptive): (agent, curve)}
         "test_traces": {},        # aynı anahtar: trajectory listesi
         "baselines": None,        # dict(name -> backtest dict)
@@ -3370,15 +3742,16 @@ import pandas as pd
 import streamlit as st
 
 from agents.base import SupportsQValues
-from config import SEED, ForecastConfig
+from config import SEED, ForecastConfig, MacroConfig
 from core.factory import build_agent, build_env
 from core.persistence import load_agent, save_agent
 from core.trainer import train as train_loop
-from data import download_bist, train_test_split
+from data import align_macro, download_bist, download_macro, train_test_split
 from env.portfolio_env import ACTION_NAMES
 from ui.state import _agent_key
 from utils.baselines import equal_weight
 from utils.features import TrainScaler, add_features
+from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
 
 # PDF §11: egitilmis modeller diske burada kaydedilir/yuklenir (sunum kaliciligi).
@@ -3430,6 +3803,21 @@ def _load_data():
     st.session_state.feats_tr = scaler.transform(feats_tr_raw)
     st.session_state.feats_te = scaler.transform(feats_te_raw)
     st.session_state.scaler = scaler
+
+    # v6: makro rejim (faiz/dolar/altin) — train-only z-score; ham regime ayri (V7).
+    macro_tr = macro_te = regime_tr = regime_te = None
+    if MacroConfig.enabled:
+        mfeat = add_macro_features(align_macro(download_macro(), prices.index))
+        regime_full = mfeat["regime"]
+        macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
+        macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
+        macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
+        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
+        regime_te = regime_full.loc[px_te.index].to_numpy(np.float32)
+    st.session_state.macro_tr = macro_tr
+    st.session_state.macro_te = macro_te
+    st.session_state.regime_tr = regime_tr
+    st.session_state.regime_te = regime_te
     st.session_state.data_loaded = True
 
 
@@ -3437,10 +3825,13 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3)."""
     px_df = st.session_state.px_tr if is_train else st.session_state.px_te
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
+    macro = st.session_state.get("macro_tr" if is_train else "macro_te")
+    regime = st.session_state.get("regime_tr" if is_train else "regime_te")
     return build_env(
         algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
     )
 
 
@@ -3460,7 +3851,7 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
 
     resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
     ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
-    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200}[algo]
+    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}[algo]
     env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
     if resume_agent is not None:
         agent = resume_agent
@@ -3560,7 +3951,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from config import FEATURES
+from config import FEATURES, MacroConfig
 from data import BIST28
 from env.portfolio_env import ACTION_NAMES, HORIZON_PRESETS
 from ui.state import ASSET_NAMES
@@ -3587,9 +3978,9 @@ def _q_bar(q_values: np.ndarray, chosen: int):
 
 
 def _reward_bar(rt: dict):
-    names = ["log_return", "tx_cost", "dd_penalty", "dsr", "total"]
+    names = ["log_return", "tx_cost", "dd_penalty", "cvar", "dsr", "total"]
     vals = [rt["log_return"], -rt["tx_cost"], -rt["drawdown_penalty"],
-            rt.get("dsr_term", 0.0), rt["total"]]
+            -rt.get("cvar_penalty", 0.0), rt.get("dsr_term", 0.0), rt["total"]]
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in vals]
     fig = go.Figure(go.Bar(x=names, y=vals, marker_color=colors,
                            text=[f"{v:+.5f}" for v in vals], textposition="outside"))
@@ -3602,7 +3993,10 @@ def _state_top_features(state_vec: np.ndarray, top_k: int = 8) -> pd.DataFrame:
     """Durum vektöründen top-k öznitelik çıkar (mutlak değer sıralı). Feature
     sayısı config.FEATURES'tan dinamik okunur (v2: 12 özellik)."""
     n_assets = len(BIST28)
-    F = (len(state_vec) - (n_assets + 1)) // n_assets   # state'ten türet (12 ya da 13)
+    # v6: state = [F teknik × n_assets] + [M makro] + [n_assets+1 agirlik]. Makro blogunu
+    # cikararak teknik oznitelik sayisi F'i state uzunlugundan turet.
+    M = len(MacroConfig.features) if MacroConfig.enabled else 0
+    F = (len(state_vec) - M - (n_assets + 1)) // n_assets   # 12 (PPO) ya da 13 (DQN/SAC)
     names = list(FEATURES) + ["forecast"]
     feat_names = (names + [f"f{i}" for i in range(F)])[:F]
     snap = state_vec[: F * n_assets].reshape(F, n_assets)
@@ -3647,6 +4041,11 @@ from config import SEED, EnvConfig
 from env.portfolio_env import HORIZON_PRESETS
 from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
 from ui.state import _agent_key
+
+# SonarCloud S1192: 3+ kez tekrar eden UI literal'leri tek sabitte topla.
+_EP_HINT = "Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes."
+_LBL_POLICY_LR = "Policy LR"
+_LBL_BATCH = "Batch"
 
 
 def _sidebar_reward_editor(preset: dict):
@@ -3745,8 +4144,9 @@ def sidebar_controls():
     )
 
     st.sidebar.divider()
-    algo = st.sidebar.radio("Ajan", ["DQN", "PPO", "SAC"],
-                            index=["DQN", "PPO", "SAC"].index(st.session_state.selected_algo))
+    _algos = ["DQN", "PPO", "SAC", "TD3"]
+    _cur = st.session_state.selected_algo if st.session_state.selected_algo in _algos else "DQN"
+    algo = st.sidebar.radio("Ajan", _algos, index=_algos.index(_cur))
     st.session_state.selected_algo = algo
 
     horizon_label = st.sidebar.radio(
@@ -3790,16 +4190,16 @@ def sidebar_controls():
     st.sidebar.subheader(f"🎛 Hiperparametreler ({algo})")
     hp = {}
     if algo == "DQN":
-        st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
+        st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",
             options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3)
         hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000)
-        hp["batch_size"]= st.sidebar.select_slider("Batch", options=[32, 64, 128], value=64)
+        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
         hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
     elif algo == "PPO":
         st.sidebar.caption("Update sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
         hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
-        hp["lr_p"]       = st.sidebar.select_slider("Policy LR",
+        hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
         hp["lr_v"]       = st.sidebar.select_slider("Value LR",
             options=[3e-4, 1e-3, 3e-3], value=1e-3)
@@ -3808,16 +4208,29 @@ def sidebar_controls():
             options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005)
         hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128)
         hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1)
-    else:
-        st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
-        hp["lr_pi"]      = st.sidebar.select_slider("Policy LR",
+    elif algo == "SAC":
+        st.sidebar.caption(_EP_HINT)
+        hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
             options=[3e-4, 5e-4, 1e-3], value=5e-4)
         hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01)
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
             options=[0.005, 0.01, 0.05], value=0.01)
-        hp["batch_size"] = st.sidebar.select_slider("Batch", options=[64, 128, 256], value=128)
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+    else:  # TD3 — sürekli/deterministik politika (hocanın tavsiyesi)
+        st.sidebar.caption(_EP_HINT)
+        hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
+            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+        hp["lr_q"]       = st.sidebar.select_slider("Q LR",
+            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4)
+        hp["policy_noise"] = st.sidebar.slider("Hedef-politika gürültüsü", 0.0, 0.5, 0.2, step=0.05,
+            help="Hedef aksiyona eklenen clamped Gauss gürültüsü (TD3 smoothing).")
+        hp["expl_noise"] = st.sidebar.slider("Keşif gürültüsü", 0.0, 0.5, 0.1, step=0.05,
+            help="Eğitimde aksiyona eklenen keşif gürültüsü (eval'de kapalı).")
+        hp["tau"]        = st.sidebar.select_slider("Soft update τ",
+            options=[0.005, 0.01, 0.05], value=0.005)
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
 
     # 💾 Model kalıcılığı (PDF §11): eğitilmiş modeli diske kaydet / diskten yükle.
     st.sidebar.divider()

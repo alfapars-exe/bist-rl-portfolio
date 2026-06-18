@@ -31,7 +31,7 @@ FIG.mkdir(exist_ok=True)
 
 def step_data():
     print("=" * 70)
-    print("[1/3] BIST 28 fiyatları hazırlanıyor ...")
+    print("[1/4] BIST 28 fiyatları hazırlanıyor ...")
     print("=" * 70)
     from data import download_bist
     from utils.features import add_features

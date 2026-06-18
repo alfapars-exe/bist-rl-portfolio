@@ -34,7 +34,7 @@ def test_reward_decomposition_sums_to_total():
         # online risk-ayar). Ozdeslik: log_return - tx_cost - drawdown - bankruptcy + dsr_term.
         recomputed = (rt["log_return"] - rt["tx_cost"]
                       - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
-                      + rt["dsr_term"])
+                      + rt["dsr_term"] - rt["cvar_penalty"])
         assert abs(rt["total"] - recomputed) < 1e-9
         assert abs(float(r) - rt["total"]) < 1e-9
         if done or trunc:
@@ -69,7 +69,7 @@ def test_discrete_env_reward_invariant_holds():
         rt = info["reward_terms"]
         recomputed = (rt["log_return"] - rt["tx_cost"]
                       - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
-                      + rt["dsr_term"])
+                      + rt["dsr_term"] - rt["cvar_penalty"])
         assert abs(rt["total"] - recomputed) < 1e-9
         if done or trunc:
             break
@@ -156,7 +156,7 @@ def test_bankruptcy_path_terminates_and_penalizes():
             # ceza toplam odule eklendi (negatif yonde)
             recomputed = (rt["log_return"] - rt["tx_cost"]
                           - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
-                          + rt["dsr_term"])
+                          + rt["dsr_term"] - rt["cvar_penalty"])
             assert abs(rt["total"] - recomputed) < 1e-9
             assert done
             break

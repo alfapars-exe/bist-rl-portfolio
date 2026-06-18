@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import numpy as np
+from scipy.stats import norm
 
 
 # ---------------------------------------------------------------------
@@ -124,20 +125,30 @@ class RewardEngine:
     """
 
     def __init__(self, shaper: AdaptiveRewardShaper, dsharpe: DifferentialSharpe,
-                 w_dsr: float, bankruptcy_nav: float, bankruptcy_penalty: float):
+                 w_dsr: float, bankruptcy_nav: float, bankruptcy_penalty: float,
+                 w_cvar: float = 0.0, cvar_alpha: float = 0.05,
+                 regime_beta: float = 1.0, cvar_amp: float = 1.0):
         self.shaper = shaper
         self.dsharpe = dsharpe
         self.w_dsr = float(w_dsr)
         self.bankruptcy_nav = float(bankruptcy_nav)
         self.bankruptcy_penalty = float(bankruptcy_penalty)
+        # v7: rejim-amplified kuyruk-riski (CVaR) cezasi.
+        self.w_cvar = float(w_cvar)
+        self.regime_beta = float(regime_beta)
+        self.cvar_amp = float(cvar_amp)
+        # Parametrik (Gauss) ileri CVaR/ES carpani: ES_alpha = sigma * phi(z_alpha)/alpha.
+        # vol_ewma'yi (mevcut makine) sigma proxy'si olarak yeniden kullanir (ileri-bakisli).
+        z = float(norm.ppf(cvar_alpha))
+        self._cvar_mult = float(norm.pdf(z) / max(cvar_alpha, 1e-9))
 
     def reset(self):
         self.shaper.reset()
         self.dsharpe.reset()
 
     def compute(self, *, gross_port_r: float, delta_w_l1: float,
-                nav: float, peak: float) -> RewardOutcome:
-        """Aritmetik sirasi onceki PortfolioEnv.step() ile BIREBIR aynidir."""
+                nav: float, peak: float, regime: float = 0.0) -> RewardOutcome:
+        """Aritmetik sirasi onceki PortfolioEnv.step() ile ayni; +CVaR terimi (V7)."""
         eta_t, lambda_t, tau_t, vol_ewma, to_ewma = \
             self.shaper.update_and_shape(gross_port_r, delta_w_l1)
 
@@ -157,12 +168,20 @@ class RewardEngine:
         dd_penalty = lambda_t * max(0.0, dd - tau_t)
         dsr = self.dsharpe.update(port_r_net)
         dsr_term = self.w_dsr * dsr
-        total = log_r - tx_cost - dd_penalty - bankruptcy_penalty + dsr_term
+
+        # v7: ileri-parametrik CVaR kuyruk cezasi; krizde (regime>0) kappa amplify olur.
+        cvar = vol_ewma * self._cvar_mult                       # ES_alpha ~ sigma·mult
+        rm = 1.0 + self.regime_beta * max(0.0, float(regime))   # kriz amplifikasyonu
+        cvar_penalty = self.w_cvar * (rm ** self.cvar_amp) * cvar
+
+        total = (log_r - tx_cost - dd_penalty - bankruptcy_penalty
+                 + dsr_term - cvar_penalty)
 
         terms = dict(
             log_return=log_r, tx_cost=tx_cost,
             drawdown_penalty=dd_penalty, total=total,
             dsr=dsr, dsr_term=dsr_term,
+            cvar_penalty=cvar_penalty, regime=float(regime),   # v7
             eta_t=eta_t, lambda_t=lambda_t, tau_t=tau_t,
             vol_ewma=vol_ewma, turnover_ewma=to_ewma,
             dd=dd, gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,

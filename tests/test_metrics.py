@@ -6,7 +6,20 @@ import numpy as np
 
 from utils.metrics import (cagr, sharpe, sortino, max_drawdown, calmar,
                            turnover, success_vs_benchmark, summary,
-                           moving_average, training_diagnostics)
+                           moving_average, training_diagnostics, real_nav)
+
+
+def test_real_nav_lira_illusion():
+    # Nominal NAV 1->2 (TL bazinda 2x). USD/TRY 10->20 (TL %50 deger kaybetti).
+    nav = np.array([1.0, 1.5, 2.0])
+    fx = np.array([10.0, 15.0, 20.0])
+    rn = real_nav(nav, fx)
+    assert rn[0] == 1.0                                  # baslangicta 1.0
+    # reel = (nav/nav0)/(fx/fx0): t=2 -> (2/1)/(20/10) = 1.0 (reel kazanc YOK — illuzyon)
+    assert np.isclose(rn[-1], 1.0)
+    assert np.all(rn <= nav + 1e-12)                     # TL deger kaybinda reel <= nominal
+    # bos/dejenere giris -> guvenli
+    assert real_nav(np.array([]), fx).size == 0
 
 
 def test_moving_average_basic_and_edge():

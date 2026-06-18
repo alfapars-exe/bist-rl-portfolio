@@ -82,8 +82,11 @@ class PortfolioEnv:
                  bankruptcy_penalty: float | None = None,
                  random_start: bool = False,
                  seed: int | None = None,
+                 price_noise_std: float = EnvConfig.price_noise_std,
+                 price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  w_dsr: float = RewardConfig.w_dsr,
-                 dsr_eta: float = RewardConfig.dsr_eta):
+                 dsr_eta: float = RewardConfig.dsr_eta,
+                 macro=None, regime=None):
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
         self.feat_names = list(features.keys())
@@ -109,6 +112,8 @@ class PortfolioEnv:
             vol_target=vol_target, turnover_target=turnover_target,
             ema_alpha=ema_alpha, enabled=adaptive,
         )
+        # v7: CVaR kuyruk cezasi vade-bagli olceklenir (kisa->yuksek tail-bilinci).
+        cvar_factor = {"short": 1.6, "medium": 1.0, "long": 0.6}.get(horizon, 1.0)
         self.reward = RewardEngine(
             shaper=shaper,
             dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
@@ -117,6 +122,10 @@ class PortfolioEnv:
             bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
             bankruptcy_penalty=(float(bankruptcy_penalty)
                                 if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
+            w_cvar=RewardConfig.w_cvar * cvar_factor,   # v7: rejim-amplified kuyruk cezasi
+            cvar_alpha=RewardConfig.cvar_alpha,
+            regime_beta=RewardConfig.regime_beta,
+            cvar_amp=RewardConfig.cvar_amp,
         )
 
         self.N_assets = prices.shape[1]
@@ -124,7 +133,12 @@ class PortfolioEnv:
         self.N = self.N_assets + (1 if cash_asset else 0)
         self.window = max(window, self.minvol_window)
         self.F = self.feat_tensor.shape[2]
-        self.state_dim = self.F * self.N_assets + self.N
+        # v6: makro rejim blogu (z-skorlu (T,M), state'e eklenir) + HAM regime
+        # (T,) ∈[-1,1] — V7 odul kriz-amplifikasyonu icin step()'te kullanilir.
+        self.macro = None if macro is None else np.asarray(macro, dtype=np.float32)
+        self.regime = None if regime is None else np.asarray(regime, dtype=np.float32)
+        self.M = 0 if self.macro is None else int(self.macro.shape[1])
+        self.state_dim = self.F * self.N_assets + self.M + self.N
         self.action_dim = self.N
         # n_days: toplam zaman adimi (satir). 't' ile yalniz buyuk/kucuk harfle
         # ayrilan 'T' adi karisikliga yol aciyordu (SonarCloud python:S1845) -> n_days.
@@ -134,6 +148,11 @@ class PortfolioEnv:
         # kurulum sirasindan bagimsiz) + tohumlu rastgele-baslangic destegi.
         self.random_start = bool(random_start)
         self.rng = np.random.default_rng(seed)
+        # v8: fiyat gurultusu/slippage (hocanin sarti). train_only -> yalniz random_start
+        # (egitim) acik; eval (random_start=False) -> kapali, golden eval determinizmi korunur.
+        self.price_noise_std = float(price_noise_std)
+        self._noise_active = (self.price_noise_std > 0.0 and
+                              (self.random_start if price_noise_train_only else True))
         self._reset_state()
 
     def _reset_state(self):
@@ -168,12 +187,21 @@ class PortfolioEnv:
 
     def _obs(self) -> np.ndarray:
         snap = self.feat_tensor[self.t].reshape(-1)
-        return np.concatenate([snap, self.w]).astype(np.float32)
+        parts = [snap]
+        if self.macro is not None:                 # v6: makro rejim blogu
+            parts.append(self.macro[self.t])
+        parts.append(self.w)
+        return np.concatenate(parts).astype(np.float32)
 
     def _risky_returns(self) -> np.ndarray:
         p0 = self.prices[self.t]
         p1 = self.prices[self.t + 1]
         r = (p1 - p0) / np.maximum(p0, 1e-9)
+        if self._noise_active:
+            # v8: slippage/fiyat gurultusu (hocanin sarti, anti-ezber) — gerceklesen
+            # riskli getiriye kucuk Gauss gurultusu. Env-yerel rng -> global RNG'ye
+            # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
+            r = r + self.rng.normal(0.0, self.price_noise_std, size=r.shape).astype(np.float32)
         if self.cash_asset:
             r = np.concatenate([r, [0.0]])
         return r
@@ -196,8 +224,9 @@ class PortfolioEnv:
         r_vec = self._risky_returns()
         gross_port_r = float((w_new * r_vec).sum())
 
+        regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-                                      nav=self.nav, peak=self.peak)
+                                      nav=self.nav, peak=self.peak, regime=regime_t)
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 

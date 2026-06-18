@@ -90,6 +90,22 @@ class SACConfig:
     batch_size: int = 128
 
 
+@dataclass(frozen=True)
+class TD3Config:
+    # Twin Delayed DDPG (RL_12) — hocanin surekli-eylem icin TAVSIYE ettigi algoritma.
+    hidden: Tuple[int, int] = (256, 128)
+    lr_pi: float = 3e-4
+    lr_q: float = 3e-4
+    gamma: float = 0.99
+    tau: float = 0.005
+    policy_noise: float = 0.2     # hedef-politika yumusatma gurultusu
+    noise_clip: float = 0.5
+    policy_delay: int = 2         # gecikmeli politika guncellemesi
+    expl_noise: float = 0.1       # eylem kesif gurultusu
+    buffer_size: int = 50_000
+    batch_size: int = 128
+
+
 # ---------------------------------------------------------------------
 # Ortam (env) default'lari — odul sekillendirici hedefleri + iflas/episod.
 # ---------------------------------------------------------------------
@@ -104,6 +120,12 @@ class EnvConfig:
     bankruptcy_penalty: float = 10.0
     random_start: bool = True        # v2: egitimde rastgele pencere (eval'de False gecilir)
     seed: int = 42
+    # v8: fiyat gurultusu / slippage — hocanin ACIK sarti (anti-ezber). Gerceklesen
+    # getiriye kucuk Gauss gurultusu: "al dediginde tam o fiyattan alamazsin, yukaridan
+    # alirsin". YALNIZ egitimde (random_start=True) aktif; eval'de KAPALI -> golden eval
+    # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
+    price_noise_std: float = 0.001
+    price_noise_train_only: bool = True
 
 
 # ---------------------------------------------------------------------
@@ -117,6 +139,8 @@ class TrainConfig:
     ppo_rollout_len: int = 400
     sac_episodes: int = 8
     sac_episode_len: int = 600
+    td3_episodes: int = 8         # TD3 off-policy (SAC ile ayni rejim)
+    td3_episode_len: int = 600
 
 
 # ---------------------------------------------------------------------
@@ -128,6 +152,12 @@ class TrainConfig:
 class RewardConfig:
     w_dsr: float = 0.05      # Diferansiyel Sharpe agirligi (0 -> kapali)
     dsr_eta: float = 0.01    # DSR EWMA orani
+    # v7: rejim-amplified kuyruk-riski (CVaR) cezasi. w_cvar vade-bagli olceklenir
+    # (env: kisa->yuksek, uzun->dusuk). kappa = w_cvar*(1+regime_beta*max(0,regime))^cvar_amp.
+    w_cvar: float = 0.06        # CVaR base agirligi (0 -> kapali)
+    cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
+    regime_beta: float = 1.0    # kriz amplifikasyon gucu
+    cvar_amp: float = 1.0       # rejim amplifikasyon usteli
 
 
 # ---------------------------------------------------------------------
@@ -145,4 +175,21 @@ class ForecastConfig:
     batch: int = 256
     # Hangi ajanlar forecast feature'ini kullansin? V3<->V4 ablation'a gore forecast
     # DQN/SAC'a yaradi (+10pp DQN), PPO'ya zarar verdi (-7.5pp) -> PPO haric tutulur.
-    forecast_agents: tuple = ("DQN", "SAC")
+    # TD3 surekli-kontrolde SAC gibi davranir -> forecast ona da verilir.
+    forecast_agents: tuple = ("DQN", "SAC", "TD3")
+
+
+# ---------------------------------------------------------------------
+# v6: Makro rejim algisi (YALIN OMURGA) — faiz/dolar/altin + bilesik rejim.
+# Tek bir 'regime' skoru hem state'e (algi) hem RewardEngine'e (V7 kriz-amplified
+# kuyruk cezasi) girer. enabled=False -> V5 davranisi (makrosuz). Yalin tutuldu
+# (4 oznitelik) — sinirli BIST verisinde overfitting'e karsi.
+# series: indirilen ham makro tickerlari (yfinance). BIST takvimine hizalanir.
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class MacroConfig:
+    enabled: bool = True
+    series: tuple = ("^VIX", "^GSPC", "^TNX", "^IRX", "USDTRY=X", "GC=F")
+    # State'e eklenen 4 yalin oznitelik: rejim omurgasi + faiz/dolar/altin.
+    features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
+    mom_window: int = 20      # momentum/degisim penceresi (gun)

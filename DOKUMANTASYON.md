@@ -6,7 +6,7 @@
 > belgeden türetilebilir.
 
 **Proje adı:** BIST 28 hissesi üzerinde derin pekiştirmeli öğrenme ile portföy yönetimi
-**Ajan(lar):** Tek ajan — üç farklı algoritmayla (DQN / PPO / SAC) bağımsız eğitilir ve karşılaştırılır
+**Ajan(lar):** Tek ajan — dört farklı algoritmayla (DQN / PPO / SAC / TD3) bağımsız eğitilir ve karşılaştırılır
 **Arayüz:** Streamlit (canlı eğitim + adım-adım test oynatma + karşılaştırma)
 **Tohum:** `SEED = 42` (deterministik; golden-master 1e-6 toleransta kilitli)
 
@@ -19,12 +19,14 @@
 | Problem türü | Sürekli kontrol — portföy tahsisi (continuous control / allocation) |
 | Evren | BIST 30'dan 28 hisse (KOZAA.IS, KOZAL.IS hariç) |
 | Veri aralığı | 2015-01-01 → 2024-12-31, train/test ayrımı 2022-01-01 |
-| Durum uzayı | ℝ³⁹³ (DQN/SAC: 13 öznitelik×28 + 29 ağırlık) · ℝ³⁶⁵ (PPO: 12×28 + 29) |
-| Eylem uzayı | Ayrık 6 şablon (DQN) **veya** sürekli ℝ²⁹ → softmax simpleks (PPO/SAC) |
-| Ödül | `log(1+w·r) − η·‖Δw‖₁ − λ·max(0,DD−τ) − iflas + w_dsr·DSR` (adaptif şekillendirme) |
-| Algoritmalar | DQN (ayrık), PPO (sürekli, on-policy), SAC (sürekli, off-policy) |
-| Tahmin katmanı | CNN-LSTM bir-adım getiri tahmincisi (predict-then-optimize, sadece DQN/SAC) |
-| Doğrulama | 71 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) |
+| Durum uzayı | ℝ³⁹⁷ (DQN/SAC: 13 öznitelik×28 + **4 makro** + 29 ağırlık) · ℝ³⁶⁹ (PPO: 12×28 + 4 makro + 29) |
+| Eylem uzayı | Ayrık 6 şablon (DQN) **veya** sürekli ℝ²⁹ → softmax simpleks (PPO/SAC/TD3) |
+| Ödül | `log(1+w·r) − η·‖Δw‖₁ − λ·max(0,DD−τ) − iflas + w_dsr·DSR − κ·CVaR` (adaptif + **rejim-amplified**) |
+| Makro rejim (V6) | faiz (getiri eğrisi), dolar (USD/TRY), altın (gram-altın/TL) + bileşik rejim skoru |
+| Fiyat gürültüsü (V8) | Eğitimde gerçekleşen getiriye slippage (`σ=0.001`) — anti-ezber, hocanın şartı; eval'de kapalı |
+| Algoritmalar | DQN (ayrık), PPO (sürekli on-policy), SAC (sürekli off-policy stokastik), **TD3 (sürekli off-policy deterministik — hocanın tavsiyesi)** |
+| Tahmin katmanı | CNN-LSTM bir-adım getiri tahmincisi (predict-then-optimize, sadece DQN/SAC/TD3) |
+| Doğrulama | 98 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
 ---
@@ -95,7 +97,8 @@ max_π  E_π [ Σ_t γ^t ( log(1 + wₜ·r_{t+1})           ← risk-getiri (log
                        − ηₜ·‖Δwₜ‖₁                    ← işlem maliyeti
                        − λₜ·max(0, DDₜ − τₜ)          ← düşüş cezası
                        − C_iflas·𝟙[NAV<NAV_min]       ← iflas cezası
-                       + w_dsr·DSRₜ ) ]               ← çevrim-içi risk-ayarı (Diferansiyel Sharpe)
+                       + w_dsr·DSRₜ                   ← çevrim-içi risk-ayarı (Diferansiyel Sharpe)
+                       − κₜ·CVaRₜ ) ]                 ← rejim-amplified kuyruk-riski cezası (V7)
 ```
 
 Yani ajan; **log-büyümeyi ve risk-ayarlı getiriyi artırmaya**, **işlem maliyetini, düşüşü ve
@@ -122,21 +125,25 @@ Durum vektörü `sₜ`, her hisse için bir öznitelik bloğu ile mevcut portfö
 birleşimidir:
 
 ```
-sₜ = [ z-skorlu öznitelikler (F × 28) ‖ mevcut ağırlıklar (29) ]
+sₜ = [ z-skorlu teknik öznitelikler (F × 28) ‖ makro rejim (4) ‖ mevcut ağırlıklar (29) ]
 ```
 
-- **F = 13** (DQN/SAC): 12 teknik öznitelik + 1 CNN-LSTM getiri tahmini → `state_dim = 13×28 + 29 = 393`
-- **F = 12** (PPO): forecast özelliği hariç (ablation kararı) → `state_dim = 12×28 + 29 = 365`
+- **F = 13** (DQN/SAC): 12 teknik öznitelik + 1 CNN-LSTM getiri tahmini → `13×28 + 4 makro + 29 = 397`
+- **F = 12** (PPO): forecast özelliği hariç (ablation kararı) → `12×28 + 4 makro + 29 = 369`
 
 **12 teknik öznitelik** (`config.FEATURES`, hepsi yalnız geçmişe bakar, ölçek-bağımsız):
 `logret, ma5, ma20, vol20, rsi, macd_hist, bb_pctb, bb_bw, roc10, mom60, vol60, ema_dist`
+
+**4 makro rejim özniteliği (V6)** (`config.MacroConfig`, causal, train-only z-score):
+`regime` (bileşik omurga: VIX+S&P) · `slope` (**faiz**: TNX−IRX) · `usd_try_mom` (**dolar**) ·
+`gold_tl_mom` (**altın**: gram-altın/TL). Ham `regime` ayrıca V7 ödül amplifikasyonunu besler.
 
 | Soru (PDF §5.1) | Cevap |
 |---|---|
 | Ajan hangi bilgileri gözlüyor? | Teknik göstergeler (momentum/trend/volatilite/RSI/MACD/Bollinger), bir-adım getiri tahmini, mevcut ağırlıklar |
 | Markov özelliğini sağlıyor mu? | Evet — işlem maliyeti `‖wₜ−w_{t−1}‖₁`'e bağlı olduğundan **mevcut ağırlık state'e dahildir**; geçmiş, kayan-pencere göstergelerle özetlenir |
-| Eksik bilgi var mı? | Ham fiyat tarihçesi yerine özetlenmiş göstergeler kullanılır (boyut/eğitim verimliliği dengesi); rejim bilgisi adaptif shaper'ın EWMA'larıyla dolaylı temsil edilir |
-| Durum vektörü kaç boyutlu? | 393 (DQN/SAC) / 365 (PPO) |
+| Eksik bilgi var mı? | Ham fiyat tarihçesi yerine özetlenmiş göstergeler kullanılır; **V6'dan önce makro rejim eksikti** (faiz/dolar/altın) → eklendi |
+| Durum vektörü kaç boyutlu? | 397 (DQN/SAC) / 369 (PPO) — makro blok dahil |
 | Görsel girdi var mı? | Hayır — durum sayısal öznitelik vektörüdür |
 
 Tüm öznitelikler `utils.features.TrainScaler` ile **yalnız train (2015–2021) istatistikleriyle**
@@ -170,6 +177,7 @@ z-skorlanır; aynı ortalama/std test dönemine uygulanır → veri sızıntıs�
 | Düşüş cezası `λₜ·max(0, DD − τₜ)` | **−** (yüksek düşüşü cezalandırır) |
 | İflas cezası (NAV<eşik) | **−** büyük sabit (≈10) |
 | Diferansiyel Sharpe `w_dsr·DSR` | **±** (çevrim-içi risk-ayarı) |
+| CVaR kuyruk cezası `κ·CVaR` (V7) | **−** (krizde rejim ile amplify: `κ=w_cvar·(1+β·max(0,regime))^a`) |
 
 `AdaptiveRewardShaper`: `ηₜ = η·max(1, turnover_ewma/turnover_hedef)`,
 `λₜ = λ·(1 + max(0, vol_oranı−1))`, `τₜ = τ·max(0.7, 1/vol_oranı)`.
@@ -186,14 +194,17 @@ z-skorlanır; aynı ortalama/std test dönemine uygulanır → veri sızıntıs�
 
 ## 6. Kullanılan Algoritmalar (Rapor §9.5 / PDF §6)
 
-Üç algoritma da seçilmiştir çünkü problem **hem ayrık hem sürekli** formüle edilebilir;
-böylece "ayrık şablon mu, sürekli tahsis mi daha iyi?" sorusu deneysel olarak yanıtlanır.
+**Dört algoritma** seçilmiştir çünkü problem **hem ayrık hem sürekli** formüle edilebilir;
+böylece "ayrık şablon mu, sürekli tahsis mi daha iyi?" ve "stokastik (SAC) mı, deterministik
+(TD3) sürekli politika mı?" soruları deneysel olarak yanıtlanır. **TD3, ders ekibinin sürekli-
+eylem problemleri için açıkça tavsiye ettiği** (RL_12) algoritmadır.
 
 | Problem türü | Seçilen yöntem | Gerekçe |
 |---|---|---|
 | Ayrık eylemli (6 şablon) | **DQN** (replay + hedef ağ + ε-greedy + Huber) | Düşük-boyutlu ayrık eylem; değer-tabanlı öğrenme verimli |
 | Sürekli, on-policy | **PPO** (clipped surrogate + GAE) | Simpleks üzerinde kararlı politika gradyanı; örnek-verimli on-policy |
-| Sürekli, off-policy | **SAC** (çift-Q + entropi düzenlemesi) | Keşif-sömürü dengesi; off-policy örnek verimliliği |
+| Sürekli, off-policy (stokastik) | **SAC** (çift-Q + entropi düzenlemesi) | Keşif-sömürü dengesi; off-policy örnek verimliliği |
+| Sürekli, off-policy (deterministik) | **TD3** (çift-Q min + gecikmeli politika + hedef yumuşatma) | DDPG'nin aşırı-tahmin/kararsızlık sorunlarını üç hileyle giderir; **hocanın tavsiyesi** |
 
 ### Ağ mimarileri
 
@@ -203,19 +214,25 @@ böylece "ayrık şablon mu, sürekli tahsis mi daha iyi?" sorusu deneysel olara
   `MLP[s → 256 → 128 → 1]` (Tanh). GAE avantajı, clipped surrogate + entropi bonusu.
 - **SAC** — `Actor`: tanh-sıkıştırılmış Gaussian; **çift** Q-eleştirmen `MLP[s+a → 256 → 128 → 1]`
   (ReLU) + hedef ağlar; entropi katsayısı α; yumuşak güncelleme (τ).
+- **TD3** — `Actor`: `MLP[s → 256 → 128 → 29]` (tanh çıktı, **deterministik**); **çift** eleştirmen
+  `MLP[s+a → 256 → 128 → 1]` (ReLU) + hedef ağlar. Üç TD3 hilesi: (1) twin critics + **min-Q**
+  hedefi (aşırı-tahmin azaltma), (2) **gecikmeli** politika güncellemesi (`policy_delay=2`),
+  (3) **hedef-politika yumuşatma** (clamped gürültü). Keşif eğitimde aksiyona eklenen Gauss
+  gürültüsüyle; eval'de deterministik (`act_eval`). Arayüz SAC ile birebir → aynı off-policy
+  eğitim döngüsünü (`core.trainer.train_td3`) paylaşır.
 
 ### Hiperparametreler (`config.py` — hat-etkin değerler)
 
-| | DQN | PPO | SAC |
-|---|---|---|---|
-| Gizli katman | (256, 128) | (256, 128) | (256, 128) |
-| Öğrenme oranı | lr=1e-3 | lr_p=3e-4, lr_v=1e-3 | lr_pi=3e-4, lr_q=5e-4 |
-| γ (iskonto) | 0.99 | 0.99 | 0.99 |
-| Batch | 64 | 128 | 128 |
-| Replay buffer | 50.000 | — (on-policy) | 50.000 |
-| Keşif | ε: 1.0→0.05 (10k adım) | entropi 0.005 | entropi α=0.05 |
-| Diğer | target_update=500, Huber δ=1.0 | clip=0.2, λ_GAE=0.95, n_epochs=6, rollout=400 | τ=0.01 |
-| Eğitim uzunluğu | 12 episode | 24 güncelleme | 8 episode × 600 adım |
+| | DQN | PPO | SAC | TD3 |
+|---|---|---|---|---|
+| Gizli katman | (256, 128) | (256, 128) | (256, 128) | (256, 128) |
+| Öğrenme oranı | lr=1e-3 | lr_p=3e-4, lr_v=1e-3 | lr_pi=3e-4, lr_q=5e-4 | lr_pi=lr_q=3e-4 |
+| γ (iskonto) | 0.99 | 0.99 | 0.99 | 0.99 |
+| Batch | 64 | 128 | 128 | 128 |
+| Replay buffer | 50.000 | — (on-policy) | 50.000 | 50.000 |
+| Keşif | ε: 1.0→0.05 (10k adım) | entropi 0.005 | entropi α=0.05 | expl_noise=0.1 (eval'de 0) |
+| Diğer | target_update=500, Huber δ=1.0 | clip=0.2, λ_GAE=0.95, n_epochs=6, rollout=400 | τ=0.01 | τ=0.005, policy_noise=0.2, noise_clip=0.5, policy_delay=2 |
+| Eğitim uzunluğu | 12 episode | 24 güncelleme | 8 episode × 600 adım | 8 episode × 600 adım |
 
 Ortak: `SEED=42`, CPU-PyTorch, train-only z-score, `random_start` eğitim çeşitliliği.
 
@@ -224,7 +241,7 @@ Ortak: `SEED=42`, CPU-PyTorch, train-only z-score, `random_start` eğitim çeşi
 ## 7. State ve Reward Geliştirme Süreci (Rapor §9.6 / PDF §8) — **EN KRİTİK BÖLÜM**
 
 İlk tasarım yeterli olmadı; ödül ve durum, gözlemlenen sorunlara göre iteratif geliştirildi.
-Projenin gerçek evrimi (v1→v5) aşağıdaki ≥3 iterasyon tablosuna eşlenir:
+Projenin gerçek evrimi (V1→V8) aşağıdaki ≥3 iterasyon tablosuna eşlenir:
 
 | İter. | State tasarımı | Reward tasarımı | Gözlenen problem | Yapılan düzeltme | Sonuç |
 |---|---|---|---|---|---|
@@ -233,15 +250,21 @@ Projenin gerçek evrimi (v1→v5) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 | **V3** | + adaptif shaper hedefleri (vol/turnover EWMA) | η, λ, τ **adaptif** (rejime göre ölçeklenir) + Diferansiyel Sharpe terimi | Sabit ceza volatil rejimde ya çok sert ya çok gevşek; risk-ayarı yok | `AdaptiveRewardShaper` + çevrim-içi `DifferentialSharpe` (w_dsr·DSR) | Rejime-duyarlı ceza, risk-ayarlı ödül |
 | **V4** | + CNN-LSTM **forecast** özelliği (bir-adım getiri tahmini) → 393 boyut | — | Ajan yalnız geçmişe bakıyor; ileri-görü yok (predict-then-optimize eksik) | Train-only fit CNN-LSTM tahmini state'e eklendi. **Ablation:** DQN/SAC'a yaradı, PPO'ya zarar verdi → forecast yalnız (DQN, SAC) | DQN/SAC'ta belirgin iyileşme |
 | **V5** | (değişmez) | (değişmez) | Tek test dönemine aşırı-uyum riski; genelleme ölçülemiyor | **Walk-forward** doğrulama (3 kat, fold-yerel ölçekleme) + eğitimde **random-start** pencere | Düşük fold-arası std = stabil genelleme |
+| **V6** | + **makro rejim** bloğu (4 yalın öznitelik): `regime` omurgası + `slope` (faiz: TNX−IRX) + `usd_try_mom` (dolar) + `gold_tl_mom` (altın). 393→397 / 365→369 boyut | (değişmez) | Ajan makro rejim körüydü (krizde geç tepki); BIST'in baskın sürücüsü USD/TRY ve risk-on/off state'te yoktu | Tek mühendislik **rejim skoru** (`tanh(vix_rel+4·(−spx_dd)−0.10)`) state'e eklendi; train-only z-score (leak-safe) | Ajan **daha savunmacı** (DQN MaxDD −53%→−41%) ama makro algı *tek başına* getiriyi düşürdü (Sharpe ↓) — algıyı kullanan ödül eksikti |
+| **V7** | (V6 omurgasını tüketir) | + **rejim-amplified CVaR** kuyruk cezası: `κ·CVaR`, `κ=w_cvar·(1+β·max(0,regime))^a`; ileri-parametrik `CVaR≈vol_ewma·φ(z_α)/α`; vade-bağlı `w_cvar` | V6'da ajan rejimi *görüyordu* ama ödülde karşılığı yoktu; ortalama iyi olsa da kuyruk (kriz) davranışı zayıftı | Aynı rejim skoru kuyruk cezasını krizde **otomatik sertleştirir** (omurga 2. kez kullanıldı) | **En zayıf ajan dönüştü**: DQN Sharpe 0.36→**0.78** (2×+), Calmar 0.15→**0.67**, MaxDD daha da düştü. PPO/SAC zaten optimale yakın → küçük değişim |
+| **V8** | (değişmez) | (değişmez — değişiklik geçiş yapısında 𝒫) | Ajan eğitim fiyatlarını **ezberleyebiliyordu**; gerçekte "al" dediğinde tam o fiyattan alınmaz (slippage). Hoca finansal projede **gürültüyü açıkça şart koştu** (9. Hafta): *"al dediğinde alınmıyor, yukarıdan alırsın… hem gerçekçi olur HEM EZBERİ ÖNLER."* | Gerçekleşen riskli getiriye env-yerel RNG ile küçük Gauss **slippage** (`σ=0.001`) eklendi. **Yalnız eğitimde** (`random_start=True`); eval'de kapalı → golden eval determinizmi korunur (yalnız öğrenilen politika değişir, ölçüm deterministik kalır) | Anti-ezber düzenlileştirme: ajan tek bir fiyat-patikasına aşırı-uyamaz, daha sağlam (robust) politika öğrenir. Davranış-değiştiren iterasyon → 4 ajan satırı kanonik ortamda yeniden baseline'lanır |
 
-> PDF en az **3 iterasyon** ister; yukarıdaki tablo gerçek 5 aşamalı evrimi kapsar. Çekirdek
-> öğrenme döngüsü: *gözlemle → eksiği gerekçelendir → state/reward'ı geliştir → ölç.*
+> PDF en az **3 iterasyon** ister; yukarıdaki tablo gerçek **8 aşamalı** evrimi kapsar. Çekirdek
+> öğrenme döngüsü: *gözlemle → eksiği gerekçelendir → state/reward'ı geliştir → ölç.* **V6→V7
+> dersi (dürüst):** makro *algı* (V6) tek başına yetmedi; algıyı *kullanan ödül* (V7) eklenince
+> en zayıf ajan belirgin iyileşti — "rejim skoru = omurga" (bir kez üret, iki kez kullan).
 
 ---
 
 ## 8. Deneysel Sonuçlar (Rapor §9.7)
 
-`python main.py` çalıştırması `results/` altına CSV'leri ve `figures/` altına 10 figürü üretir.
+`python main.py` çalıştırması `results/` altına CSV'leri (golden `metrics.csv` + `rigor_metrics.csv`)
+ve `figures/` altına 13 figürü üretir.
 
 ### 8.1. Metrikler
 
@@ -263,16 +286,52 @@ Projenin gerçek evrimi (v1→v5) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 | F3 | 60-gün rolling Sharpe |
 | F4 | Test metrikleri bar (CAGR / Sharpe / MaxDD) |
 | F5 | Risk-getiri düzlemi (Sharpe izo-çizgileriyle) |
-| F6 | DQN/PPO/SAC günlük ağırlık ısı haritaları |
-| F7 | Eğitim eğrileri (DQN ödül, PPO kayıplar, SAC NAV) |
+| F6 | DQN/PPO/SAC/TD3 günlük ağırlık ısı haritaları |
+| F7 | Eğitim eğrileri (DQN ödül, PPO kayıplar, SAC & TD3 NAV) |
 | F8 | MDP diyagramı (ajan↔ortam döngüsü) |
-| F9 | Üç ajanın mimari özeti |
+| F9 | Dört ajanın mimari özeti |
 | **F10** | **Hareketli ortalama episode getirisi** (öğrenme eğilimi — PDF §9.7) |
+| **F11** | **Deflated & Probabilistic Sharpe + PBO** (çoklu-deneme düzeltmeli — López de Prado) |
+| **F12** | **Monte-Carlo stres** (1-yıl ileri terminal getiri dağılımı + VaR/CVaR) |
+| **F13** | **Nominal (TL) vs Reel (USD) NAV** (lira illüzyonu — §9.9) |
 
 ### 8.3. Test metrikleri (golden baseline, seed=42 deterministik)
 
 Değerler `tests/golden/metrics_baseline.csv` içinde 1e-6 toleransta kilitlidir; her refactor
 sonrası `python main.py` ile yeniden üretilip doğrulanır. (Güncel değerler için `results/metrics.csv`.)
+Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metrics_baseline.csv`.
+
+**Titizlik (rigor) katmanı (PARS referans ağacından port, golden-güvenli raporlama).**
+`scripts/rigor_analysis.py`, deterministik eval NAV'larını okuyup `results/rigor_metrics.csv`
+üretir — golden `metrics.csv`'ye **dokunmaz** (ayrı dosya). Hero metrikler:
+- **Deflated Sharpe (DSR)** ve **Probabilistic Sharpe (PSR)** — Bailey & López de Prado (2014);
+  çoklu-deneme (V1→V8 + ajanlar = `n_trials`) altında gözlenen Sharpe'ın *tesadüf olmama*
+  olasılığı. Sağlam ajanları (SAC/TD3 ~0.90) fluke'tan (zayıf DQN ~0.00) **ayırır**.
+- **PBO (Probability of Backtest Overfitting)** — CSCV (López de Prado et al. 2017); IS-en-iyi
+  config'in OOS-medyan-altı olma oranı. **Yüksek PBO = RL ajanları pasif baseline'ı OOS'ta
+  sağlam geçemiyor** uyarısı (dürüst, §9.9).
+- **Reel (USD-bazlı) NAV** — nominal TL NAV ÷ (USD/TRY normalize) → lira illüzyonunu niceler.
+- **Monte-Carlo stres** — durağan blok bootstrap (Politis-Romano) + Student-t (ağır kuyruk) →
+  en iyi RL ajanın 1-yıl ileri terminal dağılımı + VaR/CVaR + P(zarar), P(>%20 düşüş).
+
+### 8.4. İterasyon karşılaştırması — V5 → V6 → V7 (test dönemi, DQN)
+
+State/reward geliştirme döngüsünün (§7) **ölçülen** etkisi. En zayıf ajan DQN, makro+CVaR
+iterasyonlarından en çok faydalanan; PPO/SAC zaten optimale yakın olduğundan az değişti.
+
+| Metrik (DQN) | V5 (teknik) | V6 (+makro algı) | V7 (+CVaR ödülü) |
+|---|---|---|---|
+| Sharpe | +0.57 | +0.36 | **+0.78** |
+| Sortino | +0.84 | +0.53 | **+1.12** |
+| MaxDD | −53% | −41% | **−34%** |
+| Calmar | +0.28 | +0.15 | **+0.67** |
+| CAGR | +14.9% | +6.3% | **+22.4%** |
+
+**Dürüst okuma:** V6 makro *algısı* tek başına ajanı daha savunmacı yaptı (MaxDD ↓) ama
+getiriyi düşürdü — algının ödülde karşılığı yoktu. V7'de aynı rejim skoru kuyruk cezasını
+krizde sertleştirince DQN hem düşüşü azalttı hem getiriyi belirgin artırdı (Sharpe 2×+). Bu,
+"rejim skoru = omurga" tezinin doğrulanmasıdır. Tek test dönemi sınırlı; gerçek hakem
+`python main.py --walkforward` (fold-arası CVaR/MaxDD stabilitesi).
 
 ---
 
@@ -287,7 +346,10 @@ kod/
 ├── train.py              # DataBundle; prepare_data/train_dqn/ppo/sac/evaluate/run
 ├── data.py               # BIST verisi indirme + sentetik GBM fallback + cache + train/test split
 ├── config.py             # TEK yapılandırma kaynağı (SEED, HORIZON_PRESETS, FEATURES, *Config dataclass)
-├── plots.py              # 10 figür (matplotlib)
+├── plots.py              # 13 figür (matplotlib, F1–F13)
+├── scripts/rigor_analysis.py  # DSR/PBO/Monte-Carlo stres/reel-NAV (golden-güvenli)
+├── utils/deflated_sharpe.py   # Deflated/Probabilistic Sharpe + CSCV-PBO (López de Prado)
+├── utils/stress_mc.py         # Monte-Carlo stres (Student-t + blok bootstrap)
 ├── agents/
 │   ├── base.py           # BaseAgent (act_eval) + SupportsQValues Protocol (ISP)
 │   ├── common.py         # mlp, ReplayBuffer (+ torch_utils re-export)
@@ -311,7 +373,7 @@ kod/
 ├── ui/                   # Streamlit paketi (SRP)
 │   ├── state.py · services.py · charts.py · sidebar.py
 │   └── tabs/ (mdp · train · test · compare)
-└── tests/                # 71 test + golden-master (1e-6)
+└── tests/                # 98 test + golden-master (1e-6)
 ```
 
 ### 9.2. Çalışma mantığı (uçtan uca akış)
@@ -413,10 +475,36 @@ DQN aksiyon dağılımı:
   nakit/ters-volatilite ağırlıklı, sakin dönemde momentum ağırlıklı davranış.
 - **Ajan nerede başarısız kaldı?** Ani rejim kırılmalarında (ör. şok günleri) tepki gecikmeli;
   PPO forecast özelliğinden faydalanamadı (on-policy + dağılım kayması).
-- **Problem daha karmaşık olsaydı ne eklenirdi?** Makro rejim öznitelikleri (VIX/faiz/USD),
-  CVaR/kuyruk-riski ceza terimi, stres-testi (Monte Carlo), çok-varlık-sınıfı evren, TD3 gibi
-  ek sürekli-kontrol ajanı. (Bu modüllerin bir prototipi `Reinforcement Learning Final/` referans
-  klasöründe mevcuttur; ana projeye taşınması golden-master'ı yeniden temellemeyi gerektirir.)
+- **Ezberi nasıl önledik (hocanın şartı)?** Hoca finansal projede gürültüyü açıkça şart koştu:
+  *"al dediğinde alınmıyor, yukarıdan alırsın… hem gerçekçi olur HEM EZBERİ ÖNLER."* **V8**'de
+  gerçekleşen getiriye eğitim-içi slippage (`σ=0.001`, env-yerel RNG) eklendi — ajan tek bir
+  fiyat-patikasını ezberleyemez, daha sağlam (robust) politika öğrenir. Eval'de gürültü **kapalı**
+  olduğundan golden ölçüm determinizmi korunur (yalnız öğrenilen politika değişir).
+- **Lira illüzyonu — nominal kazanç ne kadarı gerçek? (§9.9)** Test döneminde (2022–2024) tüm
+  stratejiler ve baseline'lar yüksek **nominal TL** getiri gösterir (BuyHold NAV ≈ 6.7×). Ancak bu
+  dönemde USD/TRY ~13'ten ~35'e yükseldi (≈2.7× devalüasyon) ve enflasyon yüksekti. **Nominal NAV'ın
+  büyük kısmı satın-alma-gücü artışı değil, para biriminin değer kaybıdır** — "lira illüzyonu". Hoca
+  bunu da işaret etti: *"başlangıç paranı o yılın değerine göre normalize et."* Bu artık
+  **uygulandı** (`utils.metrics.real_nav` + F13): NAV, başlangıç USD/TRY'ye normalize edilerek
+  **reel (USD-bazlı) NAV** olarak raporlanır. Sonuç çarpıcı — nominal ≈ 5.5× kazanç reel bazda
+  ≈ 2.1×'e iner: **nominal getirinin ~%60'ı satın-alma-gücü değil, TL'nin değer kaybıdır.** Ajanlar
+  arası **göreli** sıralama para biriminden bağımsızdır (hepsi aynı TL evreni) → değişmez; mutlak
+  kazanç yorumu reel bazda yapılır. Golden-güvenli (yalnız raporlama; eğitim/eval/ödül değişmez).
+- **Strateji gerçekten sağlam mı, yoksa backtest aşırı-uyumu mu? (titizlik katmanı)** "Yüksek
+  Sharpe" yanıltıcı olabilir — çoklu-deneme (V1→V8 + 4 ajan) altında bir strateji şans eseri iyi
+  görünebilir. Bunu **Deflated Sharpe (DSR)** ve **Probabilistic Sharpe (PSR)** ile (López de Prado)
+  test ettik: sağlam ajanlar (SAC/TD3 DSR ~0.90) ile fluke (DQN DSR ~0.00) **net ayrışıyor**.
+  Dahası **PBO (Probability of Backtest Overfitting, CSCV)** yüksek çıkıyor — bu *dürüst* bir bulgu:
+  RL ajanları pasif baseline'ı (Eşit Ağırlık/BuyHold) test döneminde **sağlam biçimde geçemiyor**.
+  Bu, RL'in piyasayı "yendiği" iddiasını **abartmaktan kaçınmamızı** sağlar; literatürle de tutarlı
+  (DeMiguel et al. 2009: naif 1/N çeşitlendirmeyi ham Sharpe'ta yenmek zordur). **Monte-Carlo stres**
+  (blok bootstrap + Student-t ağır kuyruk) en iyi RL ajanın 1-yıl ileri VaR/CVaR + felaket olasılığını
+  niceler.
+- **Problem daha karmaşık olsaydı ne eklenirdi?** Bu projede zaten eklenenler: **makro rejim** (V6),
+  **rejim-amplified CVaR** (V7), **TD3** (sürekli-deterministik ajan), **fiyat gürültüsü** (V8), ve
+  **titizlik katmanı** — Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres + reel-NAV (PARS
+  referans ağacından port). Bundan sonrası: çok-varlık-sınıfı evren, nakit faiz geliri + BSMV'yi
+  *ödüle* katma (davranış-değiştiren — şu an yok), reel-NAV'ı doğrudan ödüle katma.
 
 ---
 
@@ -431,10 +519,11 @@ pip install -e ".[dev]"                              # pyproject bağımlılıkl
 ### Komutlar
 ```bash
 streamlit run app.py            # arayüz (eğitim + test + karşılaştırma)
-python main.py                  # tam akış: veri → eğitim → backtest → 10 figür
+python main.py                  # tam akış: veri → eğitim → backtest → titizlik → 13 figür
+python scripts/rigor_analysis.py # yalnız titizlik katmanı (DSR/PBO/stres/reel-NAV)
 python main.py --skip-data      # cache varsa veriyi atla
 python main.py --walkforward    # walk-forward genelleme doğrulaması (3 kat)
-pytest -q                       # 71 test
+pytest -q                       # 98 test
 pytest -m "not slow"            # hızlı yerel döngü (UI smoke hariç)
 ```
 

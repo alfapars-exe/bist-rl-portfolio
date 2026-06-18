@@ -119,3 +119,28 @@ def success_vs_benchmark(nav_agent: np.ndarray, nav_bench: np.ndarray) -> int:
         return 0
     m = min(len(nav_agent), len(nav_bench))
     return int(nav_agent[m - 1] >= nav_bench[m - 1])
+
+
+def real_nav(nav: np.ndarray, usdtry: np.ndarray) -> np.ndarray:
+    """Reel (USD-bazli) NAV — nominal TL NAV'ini USD/TRY ile deflate eder (lira illuzyonu, §9.9).
+
+    Hoca: "baslangic paranı o yilin degerine gore normalize et." Nominal NAV TL
+    cinsindendir; test doneminde (2022-2024) TL hizla deger kaybettiginden nominal
+    kazanc satin-alma gucunu abartir ("lira illuzyonu"). Reel NAV baslangic USD/TRY'ye
+    normalize eder:  real_t = (nav_t / nav_0) / (usdtry_t / usdtry_0).
+    Baslangicta 1.0'dan baslar -> nominal NAV ile dogrudan kiyaslanabilir; TL deger
+    kaybettikce reel NAV nominalin altinda kalir.
+
+    GOZLEMSEL (yalniz raporlama) — egitim/eval/odul sayisal yolunu DEGISTIRMEZ; golden
+    metrikleri etkilenmez. Ajanlar-arasi GORELI siralama para biriminden bagimsizdir
+    (hepsi ayni TL evreni) -> reel donusum sirayi degistirmez, mutlak yorumu duzeltir.
+    """
+    nav = np.asarray(nav, dtype=float)
+    fx = np.asarray(usdtry, dtype=float)
+    if nav.size == 0 or fx.size == 0:
+        return nav.copy()
+    m = min(len(nav), len(fx))
+    nav, fx = nav[:m], fx[:m]
+    nav0 = nav[0] if abs(nav[0]) > 1e-12 else 1e-12
+    fx0 = fx[0] if abs(fx[0]) > 1e-12 else 1e-12
+    return (nav / nav0) / (fx / fx0)

@@ -19,6 +19,8 @@ def _init_state():
         "feats_tr": None,
         "feats_te": None,
         "scaler": None,
+        "macro_tr": None, "macro_te": None,      # v6: makro rejim blogu (z-skorlu)
+        "regime_tr": None, "regime_te": None,    # v6: ham regime (V7 amplify)
         "trained_agents": {},     # {(algo, horizon, adaptive): (agent, curve)}
         "test_traces": {},        # aynı anahtar: trajectory listesi
         "baselines": None,        # dict(name -> backtest dict)

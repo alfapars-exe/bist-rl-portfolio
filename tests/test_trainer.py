@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from agents import DQNAgent, PPOAgent, SACAgent
+from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 from utils.features import add_features
 from core.trainer import train
@@ -54,6 +54,16 @@ def test_train_sac_telemetry():
     agent = SACAgent(env.state_dim, env.action_dim, seed=0)
     rec = next(train(agent, env, n_iters=1))
     assert rec["algo"] == "SAC"
+    for k in ("episode", "train_nav", "steps", "reward", "loss", "success"):
+        assert k in rec
+
+
+def test_train_td3_telemetry():
+    prices, feats = _market()
+    env = PortfolioEnv(prices, feats, horizon="short", max_steps=60)
+    agent = TD3Agent(env.state_dim, env.action_dim, seed=0)
+    rec = next(train(agent, env, n_iters=1))
+    assert rec["algo"] == "TD3"
     for k in ("episode", "train_nav", "steps", "reward", "loss", "success"):
         assert k in rec
 

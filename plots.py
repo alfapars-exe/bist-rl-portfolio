@@ -21,8 +21,10 @@ plt.rcParams.update({
     "figure.dpi": 140,
     "savefig.dpi": 200,
 })
-PAL = {"DQN":"#d62728", "PPO":"#1f77b4", "SAC":"#2ca02c",
+PAL = {"DQN":"#d62728", "PPO":"#1f77b4", "SAC":"#2ca02c", "TD3":"#17becf",
        "BuyHold":"#7f7f7f", "EqualWeight":"#ff7f0e", "MeanVar":"#9467bd"}
+# RL ajanlari (kalin/duz cizgi); baseline'lar ince/kesik. TD3 4. ajan olarak eklendi.
+RL_AGENTS = ["DQN", "PPO", "SAC", "TD3"]
 
 
 def run():
@@ -31,8 +33,8 @@ def run():
     fig, ax = plt.subplots(figsize=(10, 5))
     for c in navs.columns:
         ax.plot(navs.index, navs[c], label=c, color=PAL.get(c, None),
-                lw=1.8 if c in ["DQN", "PPO", "SAC"] else 1.2,
-                ls="-" if c in ["DQN", "PPO", "SAC"] else "--")
+                lw=1.8 if c in RL_AGENTS else 1.2,
+                ls="-" if c in RL_AGENTS else "--")
     ax.set_ylabel("Portföy Değeri (NAV, başlangıç=1)")
     ax.set_xlabel("Tarih"); ax.set_title("BIST 30 — RL vs Klasik Stratejiler (Test dönemi)")
     ax.legend(ncol=2, fontsize=9)
@@ -57,8 +59,8 @@ def run():
     fig, ax = plt.subplots(figsize=(10, 4))
     for c in roll_sh.columns:
         ax.plot(roll_sh.index, roll_sh[c], label=c, color=PAL.get(c, None),
-                lw=1.5 if c in ["DQN", "PPO", "SAC"] else 1.0,
-                ls="-" if c in ["DQN", "PPO", "SAC"] else "--")
+                lw=1.5 if c in RL_AGENTS else 1.0,
+                ls="-" if c in RL_AGENTS else "--")
     ax.axhline(0, color="k", lw=0.5)
     ax.set_ylabel("60-Gün Rolling Sharpe"); ax.set_title("Koşullu Risk-Getiri Dengesi")
     ax.legend(ncol=2, fontsize=9); plt.tight_layout()
@@ -133,8 +135,8 @@ def run():
     plt.tight_layout(); plt.savefig(FIG/"f5_risk_return.png", bbox_inches="tight"); plt.close()
     print("f5 ok")
 
-    # ---------- F6: PPO / SAC / DQN weights heatmap ----------
-    for algo in ["PPO", "SAC", "DQN"]:
+    # ---------- F6: PPO / SAC / DQN / TD3 weights heatmap ----------
+    for algo in ["PPO", "SAC", "DQN", "TD3"]:
         W = pd.read_csv(RES/f"weights_{algo}.csv")
         # sample every N days, transpose for display
         step = max(1, len(W) // 200)
@@ -153,7 +155,8 @@ def run():
     dqn_c = pd.read_csv(RES/"dqn_curve.csv")
     ppo_c = pd.read_csv(RES/"ppo_curve.csv")
     sac_c = pd.read_csv(RES/"sac_curve.csv")
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    td3_c = pd.read_csv(RES/"td3_curve.csv")
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
     axes[0].plot(dqn_c["episode"], dqn_c["reward"], "o-", color=PAL["DQN"])
     axes[0].set_title("DQN — Epizot Ödülü"); axes[0].set_xlabel("Epizot"); axes[0].set_ylabel("Kümülatif Ödül")
     ax2 = axes[0].twinx()
@@ -169,6 +172,9 @@ def run():
 
     axes[2].plot(sac_c["episode"], sac_c["train_nav"], "o-", color=PAL["SAC"])
     axes[2].set_title("SAC — Epizot Sonu NAV"); axes[2].set_xlabel("Epizot"); axes[2].set_ylabel("NAV (tren)")
+
+    axes[3].plot(td3_c["episode"], td3_c["train_nav"], "o-", color=PAL["TD3"])
+    axes[3].set_title("TD3 — Epizot Sonu NAV"); axes[3].set_xlabel("Epizot"); axes[3].set_ylabel("NAV (tren)")
     plt.tight_layout(); plt.savefig(FIG/"f7_training_curves.png"); plt.close()
     print("f7 ok")
 
@@ -180,7 +186,7 @@ def run():
     env_box   = patches.FancyBboxPatch((8.8, 1.8), 2.4, 1.3, boxstyle="round,pad=0.1",
                                         fc="#ffe5c8", ec="#a64", lw=1.5)
     ax.add_patch(agent_box); ax.add_patch(env_box)
-    ax.text(2.0, 2.45, "AJAN\n(DQN/PPO/SAC)", ha="center", va="center", fontsize=12, fontweight="bold")
+    ax.text(2.0, 2.45, "AJAN\n(DQN/PPO/SAC/TD3)", ha="center", va="center", fontsize=12, fontweight="bold")
     ax.text(10.0, 2.45, "ORTAM\n(BIST 30 Piyasa)", ha="center", va="center", fontsize=12, fontweight="bold")
     ax.annotate("", xy=(8.8, 2.7), xytext=(3.2, 2.7),
                 arrowprops=dict(arrowstyle="->", lw=2, color="#246"))
@@ -198,11 +204,12 @@ def run():
     print("f8 ok")
 
     # ---------- F9: Algo architecture sketch ----------
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.5))
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
     for ax, (name, desc) in zip(axes, [
         ("DQN", "s -> MLP(64,64) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
         ("PPO", "s -> policy -> Normal(mu, sigma) -> softmax(w)\nGAE avantaji\nclipped surrogate loss"),
-        ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac")
+        ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac"),
+        ("TD3", "s -> Actor -> tanh (deterministik)\ncift-Q min + gecikmeli politika\nhedef-politika yumusatma")
     ]):
         ax.axis("off")
         ax.text(0.5, 0.88, name, ha="center", fontsize=20, fontweight="bold",
@@ -211,14 +218,14 @@ def run():
         rect = patches.FancyBboxPatch((0.05, 0.08), 0.9, 0.84, boxstyle="round,pad=0.02",
                                        fc="none", ec=PAL[name], lw=2)
         ax.add_patch(rect)
-    plt.suptitle("Üç Ajanın Mimari Özeti", y=1.02, fontsize=14, fontweight="bold")
+    plt.suptitle("Dört Ajanın Mimari Özeti", y=1.02, fontsize=14, fontweight="bold")
     plt.tight_layout(); plt.savefig(FIG/"f9_arch.png", bbox_inches="tight"); plt.close()
     print("f9 ok")
 
     # ---------- F10: Moving-average episode return (PDF §9.7 ogrenme egilimi) ----------
     from utils.metrics import moving_average
     fig, ax = plt.subplots(figsize=(11, 4.5))
-    for algo, c in [("DQN", dqn_c), ("PPO", ppo_c), ("SAC", sac_c)]:
+    for algo, c in [("DQN", dqn_c), ("PPO", ppo_c), ("SAC", sac_c), ("TD3", td3_c)]:
         if "reward" not in c.columns:
             continue
         r = c["reward"].to_numpy(dtype=float)
@@ -232,6 +239,63 @@ def run():
     ax.legend(fontsize=9); plt.tight_layout()
     plt.savefig(FIG/"f10_moving_avg_return.png"); plt.close()
     print("f10 ok")
+
+    # ===== Titizlik (rigor) figürleri — scripts/rigor_analysis.py çıktıları (golden-güvenli) =====
+    # ---------- F11: Deflated & Probabilistic Sharpe (López de Prado) + PBO ----------
+    rp = RES/"rigor_metrics.csv"
+    if rp.exists():
+        rig = pd.read_csv(rp, index_col=0)
+        fig, ax = plt.subplots(figsize=(11, 4.5))
+        x = np.arange(len(rig.index)); wd = 0.38
+        ax.bar(x - wd/2, rig["PSR"], wd, label="PSR", color="#1f77b4", edgecolor="k", lw=0.5)
+        ax.bar(x + wd/2, rig["DSR"], wd, label="DSR (deflated)", color="#d62728", edgecolor="k", lw=0.5)
+        ax.axhline(0.95, ls="--", color="gray", lw=1)
+        ax.text(len(x) - 0.5, 0.965, "0.95 eşiği", fontsize=8, color="gray", ha="right")
+        ax.set_xticks(x); ax.set_xticklabels(rig.index, rotation=25); ax.set_ylim(0, 1.05)
+        ax.set_title("Probabilistic & Deflated Sharpe (çoklu-deneme düzeltmeli) — López de Prado")
+        ax.set_ylabel("Olasılık"); ax.legend(fontsize=9, loc="lower right")
+        sp = RES/"rigor_summary.csv"
+        if sp.exists():
+            s = pd.read_csv(sp, index_col=0, header=None).iloc[:, 0]
+            try:
+                ax.text(0.01, 0.93, f"PBO = {float(s.get('PBO')):.2f}", transform=ax.transAxes,
+                        fontsize=11, fontweight="bold", color="#555")
+            except (TypeError, ValueError):
+                pass
+        plt.tight_layout(); plt.savefig(FIG/"f11_deflated_sharpe.png"); plt.close()
+        print("f11 ok")
+
+    # ---------- F12: Monte-Carlo stres — terminal getiri dağılımı + VaR/CVaR ----------
+    mp = RES/"rigor_mc_terminal.csv"
+    if mp.exists():
+        mc = pd.read_csv(mp)
+        fig, ax = plt.subplots(figsize=(11, 4.5))
+        for col, color, lbl in [("block_bootstrap", "#2ca02c", "Blok bootstrap"),
+                                ("student_t", "#9467bd", "Student-t (ağır kuyruk)")]:
+            if col in mc.columns:
+                d = mc[col].dropna().to_numpy() * 100
+                ax.hist(d, bins=60, alpha=0.5, color=color, label=lbl, density=True)
+                ax.axvline(np.quantile(d, 0.05), ls="--", color=color, lw=1.2)   # %5 VaR
+        ax.axvline(0, color="k", lw=0.8)
+        ax.set_title("Monte-Carlo Stres — 1-yıl ileri terminal getiri dağılımı (en iyi RL ajan)")
+        ax.set_xlabel("Terminal getiri (%)  ·  kesik çizgi = %5 VaR")
+        ax.set_ylabel("Yoğunluk"); ax.legend(fontsize=9)
+        plt.tight_layout(); plt.savefig(FIG/"f12_mc_stress.png"); plt.close()
+        print("f12 ok")
+
+    # ---------- F13: Nominal (TL) vs Reel (USD-bazlı) NAV — lira illüzyonu (§9.9) ----------
+    nr = RES/"navs_real.csv"
+    if nr.exists():
+        real = pd.read_csv(nr, index_col=0, parse_dates=True)
+        fig, ax = plt.subplots(figsize=(11, 5))
+        for c in [a for a in RL_AGENTS if a in navs.columns and a in real.columns]:
+            ax.plot(navs.index, navs[c], color=PAL.get(c), lw=1.9, label=f"{c} nominal (TL)")
+            ax.plot(real.index, real[c], color=PAL.get(c), lw=1.4, ls="--", label=f"{c} reel (USD)")
+        ax.axhline(1.0, color="k", lw=0.5)
+        ax.set_title("Nominal (TL) vs Reel (USD-bazlı) NAV — Lira İllüzyonu (§9.9)")
+        ax.set_ylabel("NAV (başlangıç=1)"); ax.set_xlabel("Tarih"); ax.legend(fontsize=8, ncol=2)
+        plt.tight_layout(); plt.savefig(FIG/"f13_real_nav.png"); plt.close()
+        print("f13 ok")
 
     print(f"\nAll figures saved in {FIG}")
 

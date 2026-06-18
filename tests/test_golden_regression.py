@@ -29,9 +29,18 @@ RTOL = 1e-6
 def test_metrics_match_golden():
     golden = pd.read_csv(GOLDEN, index_col=0).sort_index()
     current = pd.read_csv(CURRENT, index_col=0).sort_index()
-    assert list(golden.index) == list(current.index), "Strateji satirlari farkli"
+    # Golden, baseline'lanmis stratejileri (DQN/PPO/SAC + 3 baseline) kapsar.
+    # Sonradan eklenen YENI ajanlar (or. TD3) current'ta FAZLADAN satir olarak
+    # gorunur — bu bir regresyon DEGIL, kapsam genislemesidir. Bu yuzden:
+    #   (1) golden'in TUM satirlari current'ta bulunmali (eksik satir = regresyon),
+    #   (2) eslesen satirlar <=1e-6 oturmali. Yeni ajanin kendi davranisi
+    #       birim testleriyle (test_agents/test_trainer) korunur; golden satiri ise
+    #       davranis-degistiren bir sonraki iterasyonda (or. V8 gurultu) eklenir.
+    missing = sorted(set(golden.index) - set(current.index))
+    assert not missing, f"Golden stratejileri current'ta eksik (regresyon?): {missing}"
     assert list(golden.columns) == list(current.columns), "Metrik kolonlari farkli"
+    cur = current.reindex(golden.index)               # yalniz baseline'lanmis satirlar
     np.testing.assert_allclose(
-        current.values, golden.values, atol=ATOL, rtol=RTOL,
+        cur.values, golden.values, atol=ATOL, rtol=RTOL,
         err_msg="Metrikler golden-master'dan tolerans disinda sapti — regresyon?",
     )

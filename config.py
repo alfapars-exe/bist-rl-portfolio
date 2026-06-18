@@ -90,6 +90,22 @@ class SACConfig:
     batch_size: int = 128
 
 
+@dataclass(frozen=True)
+class TD3Config:
+    # Twin Delayed DDPG (RL_12) — hocanin surekli-eylem icin TAVSIYE ettigi algoritma.
+    hidden: Tuple[int, int] = (256, 128)
+    lr_pi: float = 3e-4
+    lr_q: float = 3e-4
+    gamma: float = 0.99
+    tau: float = 0.005
+    policy_noise: float = 0.2     # hedef-politika yumusatma gurultusu
+    noise_clip: float = 0.5
+    policy_delay: int = 2         # gecikmeli politika guncellemesi
+    expl_noise: float = 0.1       # eylem kesif gurultusu
+    buffer_size: int = 50_000
+    batch_size: int = 128
+
+
 # ---------------------------------------------------------------------
 # Ortam (env) default'lari — odul sekillendirici hedefleri + iflas/episod.
 # ---------------------------------------------------------------------
@@ -117,6 +133,8 @@ class TrainConfig:
     ppo_rollout_len: int = 400
     sac_episodes: int = 8
     sac_episode_len: int = 600
+    td3_episodes: int = 8         # TD3 off-policy (SAC ile ayni rejim)
+    td3_episode_len: int = 600
 
 
 # ---------------------------------------------------------------------
@@ -151,7 +169,8 @@ class ForecastConfig:
     batch: int = 256
     # Hangi ajanlar forecast feature'ini kullansin? V3<->V4 ablation'a gore forecast
     # DQN/SAC'a yaradi (+10pp DQN), PPO'ya zarar verdi (-7.5pp) -> PPO haric tutulur.
-    forecast_agents: tuple = ("DQN", "SAC")
+    # TD3 surekli-kontrolde SAC gibi davranir -> forecast ona da verilir.
+    forecast_agents: tuple = ("DQN", "SAC", "TD3")
 
 
 # ---------------------------------------------------------------------

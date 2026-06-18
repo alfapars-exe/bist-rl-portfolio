@@ -104,8 +104,9 @@ def sidebar_controls():
     )
 
     st.sidebar.divider()
-    algo = st.sidebar.radio("Ajan", ["DQN", "PPO", "SAC"],
-                            index=["DQN", "PPO", "SAC"].index(st.session_state.selected_algo))
+    _algos = ["DQN", "PPO", "SAC", "TD3"]
+    _cur = st.session_state.selected_algo if st.session_state.selected_algo in _algos else "DQN"
+    algo = st.sidebar.radio("Ajan", _algos, index=_algos.index(_cur))
     st.session_state.selected_algo = algo
 
     horizon_label = st.sidebar.radio(
@@ -167,7 +168,7 @@ def sidebar_controls():
             options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005)
         hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128)
         hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1)
-    else:
+    elif algo == "SAC":
         st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
         hp["lr_pi"]      = st.sidebar.select_slider("Policy LR",
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
@@ -176,6 +177,19 @@ def sidebar_controls():
         hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01)
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
             options=[0.005, 0.01, 0.05], value=0.01)
+        hp["batch_size"] = st.sidebar.select_slider("Batch", options=[64, 128, 256], value=128)
+    else:  # TD3 — sürekli/deterministik politika (hocanın tavsiyesi)
+        st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
+        hp["lr_pi"]      = st.sidebar.select_slider("Policy LR",
+            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+        hp["lr_q"]       = st.sidebar.select_slider("Q LR",
+            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4)
+        hp["policy_noise"] = st.sidebar.slider("Hedef-politika gürültüsü", 0.0, 0.5, 0.2, step=0.05,
+            help="Hedef aksiyona eklenen clamped Gauss gürültüsü (TD3 smoothing).")
+        hp["expl_noise"] = st.sidebar.slider("Keşif gürültüsü", 0.0, 0.5, 0.1, step=0.05,
+            help="Eğitimde aksiyona eklenen keşif gürültüsü (eval'de kapalı).")
+        hp["tau"]        = st.sidebar.select_slider("Soft update τ",
+            options=[0.005, 0.01, 0.05], value=0.005)
         hp["batch_size"] = st.sidebar.select_slider("Batch", options=[64, 128, 256], value=128)
 
     st.sidebar.caption(f"Seed: {SEED} (sabit)")

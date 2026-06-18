@@ -23,8 +23,8 @@ from typing import Callable, Dict
 
 import pandas as pd
 
-from agents import DQNAgent, PPOAgent, SACAgent
-from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig
+from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
+from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig, TD3Config
 from core.features import select_features
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 
@@ -63,11 +63,26 @@ def _build_sac(state_dim: int, action_dim: int, hp: dict, seed: int) -> SACAgent
     )
 
 
+def _build_td3(state_dim: int, action_dim: int, hp: dict, seed: int) -> TD3Agent:
+    return TD3Agent(
+        state_dim, action_dim,
+        hidden=tuple(hp.get("hidden", TD3Config.hidden)),
+        lr_pi=hp.get("lr_pi", TD3Config.lr_pi), lr_q=hp.get("lr_q", TD3Config.lr_q),
+        gamma=hp.get("gamma", TD3Config.gamma), tau=hp.get("tau", TD3Config.tau),
+        policy_noise=hp.get("policy_noise", TD3Config.policy_noise),
+        noise_clip=hp.get("noise_clip", TD3Config.noise_clip),
+        policy_delay=hp.get("policy_delay", TD3Config.policy_delay),
+        expl_noise=hp.get("expl_noise", TD3Config.expl_noise),
+        batch_size=hp.get("batch_size", TD3Config.batch_size), seed=seed,
+    )
+
+
 # OCP: yeni algoritma eklemek = bu registry'ye kayit eklemek.
 AGENT_BUILDERS: Dict[str, Callable] = {
     "DQN": _build_dqn,
     "PPO": _build_ppo,
     "SAC": _build_sac,
+    "TD3": _build_td3,
 }
 
 

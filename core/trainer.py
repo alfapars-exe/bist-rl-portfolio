@@ -21,7 +21,7 @@ from typing import Iterator, Optional
 
 import numpy as np
 
-from agents import DQNAgent, PPOAgent, SACAgent
+from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
 from utils.metrics import success_vs_benchmark
 
 
@@ -143,6 +143,48 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
         }
 
 
+# --------------------------------------------------------------------- TD3
+def train_td3(agent, env, n_episodes: Optional[int] = None,
+              warmup: int = 500, train_every: int = 4,
+              ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
+    """TD3 off-policy donguusu — SAC ile ayni adim-bazli sema (act/step/remember/
+    train_step). Tek fark etiket (algo='TD3'); politika ajan icinde deterministik."""
+    for ep in _counter(n_episodes):
+        s, _ = env.reset()
+        done = trunc = False
+        step = 0
+        ep_reward = 0.0
+        losses = []
+        while not (done or trunc):
+            if len(agent.buffer) < warmup:
+                a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
+            else:
+                a = agent.act(s)
+            s2, r, done, trunc, _ = env.step(a)
+            agent.remember(s, a, r, s2, float(done))
+            if len(agent.buffer) > warmup and step % train_every == 0:
+                loss = agent.train_step()
+                if loss is not None:
+                    losses.append(loss)
+            s = s2
+            step += 1
+            ep_reward += r
+        nav_agent = np.array(env.nav_history[1:])
+        success = (success_vs_benchmark(nav_agent, ew_nav[:len(nav_agent)])
+                   if ew_nav is not None else 0)
+        yield {
+            "algo": "TD3", "iter": ep, "episode": ep,
+            "reward": float(ep_reward),
+            "nav": float(env.nav), "train_nav": float(env.nav),
+            "gain": float(env.nav) - 1.0,
+            "steps": step,
+            "loss": float(np.mean(losses)) if losses else 0.0,
+            "success": int(success),
+            "actions": [],
+            "agent": agent, "env": env,
+        }
+
+
 # --------------------------------------------------------------------- dispatch
 def _launch_dqn(agent, env, n_iters, rollout_len, ew_nav):
     return train_dqn(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
@@ -156,12 +198,17 @@ def _launch_sac(agent, env, n_iters, rollout_len, ew_nav):
     return train_sac(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
 
 
+def _launch_td3(agent, env, n_iters, rollout_len, ew_nav):
+    return train_td3(agent, env, n_episodes=n_iters, ew_nav=ew_nav)
+
+
 # SOLID P4 (OCP): yeni ajan tipi eklemek = bu registry'ye kayit eklemek;
 # train() govdesi degismez. Kayit yoksa TypeError (onceki davranisla ayni).
 _TRAINERS: dict = {
     DQNAgent: _launch_dqn,
     PPOAgent: _launch_ppo,
     SACAgent: _launch_sac,
+    TD3Agent: _launch_td3,
 }
 
 

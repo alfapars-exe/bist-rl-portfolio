@@ -15,7 +15,7 @@ SAFE_MODULES = [
     "data",
     "env", "env.portfolio_env", "env.reward",
     "agents", "agents.base", "agents.common",
-    "agents.dqn", "agents.ppo", "agents.sac",
+    "agents.dqn", "agents.ppo", "agents.sac", "agents.td3",
     "utils", "utils.features", "utils.metrics",
     "utils.baselines", "utils.portfolio_tl", "utils.torch_utils", "utils.macro",
     "forecast", "forecast.forecaster",

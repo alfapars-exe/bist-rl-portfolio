@@ -89,7 +89,7 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
                     rollout_len: int = 400):
     """Episod/update başına bir telemetri kaydı yield eder. Sonsuz akış —
     tüketici (tab_train) 'Durdur' butonuyla keser."""
-    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200}[algo]
+    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}[algo]
     env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
     action_dim = env.n_discrete if algo == "DQN" else env.action_dim
     agent = _make_agent(algo, env.state_dim, action_dim, hp)

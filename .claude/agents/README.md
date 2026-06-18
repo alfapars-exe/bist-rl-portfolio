@@ -5,12 +5,13 @@ oturum, bir görevi ilgili ajanın `description`'ına göre **otomatik yönlendi
 `@ajan-adi` ile elle de çağırabilirsin. Roster ve refleks kuralları için kökteki
 [`CLAUDE.md`](../../CLAUDE.md)'ye de bak.
 
-## Roster (15 ajan)
+## Roster (16 ajan)
 
 | Ajan | Ne zaman | Model |
 |------|----------|-------|
 | **orkestrator-planlayici** | Büyük/çok-disiplinli hedefi parçalara böl, ajanlara dağıt | opus |
 | **rl-arastirma-muhendisi** | DQN/PPO/SAC/TD3, ödül şekillendirme, state tasarımı, eğitim kararlılığı | opus |
+| **odul-ceza-tasarimcisi** | Ödül/ceza tasarımı: terim büyüklükleri/denge, yeni reward shaping (2x/3x bonus, iflas-timing; opt-in) | opus |
 | **backend-muhendisi** | `core/`, `main.py`, `train.py`, `config.py`, pipeline & persistence | sonnet |
 | **frontend-muhendisi** | Streamlit `app.py`/`ui/`/`plots.py` — 4 sekme, grafikler | sonnet |
 | **veri-muhendisi** | `data.py`, `utils/features.py`, makro; **sızıntısızlık** | sonnet |

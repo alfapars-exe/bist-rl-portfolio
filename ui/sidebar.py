@@ -1,12 +1,21 @@
 """Kontrol paneli (sidebar) — app.py'den tasindi (P5)."""
 from __future__ import annotations
 
+import datetime
+
 import streamlit as st
 
-from config import SEED, EnvConfig
+from config import SEED, DataConfig, EnvConfig, RewardConfig
 from env.portfolio_env import HORIZON_PRESETS
 from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
 from ui.state import _agent_key
+
+_dc = DataConfig()
+_rc = RewardConfig()
+
+# Tarih aralığı sınırları (UI kısıtı)
+_DATE_MIN = datetime.date(2015, 1, 1)
+_DATE_MAX = datetime.date(2024, 12, 31)
 
 # SonarCloud S1192: 3+ kez tekrar eden UI literal'leri tek sabitte topla.
 _EP_HINT = ("Eğitim **N episode** koşar (sidebar'daki 'Episode sayısı' değeri); "
@@ -87,8 +96,86 @@ def _sidebar_reward_editor(preset: dict):
             help="Büyük α = daha hızlı uyum, küçük α = daha stabil.",
         )
 
+        st.markdown("**DSR & CVaR risk terimleri**")
+        cfg["w_dsr"] = st.number_input(
+            "w_dsr — Diferansiyel Sharpe ağırlığı",
+            value=float(cfg.get("w_dsr", _rc.w_dsr)),
+            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
+            help="DSR terimi ağırlığı: online risk-ayarlı Sharpe gradyanı. "
+                 "0 = kapalı, 0.05 = hafif etkin.",
+        )
+        cfg["w_cvar"] = st.number_input(
+            "w_cvar — CVaR kuyruk cezası ağırlığı",
+            value=float(cfg.get("w_cvar", _rc.w_cvar)),
+            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
+            help="CVaR (Conditional Value at Risk) ceza ağırlığı. "
+                 "0 = kapalı; kriz dönemlerinde regime_beta ile amplify edilir.",
+        )
+        cfg["dsr_eta"] = st.number_input(
+            "dsr_eta — DSR EWMA oranı",
+            value=float(cfg.get("dsr_eta", _rc.dsr_eta)),
+            min_value=0.001, max_value=0.1, step=0.001, format="%.3f",
+            help="Diferansiyel Sharpe hesabındaki EWMA pencere oranı. "
+                 "Küçük = yavaş adaptasyon, büyük = hızlı.",
+        )
+        cfg["cvar_alpha"] = st.number_input(
+            "cvar_alpha — CVaR kuyruk yüzdesi",
+            value=float(cfg.get("cvar_alpha", _rc.cvar_alpha)),
+            min_value=0.01, max_value=0.2, step=0.005, format="%.3f",
+            help="CVaR için kuyruk yüzdesi (α). 0.05 = en kötü %5'lik getiri ortalaması.",
+        )
+        cfg["regime_beta"] = st.number_input(
+            "regime_beta — Kriz amplifikasyon gücü",
+            value=float(cfg.get("regime_beta", _rc.regime_beta)),
+            min_value=0.0, max_value=5.0, step=0.1, format="%.2f",
+            help="CVaR cezasını kriz rejiminde büyüten çarpan. "
+                 "0 = rejim bağımsız, 5 = kriz anında 6× ceza.",
+        )
+        cfg["cvar_amp"] = st.number_input(
+            "cvar_amp — Rejim amplifikasyon üsteli",
+            value=float(cfg.get("cvar_amp", _rc.cvar_amp)),
+            min_value=0.5, max_value=3.0, step=0.1, format="%.2f",
+            help="κ = w_cvar·(1 + regime_beta·max(0,regime))^cvar_amp formülündeki üstel. "
+                 "1.0 = doğrusal amplifikasyon.",
+        )
+
         st.caption("⚠️ Bu ayarları değiştirdikten sonra ajanları **yeniden eğitmek** "
                    "anlamlı olur; eski ajan farklı ortamda öğrenilmiştir.")
+
+    with st.sidebar.expander("🧪 Deneysel ödül terimleri (opt-in, varsayılan kapalı)",
+                             expanded=False):
+        st.caption(
+            "Bu terimler varsayılan 0 ile tamamen kapalıdır — aktif etmek için "
+            "sıfırdan farklı değer girin. Yeni ajan eğitmeden etkisi görülmez."
+        )
+        cfg["w_gain"] = st.number_input(
+            "w_gain — Kazanç-çarpanı ödülü ağırlığı",
+            value=float(cfg.get("w_gain", _rc.w_gain)),
+            min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
+            help="NAV gain_floor eşiğini aştığında verilen ödül ağırlığı. "
+                 "2× → w_gain ödül, 3× → 2·w_gain ödül. 0 = kapalı.",
+        )
+        cfg["gain_floor"] = st.number_input(
+            "gain_floor — Ödül eşiği (NAV)",
+            value=float(cfg.get("gain_floor", _rc.gain_floor)),
+            min_value=1.0, max_value=2.0, step=0.05, format="%.2f",
+            help="w_gain ödülünün başlayacağı NAV çarpanı. "
+                 "1.0 = başlangıçtan itibaren, 1.5 = %50 büyüme sonrası.",
+        )
+        cfg["w_gain_speed"] = st.number_input(
+            "w_gain_speed — Hız bonusu ağırlığı",
+            value=float(cfg.get("w_gain_speed", _rc.w_gain_speed)),
+            min_value=0.0, max_value=2.0, step=0.05, format="%.2f",
+            help="Erken büyümeye daha yüksek ödül veren hız faktörü. "
+                 "0 = zamandan bağımsız, pozitif = erken kazanç daha değerli.",
+        )
+        cfg["w_ruin_timing"] = st.number_input(
+            "w_ruin_timing — İflas-timing ceza ağırlığı",
+            value=float(cfg.get("w_ruin_timing", _rc.w_ruin_timing)),
+            min_value=0.0, max_value=3.0, step=0.1, format="%.2f",
+            help="Erken iflas anına daha sert ceza uygular. "
+                 "0 = düz (flat) iflas_penalty, pozitif = erken iflasa üstel ceza.",
+        )
 
 
 def sidebar_controls():
@@ -158,10 +245,82 @@ def sidebar_controls():
 
     st.sidebar.divider()
     st.sidebar.subheader("📊 Veri")
+
+    # ------------------------------------------------------------------
+    # Tarih seçici — train/test aralığı
+    # ------------------------------------------------------------------
+    with st.sidebar.expander("📅 Tarih Aralığı", expanded=False):
+        st.caption(
+            "Eğitim başlangıcı → Train/Test ayırım → Test bitişi. "
+            "Ayırım sonrası veriler test dönemi olarak kullanılır."
+        )
+        _start_val = datetime.date.fromisoformat(
+            st.session_state.get("data_start", _dc.start)
+        )
+        _split_val = datetime.date.fromisoformat(
+            st.session_state.get("data_split", _dc.train_end)
+        )
+        _end_val = datetime.date.fromisoformat(
+            st.session_state.get("data_end", _dc.end)
+        )
+
+        sel_start = st.date_input(
+            "Train başlangıcı",
+            value=_start_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_start",
+            help="Eğitim verisinin başlangıç tarihi (dahil).",
+        )
+        sel_split = st.date_input(
+            "Train/Test ayırım tarihi",
+            value=_split_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_split",
+            help="Bu tarihten itibaren test verisi başlar (dahil). "
+                 "Scaler/forecaster yalnız eğitim kısmında fit edilir (sızıntı yok).",
+        )
+        sel_end = st.date_input(
+            "Test bitişi",
+            value=_end_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_end",
+            help="Test verisinin bitiş tarihi (dahil).",
+        )
+
+        # Sızıntı / tutarlılık doğrulaması
+        _date_valid = (sel_start < sel_split <= sel_end)
+        if not _date_valid:
+            st.sidebar.error(
+                "Tarih hatası: Train başlangıcı < Ayırım tarihi ≤ Test bitişi "
+                "koşulu sağlanmalı. Veriyi yükleyemezsiniz."
+            )
+        else:
+            st.session_state.data_start = sel_start.isoformat()
+            st.session_state.data_split = sel_split.isoformat()
+            st.session_state.data_end   = sel_end.isoformat()
+            st.caption(
+                f"Eğitim: {sel_start} → {sel_split}  |  "
+                f"Test: {sel_split} → {sel_end}"
+            )
+
     if not st.session_state.data_loaded:
-        if st.sidebar.button("Veriyi Yükle / İndir", use_container_width=True):
+        _date_valid_outer = (
+            datetime.date.fromisoformat(st.session_state.get("data_start", _dc.start))
+            < datetime.date.fromisoformat(st.session_state.get("data_split", _dc.train_end))
+            <= datetime.date.fromisoformat(st.session_state.get("data_end", _dc.end))
+        )
+        if st.sidebar.button(
+            "Veriyi Yükle / İndir",
+            use_container_width=True,
+            disabled=not _date_valid_outer,
+        ):
             _load_data()
             st.rerun()
+        if not _date_valid_outer:
+            st.sidebar.caption("Tarih aralığı geçersiz — düzeltin.")
     else:
         st.sidebar.success(f"Veri yüklü: {st.session_state.prices.shape[0]} gün × "
                            f"{st.session_state.prices.shape[1]} hisse")

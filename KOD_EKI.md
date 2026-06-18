@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 33 kaynak dosya, ~4853 satır.**
+**Toplam: 33 kaynak dosya, ~5224 satır.**
 
 ---
 
@@ -169,6 +169,24 @@ class RewardConfig:
     cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
     regime_beta: float = 1.0    # kriz amplifikasyon gucu
     cvar_amp: float = 1.0       # rejim amplifikasyon usteli
+    # v9: OPT-IN ek terimler (default 0/kapali -> golden bit-ayni). reward_overrides
+    # ile UI'dan ayarlanabilir; env ctor + build_env bunlari okur.
+    w_gain: float = 0.0         # kazanc-carpani odul agirligi (nav>gain_floor uzeri)
+    gain_floor: float = 1.0     # kazanc esigi (nav bunun uzerinde odullenir)
+    w_gain_speed: float = 0.0   # erken-kazanc hiz faktoru (0 -> hizdan bagimsiz)
+    w_ruin_timing: float = 0.0  # erken-iflas ceza olcegi (0 -> flat bankruptcy_penalty)
+
+
+# ---------------------------------------------------------------------
+# Veri penceresi sabitleri — data.py START/END/SPLIT ile BIREBIR (tek kaynak).
+# data.py bu DataConfig'i sonraki dalgada (veri-muhendisi) okuyacak; simdilik
+# yalniz config'te yansitilir (frozen -> kazara mutasyon engellenir).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class DataConfig:
+    start: str = "2015-01-01"      # data.py START
+    end: str = "2024-12-31"        # data.py END
+    train_end: str = "2022-01-01"  # data.py SPLIT (train/test ayrim tarihi)
 
 
 # ---------------------------------------------------------------------
@@ -228,7 +246,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import MacroConfig
+from config import DataConfig, MacroConfig
 
 # BIST 30 tickers — KOZAA.IS ve KOZAL.IS prompt gereği hariç tutuldu (28 hisse).
 BIST28 = [
@@ -242,9 +260,12 @@ BIST28 = [
 # Geriye uyumluluk
 BIST30 = BIST28
 
-START = "2015-01-01"
-END   = "2024-12-31"
-SPLIT = "2022-01-01"
+# Geriye uyum: modül sabitleri DataConfig'e işaret eder (tek kaynak).
+# Bu satırları import eden mevcut kod (main.py, app.py, testler) kırılmaz.
+_dc = DataConfig()
+START = _dc.start      # "2015-01-01"
+END   = _dc.end        # "2024-12-31"
+SPLIT = _dc.train_end  # "2022-01-01"
 
 BASE_DIR     = Path(__file__).resolve().parent
 DATA_DIR     = BASE_DIR / "data"
@@ -255,21 +276,42 @@ PARQUET_PATH = DATA_DIR / "prices.parquet"
 MACRO_PARQUET = DATA_DIR / "macro_raw.parquet"
 
 
-def download_bist(tickers=BIST28, start=START, end=END,
+def download_bist(tickers=BIST28, start=None, end=None,
                   use_cache: bool = True) -> pd.DataFrame:
     """28 hisselik (T, N) ayarlı kapanış fiyat matrisi döner.
 
-    Önce parquet cache'i dener; yoksa yfinance'tan indirir. yfinance erişimi
-    başarısızsa BIST-benzeri sentetik GBM seti üretir (deney yine çalışır).
+    Parametreler
+    ------------
+    start : str | None
+        Başlangıç tarihi (dahil). None → DataConfig.start ("2015-01-01").
+    end : str | None
+        Bitiş tarihi (dahil). None → DataConfig.end ("2024-12-31").
+
+    Önce parquet cache'i dener; varsa verilen [start, end] aralığına dilimler.
+    Cache uyumsuzsa veya yoksa yfinance'tan indirir. yfinance başarısızsa BIST-
+    benzeri sentetik GBM üretir (deney yine çalışır).
     """
+    _dc_local = DataConfig()
+    if start is None:
+        start = _dc_local.start
+    if end is None:
+        end = _dc_local.end
+
     if use_cache and PARQUET_PATH.exists():
         try:
             px = pd.read_parquet(PARQUET_PATH)
             px.index = pd.to_datetime(px.index)
             expected = set(tickers)
             if expected.issubset(set(px.columns)) and len(px) > 500:
-                return px[list(tickers)]
-            print("[INFO] cache uyumsuz, yeniden indiriliyor ...")
+                # Cache tüm aralığı tutabilir; istenen [start, end]'e dilimle.
+                px_slice = px[list(tickers)]
+                px_slice = px_slice.loc[
+                    (px_slice.index >= pd.Timestamp(start)) &
+                    (px_slice.index <= pd.Timestamp(end))
+                ]
+                if len(px_slice) > 100:
+                    return px_slice
+            print("[INFO] cache uyumsuz veya dilim boş, yeniden indiriliyor ...")
         except Exception as exc:
             print(f"[WARN] parquet okunamadı ({exc!r}); yeniden indiriliyor")
 
@@ -341,12 +383,26 @@ def _synthetic_bist(tickers, start, end) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 # v6: Makro rejim verisi (faiz/dolar/altin) — egzojen, BIST takvimine hizali.
 # ---------------------------------------------------------------------
-def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
+def download_macro(series=tuple(MacroConfig.series), start=None, end=None,
                    use_cache: bool = True) -> pd.DataFrame:
     """Ham makro seri matrisi (T, M): VIX, S&P, faiz (TNX/IRX), USDTRY, altin (GC=F).
 
-    parquet cache -> yfinance -> sentetik fallback. Sentetik veri CACHE'E YAZILMAZ
-    (download_bist ile ayni zehirlenme korumasi)."""
+    Parametreler
+    ------------
+    start : str | None
+        Başlangıç tarihi (dahil). None → DataConfig.start ("2015-01-01").
+    end : str | None
+        Bitiş tarihi (dahil). None → DataConfig.end ("2024-12-31").
+
+    parquet cache -> yfinance -> sentetik fallback. Cache varsa [start, end]'e
+    dilimler. Sentetik veri CACHE'E YAZILMAZ (download_bist ile ayni zehirlenme
+    korumasi)."""
+    _dc_local = DataConfig()
+    if start is None:
+        start = _dc_local.start
+    if end is None:
+        end = _dc_local.end
+
     series = list(series)
     if use_cache and MACRO_PARQUET.exists():
         try:
@@ -354,7 +410,13 @@ def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
             mc.index = pd.to_datetime(mc.index)
             have = [s for s in series if s in mc.columns]
             if len(have) >= 3 and len(mc) > 500:
-                return mc[have]
+                mc_slice = mc[have]
+                mc_slice = mc_slice.loc[
+                    (mc_slice.index >= pd.Timestamp(start)) &
+                    (mc_slice.index <= pd.Timestamp(end))
+                ]
+                if len(mc_slice) > 100:
+                    return mc_slice
         except Exception as exc:
             print(f"[WARN] makro cache okunamadı ({exc!r}); yeniden indiriliyor")
 
@@ -409,7 +471,17 @@ def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
     return macro_raw.reindex(index).ffill().bfill()
 
 
-def train_test_split(df: pd.DataFrame, split=SPLIT):
+def train_test_split(df: pd.DataFrame, split=None):
+    """DataFrame'i train (< split) ve test (>= split) olarak ikiye böler.
+
+    Parametreler
+    ------------
+    split : str | None
+        Bölünme tarihi. None → DataConfig.train_end ("2022-01-01").
+        Train kesinlikle test'ten önce gelir; sızıntı yoktur.
+    """
+    if split is None:
+        split = DataConfig().train_end
     return df[df.index < split], df[df.index >= split]
 
 
@@ -1268,6 +1340,14 @@ class PortfolioEnv:
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
+                 w_cvar: float | None = None,
+                 cvar_alpha: float = RewardConfig.cvar_alpha,
+                 regime_beta: float = RewardConfig.regime_beta,
+                 cvar_amp: float = RewardConfig.cvar_amp,
+                 w_gain: float = 0.0,
+                 gain_floor: float = 1.0,
+                 w_gain_speed: float = 0.0,
+                 w_ruin_timing: float = 0.0,
                  macro=None, regime=None):
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
@@ -1296,6 +1376,9 @@ class PortfolioEnv:
         )
         # v7: CVaR kuyruk cezasi vade-bagli olceklenir (kisa->yuksek tail-bilinci).
         cvar_factor = {"short": 1.6, "medium": 1.0, "long": 0.6}.get(horizon, 1.0)
+        # w_cvar base: None ise config default (golden-guvenli); aksi halde override.
+        # Her iki halde vade-bagli cvar_factor ile carpilir (mevcut davranis korunur).
+        w_cvar_base = RewardConfig.w_cvar if w_cvar is None else float(w_cvar)
         self.reward = RewardEngine(
             shaper=shaper,
             dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
@@ -1304,10 +1387,13 @@ class PortfolioEnv:
             bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
             bankruptcy_penalty=(float(bankruptcy_penalty)
                                 if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
-            w_cvar=RewardConfig.w_cvar * cvar_factor,   # v7: rejim-amplified kuyruk cezasi
-            cvar_alpha=RewardConfig.cvar_alpha,
-            regime_beta=RewardConfig.regime_beta,
-            cvar_amp=RewardConfig.cvar_amp,
+            w_cvar=w_cvar_base * cvar_factor,           # v7: rejim-amplified kuyruk cezasi
+            cvar_alpha=float(cvar_alpha),
+            regime_beta=float(regime_beta),
+            cvar_amp=float(cvar_amp),
+            # v9: OPT-IN kazanc-carpani + iflas-timing (default 0/kapali -> golden bit-ayni)
+            w_gain=float(w_gain), gain_floor=float(gain_floor),
+            w_gain_speed=float(w_gain_speed), w_ruin_timing=float(w_ruin_timing),
         )
 
         self.N_assets = prices.shape[1]
@@ -1408,7 +1494,8 @@ class PortfolioEnv:
 
         regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-                                      nav=self.nav, peak=self.peak, regime=regime_t)
+                                      nav=self.nav, peak=self.peak, regime=regime_t,
+                                      step_count=self.step_count, max_steps=self.max_steps)
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 
@@ -1619,7 +1706,9 @@ class RewardEngine:
     def __init__(self, shaper: AdaptiveRewardShaper, dsharpe: DifferentialSharpe,
                  w_dsr: float, bankruptcy_nav: float, bankruptcy_penalty: float,
                  w_cvar: float = 0.0, cvar_alpha: float = 0.05,
-                 regime_beta: float = 1.0, cvar_amp: float = 1.0):
+                 regime_beta: float = 1.0, cvar_amp: float = 1.0,
+                 w_gain: float = 0.0, gain_floor: float = 1.0,
+                 w_gain_speed: float = 0.0, w_ruin_timing: float = 0.0):
         self.shaper = shaper
         self.dsharpe = dsharpe
         self.w_dsr = float(w_dsr)
@@ -1629,6 +1718,12 @@ class RewardEngine:
         self.w_cvar = float(w_cvar)
         self.regime_beta = float(regime_beta)
         self.cvar_amp = float(cvar_amp)
+        # v9: OPT-IN kazanc-carpani odulu + iflas-timing cezasi (default KAPALI ->
+        # golden bit-ayni). Yeni RNG cagrisi YOK; yalniz nav/step_frac/bankrupt kullanir.
+        self.w_gain = float(w_gain)                # kazanc-carpani agirligi (0 -> kapali)
+        self.gain_floor = float(gain_floor)        # esik nav; uzeri odullenir
+        self.w_gain_speed = float(w_gain_speed)    # erken-kazanc hiz faktoru (0 -> kapali)
+        self.w_ruin_timing = float(w_ruin_timing)  # erken-iflas cezasi olcegi (0 -> flat)
         # Parametrik (Gauss) ileri CVaR/ES carpani: ES_alpha = sigma * phi(z_alpha)/alpha.
         # vol_ewma'yi (mevcut makine) sigma proxy'si olarak yeniden kullanir (ileri-bakisli).
         z = float(norm.ppf(cvar_alpha))
@@ -1639,8 +1734,14 @@ class RewardEngine:
         self.dsharpe.reset()
 
     def compute(self, *, gross_port_r: float, delta_w_l1: float,
-                nav: float, peak: float, regime: float = 0.0) -> RewardOutcome:
-        """Aritmetik sirasi onceki PortfolioEnv.step() ile ayni; +CVaR terimi (V7)."""
+                nav: float, peak: float, regime: float = 0.0,
+                step_count: int = 0, max_steps: int = 1) -> RewardOutcome:
+        """Aritmetik sirasi onceki PortfolioEnv.step() ile ayni; +CVaR terimi (V7).
+
+        v9: step_count/max_steps yalniz OPT-IN kazanc-hizi ve iflas-timing
+        terimlerinde kullanilir; w_gain=w_gain_speed=w_ruin_timing=0 (default) iken
+        sonuca sifir katki -> golden bit-ayni, yeni RNG cagrisi yok.
+        """
         eta_t, lambda_t, tau_t, vol_ewma, to_ewma = \
             self.shaper.update_and_shape(gross_port_r, delta_w_l1)
 
@@ -1652,7 +1753,6 @@ class RewardEngine:
         # İflas eşiğinin altına düşerse clamp et; env episodu sonlandırır.
         nav = max(nav, 0.0)
         bankrupt = bool(nav < self.bankruptcy_nav)
-        bankruptcy_penalty = self.bankruptcy_penalty if bankrupt else 0.0
 
         peak = max(peak, nav)
         dd = (peak - nav) / max(peak, 1e-9)
@@ -1666,9 +1766,27 @@ class RewardEngine:
         rm = 1.0 + self.regime_beta * max(0.0, float(regime))   # kriz amplifikasyonu
         cvar_penalty = self.w_cvar * (rm ** self.cvar_amp) * cvar
 
-        total = (log_r - tx_cost - dd_penalty - bankruptcy_penalty
-                 + dsr_term - cvar_penalty)
+        # v9: episod ilerleme orani (0->1). max_steps>=1 garanti (env gecirir).
+        step_frac = float(step_count) / max(float(max_steps), 1e-9)
 
+        # v9 (OPT-IN, default KAPALI): kazanc-carpani odulu. nav esigin (gain_floor)
+        # uzerindeyse dogrusal odul; opsiyonel hiz faktoru erken kazanci kayirir
+        # (1 + w_gain_speed*(1-step_frac)). w_gain=0 -> 0 (golden bit-ayni).
+        gain_bonus = (self.w_gain * max(0.0, nav - self.gain_floor)
+                      * (1.0 + self.w_gain_speed * (1.0 - step_frac)))
+
+        # v9 (OPT-IN, default KAPALI): iflas-timing carpani. Erken iflas daha sert
+        # cezalandirilir: mult = 1 + w_ruin_timing*(1-step_frac). w_ruin_timing=0 ->
+        # mult=1.0 -> ham flat bankruptcy_penalty KORUNUR (golden bit-ayni).
+        ruin_timing_mult = 1.0 + self.w_ruin_timing * (1.0 - step_frac)
+        ruin_pen = (self.bankruptcy_penalty * ruin_timing_mult) if bankrupt else 0.0
+
+        total = (log_r - tx_cost - dd_penalty - ruin_pen
+                 + dsr_term - cvar_penalty + gain_bonus)
+
+        # NOT: terms["bankruptcy_penalty"] = ruin_pen (efektif ceza). w_ruin_timing=0
+        # iken ruin_pen == flat bankruptcy_penalty oldugundan mevcut anahtar anlami ve
+        # test_env ozdesligi (total = ... - bankruptcy_penalty + gain_bonus) korunur.
         terms = dict(
             log_return=log_r, tx_cost=tx_cost,
             drawdown_penalty=dd_penalty, total=total,
@@ -1677,7 +1795,8 @@ class RewardEngine:
             eta_t=eta_t, lambda_t=lambda_t, tau_t=tau_t,
             vol_ewma=vol_ewma, turnover_ewma=to_ewma,
             dd=dd, gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-            bankruptcy_penalty=bankruptcy_penalty, bankrupt=bankrupt,
+            bankruptcy_penalty=ruin_pen, bankrupt=bankrupt,
+            gain_bonus=gain_bonus, ruin_timing_mult=ruin_timing_mult,   # v9 (additive)
         )
         return RewardOutcome(total=total, nav=nav, peak=peak,
                              port_r_net=port_r_net, terms=terms)
@@ -2354,7 +2473,7 @@ from typing import Callable, Dict
 import pandas as pd
 
 from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
-from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig, TD3Config
+from config import SEED, DQNConfig, EnvConfig, PPOConfig, RewardConfig, SACConfig, TD3Config
 from core.features import select_features
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 
@@ -2430,6 +2549,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               horizon: str = "medium", adaptive: bool = True,
               max_steps: int, random_start: bool = False, seed: int = SEED,
               reward_overrides: dict | None = None,
+              price_noise_std: float | None = None,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
@@ -2450,6 +2570,20 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         ema_alpha=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
+        price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
+        # Mevcut 6 odul param'i parametrik akisa acilir — eksik/None anahtar config
+        # default'una duser (golden-guvenli; eta_base/bankruptcy_penalty deseni ile ayni).
+        w_dsr=float(cfg.get("w_dsr", RewardConfig.w_dsr)),
+        dsr_eta=float(cfg.get("dsr_eta", RewardConfig.dsr_eta)),
+        w_cvar=cfg.get("w_cvar"),   # None -> env'de config default*cvar_factor (golden-guvenli)
+        cvar_alpha=float(cfg.get("cvar_alpha", RewardConfig.cvar_alpha)),
+        regime_beta=float(cfg.get("regime_beta", RewardConfig.regime_beta)),
+        cvar_amp=float(cfg.get("cvar_amp", RewardConfig.cvar_amp)),
+        # v9: OPT-IN kazanc-carpani + iflas-timing (default 0/kapali -> golden bit-ayni)
+        w_gain=float(cfg.get("w_gain", 0.0)),
+        gain_floor=float(cfg.get("gain_floor", 1.0)),
+        w_gain_speed=float(cfg.get("w_gain_speed", 0.0)),
+        w_ruin_timing=float(cfg.get("w_ruin_timing", 0.0)),
         macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
     )
 
@@ -3685,10 +3819,14 @@ from __future__ import annotations
 
 import streamlit as st
 
+from config import DataConfig, EnvConfig, RewardConfig
 from data import BIST28
 from env.portfolio_env import HORIZON_PRESETS
 
 ASSET_NAMES = BIST28 + ["CASH"]
+
+_dc = DataConfig()
+_rc = RewardConfig()
 
 
 def _init_state():
@@ -3714,6 +3852,25 @@ def _init_state():
         "initial_capital": 100_000.0,
         "train_delay": 0.0,
         "reward_cfg": {},  # kullanıcı ayarları; boş ise env preset'leri kullanır
+        "n_episodes": 12,                          # parametrik episode sayısı (UI)
+        "price_noise_std": EnvConfig.price_noise_std,  # fiyat gürültüsü σ (UI kontrolü)
+        # Tarih aralığı — DataConfig tek kaynak
+        "data_start": _dc.start,
+        "data_split": _dc.train_end,
+        "data_end": _dc.end,
+        # Genişletilmiş ödül parametreleri — RewardConfig tek kaynak
+        # (6 açılan parametre; değer None/boş olunca env preset default'una düşer)
+        "reward_w_dsr": _rc.w_dsr,
+        "reward_w_cvar": _rc.w_cvar,
+        "reward_dsr_eta": _rc.dsr_eta,
+        "reward_cvar_alpha": _rc.cvar_alpha,
+        "reward_regime_beta": _rc.regime_beta,
+        "reward_cvar_amp": _rc.cvar_amp,
+        # 4 opt-in deneysel terim (default 0 → davranış değişmez)
+        "reward_w_gain": 0.0,
+        "reward_gain_floor": 1.0,
+        "reward_w_gain_speed": 0.0,
+        "reward_w_ruin_timing": 0.0,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
@@ -3788,11 +3945,22 @@ def load_saved_agent(algo: str):
 
 
 def _load_data():
-    """Veri indir + z-score scaler'ı fit et."""
+    """Veri indir + z-score scaler'ı fit et.
+
+    Tarih aralığı session_state.data_start / data_split / data_end'den okunur
+    (sidebar tarih seçici). Scaler/forecaster/MacroScaler YALNIZ px_tr'de fit
+    edilir — sızıntı yok.
+    """
+    from config import DataConfig as _DC
+    _dc_defaults = _DC()
+    data_start = st.session_state.get("data_start", _dc_defaults.start)
+    data_split = st.session_state.get("data_split", _dc_defaults.train_end)
+    data_end   = st.session_state.get("data_end",   _dc_defaults.end)
+
     with st.spinner("Veri indiriliyor / cache okunuyor ..."):
-        prices = download_bist()
+        prices = download_bist(start=data_start, end=data_end)
     feats_all_raw = add_features(prices)
-    px_tr, px_te = train_test_split(prices)
+    px_tr, px_te = train_test_split(prices, split=data_split)
     if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
         from forecast.forecaster import build_forecast_feature
         feats_all_raw["forecast"] = build_forecast_feature(
@@ -3802,6 +3970,7 @@ def _load_data():
     feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
     feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
+    # SIZINTI KORUMASI: scaler YALNIZ eğitim kısmında fit edilir, test'e transform uygulanır.
     scaler = TrainScaler().fit(feats_tr_raw)
     st.session_state.prices = prices
     st.session_state.px_tr = px_tr
@@ -3811,9 +3980,12 @@ def _load_data():
     st.session_state.scaler = scaler
 
     # v6: makro rejim (faiz/dolar/altin) — train-only z-score; ham regime ayri (V7).
+    # MacroScaler da YALNIZ px_tr kısmında fit edilir.
     macro_tr = macro_te = regime_tr = regime_te = None
     if MacroConfig.enabled:
-        mfeat = add_macro_features(align_macro(download_macro(), prices.index))
+        mfeat = add_macro_features(
+            align_macro(download_macro(start=data_start, end=data_end), prices.index)
+        )
         regime_full = mfeat["regime"]
         macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
         macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
@@ -3833,10 +4005,14 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
     macro = st.session_state.get("macro_tr" if is_train else "macro_te")
     regime = st.session_state.get("regime_tr" if is_train else "regime_te")
+    # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
+    # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
+    noise_std = (st.session_state.get("price_noise_std") if is_train else None)
     return build_env(
         algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        price_noise_std=noise_std,                 # UI σ kontrolü (train-only)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
     )
 
@@ -3851,9 +4027,13 @@ def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
 # Eğitim jeneratörü — canlı UI için episod başına yield
 # =====================================================================
 def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
-                    rollout_len: int = 400, resume_agent=None):
-    """Episod/update başına bir telemetri kaydı yield eder. Sonsuz akış —
-    tüketici (tab_train) 'Durdur' butonuyla keser.
+                    rollout_len: int = 400, resume_agent=None,
+                    n_episodes: int | None = None):
+    """Episod/update başına bir telemetri kaydı yield eder.
+
+    n_episodes verilirse (UI'dan gelir) tam o kadar episode/update koşar ve
+    generator kendiliğinden biter. None ise sonsuz akış — tüketici (tab_train)
+    'Eğitimi Durdur' butonuyla keser.
 
     resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
     ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
@@ -3866,9 +4046,9 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
         agent = _make_agent(algo, env.state_dim, action_dim, hp)
     # Başarı kıyası için tren EW NAV'ı (core.trainer success'i bununla hesaplar)
     ew_tr = equal_weight(st.session_state.px_tr)["nav"]
-    # Sonsuz akış (n_iters=None) — core.trainer.train ajan tipine göre dispatch eder;
-    # tüketici (tab_train) 'Durdur' ile keser. Telemetri dict'i CLI ile ortaktır.
-    yield from train_loop(agent, env, n_iters=None, rollout_len=rollout_len, ew_nav=ew_tr)
+    # n_episodes=None → sonsuz akış; int → tam o kadar episode/update sonra generator biter.
+    # core.trainer.train ajan tipine göre dispatch eder; telemetri dict'i CLI ile ortaktır.
+    yield from train_loop(agent, env, n_iters=n_episodes, rollout_len=rollout_len, ew_nav=ew_tr)
 
 
 # =====================================================================
@@ -4041,15 +4221,25 @@ def _horizon_preset_table() -> pd.DataFrame:
 """Kontrol paneli (sidebar) — app.py'den tasindi (P5)."""
 from __future__ import annotations
 
+import datetime
+
 import streamlit as st
 
-from config import SEED, EnvConfig
+from config import SEED, DataConfig, EnvConfig, RewardConfig
 from env.portfolio_env import HORIZON_PRESETS
 from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
 from ui.state import _agent_key
 
+_dc = DataConfig()
+_rc = RewardConfig()
+
+# Tarih aralığı sınırları (UI kısıtı)
+_DATE_MIN = datetime.date(2015, 1, 1)
+_DATE_MAX = datetime.date(2024, 12, 31)
+
 # SonarCloud S1192: 3+ kez tekrar eden UI literal'leri tek sabitte topla.
-_EP_HINT = "Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes."
+_EP_HINT = ("Eğitim **N episode** koşar (sidebar'daki 'Episode sayısı' değeri); "
+            "'Eğitimi Durdur' ile erken kesilebilir.")
 _LBL_POLICY_LR = "Policy LR"
 _LBL_BATCH = "Batch"
 
@@ -4126,8 +4316,86 @@ def _sidebar_reward_editor(preset: dict):
             help="Büyük α = daha hızlı uyum, küçük α = daha stabil.",
         )
 
+        st.markdown("**DSR & CVaR risk terimleri**")
+        cfg["w_dsr"] = st.number_input(
+            "w_dsr — Diferansiyel Sharpe ağırlığı",
+            value=float(cfg.get("w_dsr", _rc.w_dsr)),
+            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
+            help="DSR terimi ağırlığı: online risk-ayarlı Sharpe gradyanı. "
+                 "0 = kapalı, 0.05 = hafif etkin.",
+        )
+        cfg["w_cvar"] = st.number_input(
+            "w_cvar — CVaR kuyruk cezası ağırlığı",
+            value=float(cfg.get("w_cvar", _rc.w_cvar)),
+            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
+            help="CVaR (Conditional Value at Risk) ceza ağırlığı. "
+                 "0 = kapalı; kriz dönemlerinde regime_beta ile amplify edilir.",
+        )
+        cfg["dsr_eta"] = st.number_input(
+            "dsr_eta — DSR EWMA oranı",
+            value=float(cfg.get("dsr_eta", _rc.dsr_eta)),
+            min_value=0.001, max_value=0.1, step=0.001, format="%.3f",
+            help="Diferansiyel Sharpe hesabındaki EWMA pencere oranı. "
+                 "Küçük = yavaş adaptasyon, büyük = hızlı.",
+        )
+        cfg["cvar_alpha"] = st.number_input(
+            "cvar_alpha — CVaR kuyruk yüzdesi",
+            value=float(cfg.get("cvar_alpha", _rc.cvar_alpha)),
+            min_value=0.01, max_value=0.2, step=0.005, format="%.3f",
+            help="CVaR için kuyruk yüzdesi (α). 0.05 = en kötü %5'lik getiri ortalaması.",
+        )
+        cfg["regime_beta"] = st.number_input(
+            "regime_beta — Kriz amplifikasyon gücü",
+            value=float(cfg.get("regime_beta", _rc.regime_beta)),
+            min_value=0.0, max_value=5.0, step=0.1, format="%.2f",
+            help="CVaR cezasını kriz rejiminde büyüten çarpan. "
+                 "0 = rejim bağımsız, 5 = kriz anında 6× ceza.",
+        )
+        cfg["cvar_amp"] = st.number_input(
+            "cvar_amp — Rejim amplifikasyon üsteli",
+            value=float(cfg.get("cvar_amp", _rc.cvar_amp)),
+            min_value=0.5, max_value=3.0, step=0.1, format="%.2f",
+            help="κ = w_cvar·(1 + regime_beta·max(0,regime))^cvar_amp formülündeki üstel. "
+                 "1.0 = doğrusal amplifikasyon.",
+        )
+
         st.caption("⚠️ Bu ayarları değiştirdikten sonra ajanları **yeniden eğitmek** "
                    "anlamlı olur; eski ajan farklı ortamda öğrenilmiştir.")
+
+    with st.sidebar.expander("🧪 Deneysel ödül terimleri (opt-in, varsayılan kapalı)",
+                             expanded=False):
+        st.caption(
+            "Bu terimler varsayılan 0 ile tamamen kapalıdır — aktif etmek için "
+            "sıfırdan farklı değer girin. Yeni ajan eğitmeden etkisi görülmez."
+        )
+        cfg["w_gain"] = st.number_input(
+            "w_gain — Kazanç-çarpanı ödülü ağırlığı",
+            value=float(cfg.get("w_gain", _rc.w_gain)),
+            min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
+            help="NAV gain_floor eşiğini aştığında verilen ödül ağırlığı. "
+                 "2× → w_gain ödül, 3× → 2·w_gain ödül. 0 = kapalı.",
+        )
+        cfg["gain_floor"] = st.number_input(
+            "gain_floor — Ödül eşiği (NAV)",
+            value=float(cfg.get("gain_floor", _rc.gain_floor)),
+            min_value=1.0, max_value=2.0, step=0.05, format="%.2f",
+            help="w_gain ödülünün başlayacağı NAV çarpanı. "
+                 "1.0 = başlangıçtan itibaren, 1.5 = %50 büyüme sonrası.",
+        )
+        cfg["w_gain_speed"] = st.number_input(
+            "w_gain_speed — Hız bonusu ağırlığı",
+            value=float(cfg.get("w_gain_speed", _rc.w_gain_speed)),
+            min_value=0.0, max_value=2.0, step=0.05, format="%.2f",
+            help="Erken büyümeye daha yüksek ödül veren hız faktörü. "
+                 "0 = zamandan bağımsız, pozitif = erken kazanç daha değerli.",
+        )
+        cfg["w_ruin_timing"] = st.number_input(
+            "w_ruin_timing — İflas-timing ceza ağırlığı",
+            value=float(cfg.get("w_ruin_timing", _rc.w_ruin_timing)),
+            min_value=0.0, max_value=3.0, step=0.1, format="%.2f",
+            help="Erken iflas anına daha sert ceza uygular. "
+                 "0 = düz (flat) iflas_penalty, pozitif = erken iflasa üstel ceza.",
+        )
 
 
 def sidebar_controls():
@@ -4147,6 +4415,26 @@ def sidebar_controls():
         "İter arası gecikme (sn)", 0.0, 3.0, float(st.session_state.train_delay), step=0.1,
         help="0 = tam hız. Büyütünce iter'ler arasında yapay bekleme olur; "
              "canlı adım tablolarını rahat okumak için kullan.",
+    )
+
+    st.session_state.n_episodes = st.sidebar.number_input(
+        "Episode / iterasyon sayısı",
+        min_value=1, max_value=1000,
+        value=int(st.session_state.n_episodes),
+        step=1,
+        help="Eğitim tam bu kadar episode/iterasyon koşar; her episode train fiyatlarının "
+             "FARKLI gürültülü realizasyonudur. 'Eğitimi Durdur' erken kesebilir. "
+             "(PPO için birim 'update', diğerleri 'episode'.)",
+    )
+
+    st.session_state.price_noise_std = st.sidebar.slider(
+        "Fiyat gürültüsü σ (anti-ezber)",
+        min_value=0.0, max_value=0.01,
+        value=float(st.session_state.price_noise_std),
+        step=0.0005, format="%.4f",
+        help="Her episode train hisse getirilerine eklenen minik gürültü (virgül sonrası "
+             "basamaklara etki eder). Eğitim-YALNIZ; eval'de hep KAPALI. Her episode farklı "
+             "realizasyon → ezberi önler. 0 = kapalı.",
     )
 
     st.sidebar.divider()
@@ -4177,10 +4465,82 @@ def sidebar_controls():
 
     st.sidebar.divider()
     st.sidebar.subheader("📊 Veri")
+
+    # ------------------------------------------------------------------
+    # Tarih seçici — train/test aralığı
+    # ------------------------------------------------------------------
+    with st.sidebar.expander("📅 Tarih Aralığı", expanded=False):
+        st.caption(
+            "Eğitim başlangıcı → Train/Test ayırım → Test bitişi. "
+            "Ayırım sonrası veriler test dönemi olarak kullanılır."
+        )
+        _start_val = datetime.date.fromisoformat(
+            st.session_state.get("data_start", _dc.start)
+        )
+        _split_val = datetime.date.fromisoformat(
+            st.session_state.get("data_split", _dc.train_end)
+        )
+        _end_val = datetime.date.fromisoformat(
+            st.session_state.get("data_end", _dc.end)
+        )
+
+        sel_start = st.date_input(
+            "Train başlangıcı",
+            value=_start_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_start",
+            help="Eğitim verisinin başlangıç tarihi (dahil).",
+        )
+        sel_split = st.date_input(
+            "Train/Test ayırım tarihi",
+            value=_split_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_split",
+            help="Bu tarihten itibaren test verisi başlar (dahil). "
+                 "Scaler/forecaster yalnız eğitim kısmında fit edilir (sızıntı yok).",
+        )
+        sel_end = st.date_input(
+            "Test bitişi",
+            value=_end_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_end",
+            help="Test verisinin bitiş tarihi (dahil).",
+        )
+
+        # Sızıntı / tutarlılık doğrulaması
+        _date_valid = (sel_start < sel_split <= sel_end)
+        if not _date_valid:
+            st.sidebar.error(
+                "Tarih hatası: Train başlangıcı < Ayırım tarihi ≤ Test bitişi "
+                "koşulu sağlanmalı. Veriyi yükleyemezsiniz."
+            )
+        else:
+            st.session_state.data_start = sel_start.isoformat()
+            st.session_state.data_split = sel_split.isoformat()
+            st.session_state.data_end   = sel_end.isoformat()
+            st.caption(
+                f"Eğitim: {sel_start} → {sel_split}  |  "
+                f"Test: {sel_split} → {sel_end}"
+            )
+
     if not st.session_state.data_loaded:
-        if st.sidebar.button("Veriyi Yükle / İndir", use_container_width=True):
+        _date_valid_outer = (
+            datetime.date.fromisoformat(st.session_state.get("data_start", _dc.start))
+            < datetime.date.fromisoformat(st.session_state.get("data_split", _dc.train_end))
+            <= datetime.date.fromisoformat(st.session_state.get("data_end", _dc.end))
+        )
+        if st.sidebar.button(
+            "Veriyi Yükle / İndir",
+            use_container_width=True,
+            disabled=not _date_valid_outer,
+        ):
             _load_data()
             st.rerun()
+        if not _date_valid_outer:
+            st.sidebar.caption("Tarih aralığı geçersiz — düzeltin.")
     else:
         st.sidebar.success(f"Veri yüklü: {st.session_state.prices.shape[0]} gün × "
                            f"{st.session_state.prices.shape[1]} hisse")
@@ -4203,7 +4563,7 @@ def sidebar_controls():
         hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
         hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
     elif algo == "PPO":
-        st.sidebar.caption("Update sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
+        st.sidebar.caption(_EP_HINT.replace("episode", "update"))
         hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
         hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
@@ -4440,14 +4800,19 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     resume_agent = st.session_state.trained_agents[key][0] if resume else None
     curve = list(st.session_state.trained_agents[key][1]) if resume else []
     iter_offset = len(curve)
+    n_episodes = int(st.session_state.get("n_episodes", 12))
     gen = train_generator(algo, horizon, adaptive, hp,
                           rollout_len=int(hp.get("rollout_len", 400)),
-                          resume_agent=resume_agent)
+                          resume_agent=resume_agent,
+                          n_episodes=n_episodes)
     t0 = time.time()
     iter_times = []  # son N iter süresi (iter/sn için)
     trained_agent = None
     stopped_early = False
     initial_capital = float(st.session_state.initial_capital)
+
+    # İlerleme çubuğu: N episode'a göre doldurulur
+    progress_bar = st.progress(0.0, text=f"Episode 0 / {n_episodes}")
 
     last_rec = None
     for rec in gen:
@@ -4473,11 +4838,16 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         recent = iter_times[-5:]
         rate = (len(recent) / sum(recent)) if sum(recent) > 0 else 0.0
         avg = sum(iter_times) / len(iter_times)
-        ph_iter.metric("Iter", iter_offset + rec["iter"] + 1)
+        cur_ep = iter_offset + rec["iter"] + 1
+        ph_iter.metric("Iter", cur_ep)
         ph_rate.metric("Iter/sn", f"{rate:.2f}")
         ph_avg.metric("Ort. iter süresi", f"{avg:.2f}s")
         mm = int(iter_end_elapsed // 60); ss = int(iter_end_elapsed % 60)
         ph_elapsed.metric("Toplam elapsed", f"{mm:02d}:{ss:02d}")
+
+        # İlerleme çubuğu: Episode i/N
+        _prog = min(cur_ep / n_episodes, 1.0)
+        progress_bar.progress(_prog, text=f"Episode {cur_ep} / {n_episodes}")
 
         # --- Canlı TL paneli (son episod için env.nav_history / weight_history kullan) ---
         if render_now:
@@ -4490,9 +4860,9 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
                 ph_bankrupt=ph_bankrupt,
             )
 
-        status.info(f"Iter {iter_offset + rec['iter'] + 1} · NAV={rec['nav']:.3f} · "
+        status.info(f"Episode {cur_ep}/{n_episodes} · NAV={rec['nav']:.3f} · "
                     f"elapsed {iter_end_elapsed:.1f}s — "
-                    f"istediğin yerde 'Eğitimi Durdur' butonuna basabilirsin")
+                    f"'Eğitimi Durdur' ile erken kesilebilir")
 
         # Kullanıcı ayarladığı gecikmeyi iter arası uygula (slider canlı okunur).
         delay = float(st.session_state.get("train_delay", 0.0))
@@ -4508,6 +4878,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     st.session_state.trained_agents[key] = (trained_agent, curve)
     elapsed = time.time() - t0
     stop_slot.empty()
+    progress_bar.progress(1.0, text=f"Tamamlandı — {len(curve)} episode")
     # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir)
     if curve:
         _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss)

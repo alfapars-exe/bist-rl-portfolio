@@ -53,11 +53,22 @@ def load_saved_agent(algo: str):
 
 
 def _load_data():
-    """Veri indir + z-score scaler'ı fit et."""
+    """Veri indir + z-score scaler'ı fit et.
+
+    Tarih aralığı session_state.data_start / data_split / data_end'den okunur
+    (sidebar tarih seçici). Scaler/forecaster/MacroScaler YALNIZ px_tr'de fit
+    edilir — sızıntı yok.
+    """
+    from config import DataConfig as _DC
+    _dc_defaults = _DC()
+    data_start = st.session_state.get("data_start", _dc_defaults.start)
+    data_split = st.session_state.get("data_split", _dc_defaults.train_end)
+    data_end   = st.session_state.get("data_end",   _dc_defaults.end)
+
     with st.spinner("Veri indiriliyor / cache okunuyor ..."):
-        prices = download_bist()
+        prices = download_bist(start=data_start, end=data_end)
     feats_all_raw = add_features(prices)
-    px_tr, px_te = train_test_split(prices)
+    px_tr, px_te = train_test_split(prices, split=data_split)
     if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
         from forecast.forecaster import build_forecast_feature
         feats_all_raw["forecast"] = build_forecast_feature(
@@ -67,6 +78,7 @@ def _load_data():
     feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
     feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
+    # SIZINTI KORUMASI: scaler YALNIZ eğitim kısmında fit edilir, test'e transform uygulanır.
     scaler = TrainScaler().fit(feats_tr_raw)
     st.session_state.prices = prices
     st.session_state.px_tr = px_tr
@@ -76,9 +88,12 @@ def _load_data():
     st.session_state.scaler = scaler
 
     # v6: makro rejim (faiz/dolar/altin) — train-only z-score; ham regime ayri (V7).
+    # MacroScaler da YALNIZ px_tr kısmında fit edilir.
     macro_tr = macro_te = regime_tr = regime_te = None
     if MacroConfig.enabled:
-        mfeat = add_macro_features(align_macro(download_macro(), prices.index))
+        mfeat = add_macro_features(
+            align_macro(download_macro(start=data_start, end=data_end), prices.index)
+        )
         regime_full = mfeat["regime"]
         macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
         macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)

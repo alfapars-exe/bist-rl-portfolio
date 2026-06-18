@@ -149,7 +149,7 @@ kod/
 
 ## Adaptif Ödül Şekillendirici
 
-`AdaptiveRewardShaper` (env/portfolio_env.py) her adımda EWMA ile:
+`AdaptiveRewardShaper` (`env/reward.py`) her adımda EWMA ile:
 - `vol_ewma` (portföy getirisinin mutlak değeri)
 - `turnover_ewma` (`‖Δw‖₁`)
 
@@ -162,8 +162,79 @@ değerlerini günceller ve katsayıları ölçekler:
 ```
 
 Böylece çok işlem yapan ajan kendini cezalandırır, volatil rejimde DD cezası
-sertleşir ve eşik daralır. Sidebar'daki toggle kapatıldığında katsayılar sabit
+sertleşer ve eşik daralır. Sidebar'daki toggle kapatıldığında katsayılar sabit
 kalır — A/B karşılaştırması için.
+
+## Parametrik Ödül/Ceza + Tarih Seçimi (versiyon deneyleri)
+
+UI ve `config.py` üzerinden aşağıdaki parametreler ayarlanabilir. Tüm değerler
+`config.RewardConfig` / `config.EnvConfig` / `config.DataConfig` tek kaynaktan
+gelir; uygulama bunları `core/factory.build_env(reward_overrides=...)` ile çalışma-
+zamanında ortama enjekte eder.
+
+### Mevcut ödül/ceza parametreleri (UI'da sidebar)
+
+| Parametre | Config sabiti | Varsayılan | Açıklama |
+|-----------|---------------|-----------|----------|
+| `η` (eta) | `HORIZON_PRESETS[vade]["eta"]` | 0.0015 / 0.0010 / 0.0005 | İşlem maliyeti katsayısı (kısa/orta/uzun) |
+| `λ` (lambda) | `HORIZON_PRESETS[vade]["lam"]` | 0.25 / 0.50 / 1.00 | Drawdown ceza katsayısı |
+| `τ` (tau) | `HORIZON_PRESETS[vade]["tau"]` | 0.03 / 0.05 / 0.08 | Drawdown eşiği |
+| `bankruptcy_nav` | `EnvConfig.bankruptcy_nav` | 0.01 | İflas NAV eşiği |
+| `bankruptcy_penalty` | `EnvConfig.bankruptcy_penalty` | 10.0 | Düz iflas cezası |
+| `vol_target` | `EnvConfig.vol_target` | 0.02 | Adaptif şekillendirici vol hedefi |
+| `turnover_target` | `EnvConfig.turnover_target` | 0.05 | Adaptif şekillendirici işlem hedefi |
+| `ema_alpha` | `EnvConfig.ema_alpha` | 0.05 | EWMA güncelleme oranı |
+| `w_dsr` | `RewardConfig.w_dsr` | 0.05 | Diferansiyel Sharpe ağırlığı (0 → kapalı) |
+| `dsr_eta` | `RewardConfig.dsr_eta` | 0.01 | DSR EWMA oranı |
+| `w_cvar` | `RewardConfig.w_cvar` | 0.06 | CVaR kuyruk cezası baz ağırlığı (0 → kapalı) |
+| `cvar_alpha` | `RewardConfig.cvar_alpha` | 0.05 | CVaR kuyruk seviyesi (%5) |
+| `regime_beta` | `RewardConfig.regime_beta` | 1.0 | Kriz amplifikasyon gücü |
+| `cvar_amp` | `RewardConfig.cvar_amp` | 1.0 | Rejim amplifikasyon üsteli |
+
+### Opt-in deneysel ödül/ceza terimleri (varsayılan KAPALI)
+
+Aşağıdaki iki terim `RewardConfig`'te varsayılan olarak `0.0` (kapalı); bu nedenle
+kanonik ödül değişmez ve `tests/golden/` ≤1e-6 korunur. Yalnız `w_*` alanları
+sıfırdan büyük verildiğinde devreye girer.
+
+**Kazanç-çarpanı ödülü** — NAV belirli bir eşiği aştığında ek teşvik (nav=2 →
+`w_gain`, nav=3 → `2·w_gain`); isteğe bağlı hız faktörü erken büyümeyi kayırır:
+
+```
+gain_bonus = w_gain · max(0, nav − gain_floor) · (1 + w_gain_speed · (1 − step_frac))
+```
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `w_gain` (`RewardConfig.w_gain`) | 0.0 | Kazanç ağırlığı (0 → kapalı) |
+| `gain_floor` (`RewardConfig.gain_floor`) | 1.0 | Ödül eşiği (NAV bu değerin üzerindeyse ödüllenir) |
+| `w_gain_speed` (`RewardConfig.w_gain_speed`) | 0.0 | Erken-kazanç hız faktörü (0 → hızdan bağımsız) |
+
+`step_frac = step_count / max_steps` (0→1); erken adımlarda `(1−step_frac)` yüksektir.
+
+**İflas-timing cezası** — erken iflas daha sert cezalandırılır; `w_ruin_timing=0`
+durumunda düz `bankruptcy_penalty` korunur (golden bit-aynı):
+
+```
+ruin_pen = bankruptcy_penalty · (1 + w_ruin_timing · (1 − step_frac))
+```
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `w_ruin_timing` (`RewardConfig.w_ruin_timing`) | 0.0 | Erken-iflas ceza ölçeği (0 → düz ceza) |
+
+### Tarih seçimi (`config.DataConfig`)
+
+| Parametre | Varsayılan | data.py sabiti | Açıklama |
+|-----------|-----------|----------------|----------|
+| `start` | `"2015-01-01"` | `START` | Verinin başlangıç tarihi |
+| `end` | `"2024-12-31"` | `END` | Verinin bitiş tarihi |
+| `train_end` | `"2022-01-01"` | `SPLIT` | Train/test ayrım tarihi (train < split ≤ test) |
+
+UI'da train başlangıç, ayrım tarihi ve test bitiş seçici mevcuttur. Sızıntı-güvenlidir:
+`TrainScaler` ve forecaster yalnızca `train < split` verisinde fit edilir; test
+dönemine yalnızca dönüşüm uygulanır. `data.py:download_bist(start, end)` ve
+`train_test_split(split)` bu değerleri `DataConfig` üzerinden alır.
 
 ## Kabul Kriterleri Karşılığı
 

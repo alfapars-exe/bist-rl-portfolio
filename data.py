@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import MacroConfig
+from config import DataConfig, MacroConfig
 
 # BIST 30 tickers — KOZAA.IS ve KOZAL.IS prompt gereği hariç tutuldu (28 hisse).
 BIST28 = [
@@ -26,9 +26,12 @@ BIST28 = [
 # Geriye uyumluluk
 BIST30 = BIST28
 
-START = "2015-01-01"
-END   = "2024-12-31"
-SPLIT = "2022-01-01"
+# Geriye uyum: modül sabitleri DataConfig'e işaret eder (tek kaynak).
+# Bu satırları import eden mevcut kod (main.py, app.py, testler) kırılmaz.
+_dc = DataConfig()
+START = _dc.start      # "2015-01-01"
+END   = _dc.end        # "2024-12-31"
+SPLIT = _dc.train_end  # "2022-01-01"
 
 BASE_DIR     = Path(__file__).resolve().parent
 DATA_DIR     = BASE_DIR / "data"
@@ -39,21 +42,42 @@ PARQUET_PATH = DATA_DIR / "prices.parquet"
 MACRO_PARQUET = DATA_DIR / "macro_raw.parquet"
 
 
-def download_bist(tickers=BIST28, start=START, end=END,
+def download_bist(tickers=BIST28, start=None, end=None,
                   use_cache: bool = True) -> pd.DataFrame:
     """28 hisselik (T, N) ayarlı kapanış fiyat matrisi döner.
 
-    Önce parquet cache'i dener; yoksa yfinance'tan indirir. yfinance erişimi
-    başarısızsa BIST-benzeri sentetik GBM seti üretir (deney yine çalışır).
+    Parametreler
+    ------------
+    start : str | None
+        Başlangıç tarihi (dahil). None → DataConfig.start ("2015-01-01").
+    end : str | None
+        Bitiş tarihi (dahil). None → DataConfig.end ("2024-12-31").
+
+    Önce parquet cache'i dener; varsa verilen [start, end] aralığına dilimler.
+    Cache uyumsuzsa veya yoksa yfinance'tan indirir. yfinance başarısızsa BIST-
+    benzeri sentetik GBM üretir (deney yine çalışır).
     """
+    _dc_local = DataConfig()
+    if start is None:
+        start = _dc_local.start
+    if end is None:
+        end = _dc_local.end
+
     if use_cache and PARQUET_PATH.exists():
         try:
             px = pd.read_parquet(PARQUET_PATH)
             px.index = pd.to_datetime(px.index)
             expected = set(tickers)
             if expected.issubset(set(px.columns)) and len(px) > 500:
-                return px[list(tickers)]
-            print("[INFO] cache uyumsuz, yeniden indiriliyor ...")
+                # Cache tüm aralığı tutabilir; istenen [start, end]'e dilimle.
+                px_slice = px[list(tickers)]
+                px_slice = px_slice.loc[
+                    (px_slice.index >= pd.Timestamp(start)) &
+                    (px_slice.index <= pd.Timestamp(end))
+                ]
+                if len(px_slice) > 100:
+                    return px_slice
+            print("[INFO] cache uyumsuz veya dilim boş, yeniden indiriliyor ...")
         except Exception as exc:
             print(f"[WARN] parquet okunamadı ({exc!r}); yeniden indiriliyor")
 
@@ -125,12 +149,26 @@ def _synthetic_bist(tickers, start, end) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 # v6: Makro rejim verisi (faiz/dolar/altin) — egzojen, BIST takvimine hizali.
 # ---------------------------------------------------------------------
-def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
+def download_macro(series=tuple(MacroConfig.series), start=None, end=None,
                    use_cache: bool = True) -> pd.DataFrame:
     """Ham makro seri matrisi (T, M): VIX, S&P, faiz (TNX/IRX), USDTRY, altin (GC=F).
 
-    parquet cache -> yfinance -> sentetik fallback. Sentetik veri CACHE'E YAZILMAZ
-    (download_bist ile ayni zehirlenme korumasi)."""
+    Parametreler
+    ------------
+    start : str | None
+        Başlangıç tarihi (dahil). None → DataConfig.start ("2015-01-01").
+    end : str | None
+        Bitiş tarihi (dahil). None → DataConfig.end ("2024-12-31").
+
+    parquet cache -> yfinance -> sentetik fallback. Cache varsa [start, end]'e
+    dilimler. Sentetik veri CACHE'E YAZILMAZ (download_bist ile ayni zehirlenme
+    korumasi)."""
+    _dc_local = DataConfig()
+    if start is None:
+        start = _dc_local.start
+    if end is None:
+        end = _dc_local.end
+
     series = list(series)
     if use_cache and MACRO_PARQUET.exists():
         try:
@@ -138,7 +176,13 @@ def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
             mc.index = pd.to_datetime(mc.index)
             have = [s for s in series if s in mc.columns]
             if len(have) >= 3 and len(mc) > 500:
-                return mc[have]
+                mc_slice = mc[have]
+                mc_slice = mc_slice.loc[
+                    (mc_slice.index >= pd.Timestamp(start)) &
+                    (mc_slice.index <= pd.Timestamp(end))
+                ]
+                if len(mc_slice) > 100:
+                    return mc_slice
         except Exception as exc:
             print(f"[WARN] makro cache okunamadı ({exc!r}); yeniden indiriliyor")
 
@@ -193,7 +237,17 @@ def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
     return macro_raw.reindex(index).ffill().bfill()
 
 
-def train_test_split(df: pd.DataFrame, split=SPLIT):
+def train_test_split(df: pd.DataFrame, split=None):
+    """DataFrame'i train (< split) ve test (>= split) olarak ikiye böler.
+
+    Parametreler
+    ------------
+    split : str | None
+        Bölünme tarihi. None → DataConfig.train_end ("2022-01-01").
+        Train kesinlikle test'ten önce gelir; sızıntı yoktur.
+    """
+    if split is None:
+        split = DataConfig().train_end
     return df[df.index < split], df[df.index >= split]
 
 

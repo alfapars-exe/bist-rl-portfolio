@@ -158,6 +158,24 @@ class RewardConfig:
     cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
     regime_beta: float = 1.0    # kriz amplifikasyon gucu
     cvar_amp: float = 1.0       # rejim amplifikasyon usteli
+    # v9: OPT-IN ek terimler (default 0/kapali -> golden bit-ayni). reward_overrides
+    # ile UI'dan ayarlanabilir; env ctor + build_env bunlari okur.
+    w_gain: float = 0.0         # kazanc-carpani odul agirligi (nav>gain_floor uzeri)
+    gain_floor: float = 1.0     # kazanc esigi (nav bunun uzerinde odullenir)
+    w_gain_speed: float = 0.0   # erken-kazanc hiz faktoru (0 -> hizdan bagimsiz)
+    w_ruin_timing: float = 0.0  # erken-iflas ceza olcegi (0 -> flat bankruptcy_penalty)
+
+
+# ---------------------------------------------------------------------
+# Veri penceresi sabitleri — data.py START/END/SPLIT ile BIREBIR (tek kaynak).
+# data.py bu DataConfig'i sonraki dalgada (veri-muhendisi) okuyacak; simdilik
+# yalniz config'te yansitilir (frozen -> kazara mutasyon engellenir).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class DataConfig:
+    start: str = "2015-01-01"      # data.py START
+    end: str = "2024-12-31"        # data.py END
+    train_end: str = "2022-01-01"  # data.py SPLIT (train/test ayrim tarihi)
 
 
 # ---------------------------------------------------------------------

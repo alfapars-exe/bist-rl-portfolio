@@ -24,7 +24,7 @@ from typing import Callable, Dict
 import pandas as pd
 
 from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
-from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig, TD3Config
+from config import SEED, DQNConfig, EnvConfig, PPOConfig, RewardConfig, SACConfig, TD3Config
 from core.features import select_features
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 
@@ -122,5 +122,18 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
         price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
+        # Mevcut 6 odul param'i parametrik akisa acilir — eksik/None anahtar config
+        # default'una duser (golden-guvenli; eta_base/bankruptcy_penalty deseni ile ayni).
+        w_dsr=float(cfg.get("w_dsr", RewardConfig.w_dsr)),
+        dsr_eta=float(cfg.get("dsr_eta", RewardConfig.dsr_eta)),
+        w_cvar=cfg.get("w_cvar"),   # None -> env'de config default*cvar_factor (golden-guvenli)
+        cvar_alpha=float(cfg.get("cvar_alpha", RewardConfig.cvar_alpha)),
+        regime_beta=float(cfg.get("regime_beta", RewardConfig.regime_beta)),
+        cvar_amp=float(cfg.get("cvar_amp", RewardConfig.cvar_amp)),
+        # v9: OPT-IN kazanc-carpani + iflas-timing (default 0/kapali -> golden bit-ayni)
+        w_gain=float(cfg.get("w_gain", 0.0)),
+        gain_floor=float(cfg.get("gain_floor", 1.0)),
+        w_gain_speed=float(cfg.get("w_gain_speed", 0.0)),
+        w_ruin_timing=float(cfg.get("w_ruin_timing", 0.0)),
         macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
     )

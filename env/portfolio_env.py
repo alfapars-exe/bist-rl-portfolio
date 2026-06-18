@@ -89,6 +89,14 @@ class PortfolioEnv:
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
+                 w_cvar: float | None = None,
+                 cvar_alpha: float = RewardConfig.cvar_alpha,
+                 regime_beta: float = RewardConfig.regime_beta,
+                 cvar_amp: float = RewardConfig.cvar_amp,
+                 w_gain: float = 0.0,
+                 gain_floor: float = 1.0,
+                 w_gain_speed: float = 0.0,
+                 w_ruin_timing: float = 0.0,
                  macro=None, regime=None):
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
@@ -117,6 +125,9 @@ class PortfolioEnv:
         )
         # v7: CVaR kuyruk cezasi vade-bagli olceklenir (kisa->yuksek tail-bilinci).
         cvar_factor = {"short": 1.6, "medium": 1.0, "long": 0.6}.get(horizon, 1.0)
+        # w_cvar base: None ise config default (golden-guvenli); aksi halde override.
+        # Her iki halde vade-bagli cvar_factor ile carpilir (mevcut davranis korunur).
+        w_cvar_base = RewardConfig.w_cvar if w_cvar is None else float(w_cvar)
         self.reward = RewardEngine(
             shaper=shaper,
             dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
@@ -125,10 +136,13 @@ class PortfolioEnv:
             bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
             bankruptcy_penalty=(float(bankruptcy_penalty)
                                 if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
-            w_cvar=RewardConfig.w_cvar * cvar_factor,   # v7: rejim-amplified kuyruk cezasi
-            cvar_alpha=RewardConfig.cvar_alpha,
-            regime_beta=RewardConfig.regime_beta,
-            cvar_amp=RewardConfig.cvar_amp,
+            w_cvar=w_cvar_base * cvar_factor,           # v7: rejim-amplified kuyruk cezasi
+            cvar_alpha=float(cvar_alpha),
+            regime_beta=float(regime_beta),
+            cvar_amp=float(cvar_amp),
+            # v9: OPT-IN kazanc-carpani + iflas-timing (default 0/kapali -> golden bit-ayni)
+            w_gain=float(w_gain), gain_floor=float(gain_floor),
+            w_gain_speed=float(w_gain_speed), w_ruin_timing=float(w_ruin_timing),
         )
 
         self.N_assets = prices.shape[1]
@@ -229,7 +243,8 @@ class PortfolioEnv:
 
         regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-                                      nav=self.nav, peak=self.peak, regime=regime_t)
+                                      nav=self.nav, peak=self.peak, regime=regime_t,
+                                      step_count=self.step_count, max_steps=self.max_steps)
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 

@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (PDF uyum + V8 re-baseline + parametrik episode/gürültü)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (parametrik ödül/ceza + tarih seçimi + opt-in terimler)
 
 ---
 
@@ -87,6 +87,15 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   sidebar'da `n_episodes` (1–1000) + σ slider; `train_generator(n_iters=n_episodes)`. Fiyat-
   gürültüsü mekanizması zaten vardı (env-yerel RNG, train-only, **her episode farklı
   realizasyon**) — bu değişiklik onu UI'dan parametrize/görünür kılar. 107 test yeşil.
+- _(2026-06-19)_ **Tam parametrik ödül/ceza + train/test tarih seçimi.** (a) Gizli 6 ödül
+  param'ı (`w_dsr, w_cvar, dsr_eta, cvar_alpha, regime_beta, cvar_amp`) `reward_overrides` →
+  `build_env` → `RewardEngine` boyunca UI'a açıldı. (b) **2 yeni OPT-IN terim** (default KAPALI,
+  yeni RNG yok → golden-güvenli): kazanç-çarpanı ödülü `w_gain·max(0,nav−gain_floor)·(1+
+  w_gain_speed·(1−step_frac))` ve iflas-timing cezası `bankruptcy_penalty·(1+w_ruin_timing·
+  (1−step_frac))`. (c) `config.DataConfig` + `data.py` tarih-parametrik (`download_bist(start,end)`,
+  `train_test_split(split)`); UI'da train başlangıç/ayırım/bitiş seçici + sızıntı doğrulama.
+  Yeni `odul-ceza-tasarimcisi` ajanı eklendi (16. ajan). **131 test yeşil; golden DEĞİŞMEDİ.**
+  `terms` dict'e additive: `gain_bonus`, `ruin_timing_mult`.
 
 ## 6. Bilinen Riskler / Açık Konular
 

@@ -32,6 +32,7 @@ Bir görevi şu uzmana yönlendir (`@ajan-adi` veya otomatik delegasyon):
 | Görev türü | Ajan |
 |-----------|------|
 | DQN/PPO/SAC/TD3, ödül/state matematiği, eğitim kararlılığı | `rl-arastirma-muhendisi` |
+| Ödül/ceza tasarımı, magnitüd/denge, yeni reward terim (2x/3x bonus, iflas-timing) | `odul-ceza-tasarimcisi` |
 | `core/` eğitim çekirdeği, pipeline, config kablolama, persistence | `backend-muhendisi` |
 | Streamlit `app.py`/`ui/`/`plots.py`, sekmeler, grafikler | `frontend-muhendisi` |
 | `data.py`/feature/makro, sızıntısızlık | `veri-muhendisi` |

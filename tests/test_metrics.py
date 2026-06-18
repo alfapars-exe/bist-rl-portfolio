@@ -14,7 +14,7 @@ def test_real_nav_lira_illusion():
     nav = np.array([1.0, 1.5, 2.0])
     fx = np.array([10.0, 15.0, 20.0])
     rn = real_nav(nav, fx)
-    assert rn[0] == 1.0                                  # baslangicta 1.0
+    assert np.isclose(rn[0], 1.0)                        # baslangicta 1.0
     # reel = (nav/nav0)/(fx/fx0): t=2 -> (2/1)/(20/10) = 1.0 (reel kazanc YOK — illuzyon)
     assert np.isclose(rn[-1], 1.0)
     assert np.all(rn <= nav + 1e-12)                     # TL deger kaybinda reel <= nominal

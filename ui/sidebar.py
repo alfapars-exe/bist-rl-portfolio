@@ -7,6 +7,11 @@ from config import SEED, EnvConfig
 from env.portfolio_env import HORIZON_PRESETS
 from ui.services import _load_data
 
+# SonarCloud S1192: 3+ kez tekrar eden UI literal'leri tek sabitte topla.
+_EP_HINT = "Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes."
+_LBL_POLICY_LR = "Policy LR"
+_LBL_BATCH = "Batch"
+
 
 def _sidebar_reward_editor(preset: dict):
     """⚖️ Ödül & Ceza katsayıları düzenleyicisi — session_state.reward_cfg'i günceller.
@@ -150,16 +155,16 @@ def sidebar_controls():
     st.sidebar.subheader(f"🎛 Hiperparametreler ({algo})")
     hp = {}
     if algo == "DQN":
-        st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
+        st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",
             options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3)
         hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000)
-        hp["batch_size"]= st.sidebar.select_slider("Batch", options=[32, 64, 128], value=64)
+        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
         hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
     elif algo == "PPO":
         st.sidebar.caption("Update sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
         hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
-        hp["lr_p"]       = st.sidebar.select_slider("Policy LR",
+        hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
         hp["lr_v"]       = st.sidebar.select_slider("Value LR",
             options=[3e-4, 1e-3, 3e-3], value=1e-3)
@@ -169,18 +174,18 @@ def sidebar_controls():
         hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128)
         hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1)
     elif algo == "SAC":
-        st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
-        hp["lr_pi"]      = st.sidebar.select_slider("Policy LR",
+        st.sidebar.caption(_EP_HINT)
+        hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
             options=[3e-4, 5e-4, 1e-3], value=5e-4)
         hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01)
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
             options=[0.005, 0.01, 0.05], value=0.01)
-        hp["batch_size"] = st.sidebar.select_slider("Batch", options=[64, 128, 256], value=128)
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
     else:  # TD3 — sürekli/deterministik politika (hocanın tavsiyesi)
-        st.sidebar.caption("Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
-        hp["lr_pi"]      = st.sidebar.select_slider("Policy LR",
+        st.sidebar.caption(_EP_HINT)
+        hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
             options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4)
@@ -190,7 +195,7 @@ def sidebar_controls():
             help="Eğitimde aksiyona eklenen keşif gürültüsü (eval'de kapalı).")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
             options=[0.005, 0.01, 0.05], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider("Batch", options=[64, 128, 256], value=128)
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
 
     st.sidebar.caption(f"Seed: {SEED} (sabit)")
     return algo, st.session_state.horizon, st.session_state.adaptive, hp

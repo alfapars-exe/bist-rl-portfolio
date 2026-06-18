@@ -65,9 +65,9 @@ class TD3Agent(BaseAgent):
         self.q1_t.load_state_dict(self.q1.state_dict())
         self.q2_t.load_state_dict(self.q2.state_dict())
 
-        self.opt_pi = torch.optim.Adam(self.actor.parameters(), lr=lr_pi)
-        self.opt_q1 = torch.optim.Adam(self.q1.parameters(), lr=lr_q)
-        self.opt_q2 = torch.optim.Adam(self.q2.parameters(), lr=lr_q)
+        self.opt_pi = torch.optim.Adam(self.actor.parameters(), lr=lr_pi, weight_decay=0.0)
+        self.opt_q1 = torch.optim.Adam(self.q1.parameters(), lr=lr_q, weight_decay=0.0)
+        self.opt_q2 = torch.optim.Adam(self.q2.parameters(), lr=lr_q, weight_decay=0.0)
         self.buffer = ReplayBuffer(buffer_size)
         self._it = 0
 

@@ -160,9 +160,9 @@ def train_td3(bundle: DataBundle, n_episodes: int = TrainConfig.td3_episodes,
     agent = build_agent("TD3", env.state_dim, env.action_dim, seed=SEED)
     curve = []
     for rec in train_loop(agent, env, n_iters=n_episodes):
-        curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"],
-                          reward=rec["reward"], gain=rec["gain"],
-                          success=int(rec["nav"] > 1.0)))
+        curve.append({"episode": rec["episode"], "train_nav": rec["train_nav"], "steps": rec["steps"],
+                      "reward": rec["reward"], "gain": rec["gain"],
+                      "success": int(rec["nav"] > 1.0)})
         print(f"[TD3] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 

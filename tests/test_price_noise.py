@@ -52,7 +52,7 @@ def test_noise_on_in_training():
     assert env.t == t0, "_risky_returns t'yi ilerletmemeli"
     assert not np.array_equal(r1, r2), "gurultu aktifken ardisik draw'lar farkli olmali"
     # nakit varligi gurultusuz kalmali (slippage yalniz riskli varliklarda)
-    assert r1[-1] == 0.0 and r2[-1] == 0.0
+    assert np.isclose(r1[-1], 0.0) and np.isclose(r2[-1], 0.0)
 
 
 def test_eval_rollout_invariant_to_noise_setting():
@@ -65,7 +65,6 @@ def test_eval_rollout_invariant_to_noise_setting():
                       seed=0, price_noise_std=0.1)
     rng = np.random.default_rng(123)
     navs0, navs1 = [], []
-    done0 = done1 = False
     e0.reset(); e1.reset()
     for _ in range(40):
         a = rng.normal(0, 1, e0.action_dim).astype(np.float32)   # ayni aksiyon dizisi

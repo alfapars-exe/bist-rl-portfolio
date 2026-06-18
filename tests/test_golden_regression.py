@@ -41,6 +41,6 @@ def test_metrics_match_golden():
     assert list(golden.columns) == list(current.columns), "Metrik kolonlari farkli"
     cur = current.reindex(golden.index)               # yalniz baseline'lanmis satirlar
     np.testing.assert_allclose(
-        cur.values, golden.values, atol=ATOL, rtol=RTOL,
+        cur.to_numpy(), golden.to_numpy(), atol=ATOL, rtol=RTOL,
         err_msg="Metrikler golden-master'dan tolerans disinda sapti — regresyon?",
     )

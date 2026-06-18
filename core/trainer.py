@@ -104,10 +104,28 @@ def train_ppo(agent, env, n_updates: Optional[int] = None,
         }
 
 
-# --------------------------------------------------------------------- SAC
-def train_sac(agent, env, n_episodes: Optional[int] = None,
-              warmup: int = 500, train_every: int = 4,
-              ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
+# --------------------------------------------------- SAC / TD3 (off-policy, ortak)
+def _offpolicy_step(agent, env, s, step: int, warmup: int, train_every: int):
+    """Tek off-policy adim: aksiyon sec (warmup'ta rastgele) -> env.step -> remember
+    -> kosullu train_step. Donguden cikarildi (SonarCloud S3776 bilissel karmasiklik).
+    RNG tuketim sirasi onceki SAC/TD3 donguleriyle birebir aynidir (golden-duyarli)."""
+    if len(agent.buffer) < warmup:
+        a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
+    else:
+        a = agent.act(s)
+    s2, r, done, trunc, _ = env.step(a)
+    agent.remember(s, a, r, s2, float(done))
+    loss = None
+    if len(agent.buffer) > warmup and step % train_every == 0:
+        loss = agent.train_step()
+    return s2, r, done, trunc, loss
+
+
+def _train_offpolicy(agent, env, algo: str, n_episodes: Optional[int],
+                     warmup: int, train_every: int,
+                     ew_nav: Optional[np.ndarray]) -> Iterator[dict]:
+    """SAC ve TD3 icin ORTAK adim-bazli off-policy generator (DRY). Tek fark 'algo'
+    etiketi; SAC stokastik, TD3 deterministik politikayi ajan icinde uygular."""
     for ep in _counter(n_episodes):
         s, _ = env.reset()
         done = trunc = False
@@ -115,24 +133,16 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
         ep_reward = 0.0
         losses = []
         while not (done or trunc):
-            if len(agent.buffer) < warmup:
-                a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
-            else:
-                a = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
-            if len(agent.buffer) > warmup and step % train_every == 0:
-                loss = agent.train_step()
-                if loss is not None:
-                    losses.append(loss)
-            s = s2
+            s, r, done, trunc, loss = _offpolicy_step(agent, env, s, step, warmup, train_every)
+            if loss is not None:
+                losses.append(loss)
             step += 1
             ep_reward += r
         nav_agent = np.array(env.nav_history[1:])
         success = (success_vs_benchmark(nav_agent, ew_nav[:len(nav_agent)])
                    if ew_nav is not None else 0)
         yield {
-            "algo": "SAC", "iter": ep, "episode": ep,
+            "algo": algo, "iter": ep, "episode": ep,
             "reward": float(ep_reward),  # L3: tum ajanlarda = iterasyon boyu toplam cevre odulu
             "nav": float(env.nav), "train_nav": float(env.nav),
             "gain": float(env.nav) - 1.0,
@@ -143,46 +153,18 @@ def train_sac(agent, env, n_episodes: Optional[int] = None,
         }
 
 
-# --------------------------------------------------------------------- TD3
+def train_sac(agent, env, n_episodes: Optional[int] = None,
+              warmup: int = 500, train_every: int = 4,
+              ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
+    yield from _train_offpolicy(agent, env, "SAC", n_episodes, warmup, train_every, ew_nav)
+
+
 def train_td3(agent, env, n_episodes: Optional[int] = None,
               warmup: int = 500, train_every: int = 4,
               ew_nav: Optional[np.ndarray] = None) -> Iterator[dict]:
-    """TD3 off-policy donguusu — SAC ile ayni adim-bazli sema (act/step/remember/
-    train_step). Tek fark etiket (algo='TD3'); politika ajan icinde deterministik."""
-    for ep in _counter(n_episodes):
-        s, _ = env.reset()
-        done = trunc = False
-        step = 0
-        ep_reward = 0.0
-        losses = []
-        while not (done or trunc):
-            if len(agent.buffer) < warmup:
-                a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
-            else:
-                a = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
-            if len(agent.buffer) > warmup and step % train_every == 0:
-                loss = agent.train_step()
-                if loss is not None:
-                    losses.append(loss)
-            s = s2
-            step += 1
-            ep_reward += r
-        nav_agent = np.array(env.nav_history[1:])
-        success = (success_vs_benchmark(nav_agent, ew_nav[:len(nav_agent)])
-                   if ew_nav is not None else 0)
-        yield {
-            "algo": "TD3", "iter": ep, "episode": ep,
-            "reward": float(ep_reward),
-            "nav": float(env.nav), "train_nav": float(env.nav),
-            "gain": float(env.nav) - 1.0,
-            "steps": step,
-            "loss": float(np.mean(losses)) if losses else 0.0,
-            "success": int(success),
-            "actions": [],
-            "agent": agent, "env": env,
-        }
+    """TD3 off-policy — SAC ile ayni adim-bazli semayi (`_train_offpolicy`) paylasir;
+    politika ajan icinde deterministiktir (hedef-politika yumusatma + gecikmeli guncelleme)."""
+    yield from _train_offpolicy(agent, env, "TD3", n_episodes, warmup, train_every, ew_nav)
 
 
 # --------------------------------------------------------------------- dispatch

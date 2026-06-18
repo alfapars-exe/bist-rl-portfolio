@@ -82,7 +82,7 @@ def cscv_pbo(perf_matrix: np.ndarray, n_splits: int = 10) -> dict:
         oos_sr = R[te].mean(0) / (R[te].std(0) + 1e-12)
         n_star = int(np.argmax(is_sr))
         order = np.argsort(oos_sr)                      # 1=en kötü .. N=en iyi OOS
-        rank = int(np.where(order == n_star)[0][0]) + 1
+        rank = int(np.nonzero(order == n_star)[0][0]) + 1
         w = min(max(rank / (N + 1), 1e-6), 1 - 1e-6)
         logits.append(np.log(w / (1 - w)))
     logits = np.asarray(logits)

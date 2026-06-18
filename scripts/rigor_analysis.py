@@ -65,10 +65,10 @@ def compute_rigor(navs: pd.DataFrame, weights: dict, asset_rets, usdtry) -> dict
         ku = float(_kurt(r, fisher=False)) if len(r) > 2 else 3.0   # Pearson (normal=3)
         psr = probabilistic_sharpe_ratio(sr_perobs[s], len(r), sk, ku, 0.0)
         dsr = deflated_sharpe_ratio(sr_perobs[s], len(r), n_trials, sr_var, sk, ku)
-        row = dict(strategy=s, sharpe_perobs=sr_perobs[s],
-                   sharpe_ann=sr_perobs[s] * np.sqrt(252.0),
-                   PSR=psr, DSR=dsr, skew=sk, kurtosis=ku, n_obs=len(r),
-                   FinalNAV_nominal=float(navs[s].to_numpy(float)[-1]))
+        row = {"strategy": s, "sharpe_perobs": sr_perobs[s],
+               "sharpe_ann": sr_perobs[s] * np.sqrt(252.0),
+               "PSR": psr, "DSR": dsr, "skew": sk, "kurtosis": ku, "n_obs": len(r),
+               "FinalNAV_nominal": float(navs[s].to_numpy(float)[-1])}
         if usdtry is not None:
             rn = real_nav(navs[s].to_numpy(float), usdtry)
             row["FinalNAV_real_usd"] = float(rn[-1])

@@ -22,7 +22,7 @@ def test_expected_max_sharpe_increases_with_trials():
     e1 = expected_max_sharpe(0.01, 1)
     e10 = expected_max_sharpe(0.01, 10)
     e100 = expected_max_sharpe(0.01, 100)
-    assert e1 == 0.0                                     # tek deneme -> deflasyon yok
+    assert abs(e1) < 1e-12                               # tek deneme -> deflasyon yok
     assert e100 > e10 > e1                               # daha cok deneme -> daha yuksek esik
 
 

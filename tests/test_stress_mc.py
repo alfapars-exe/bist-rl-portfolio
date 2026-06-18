@@ -7,9 +7,9 @@ import numpy as np
 from utils.stress_mc import mc_student_t, mc_block_bootstrap, summarize_mc
 
 
-def _hist(seed=0, T=400, n=5):
+def _hist(seed=0, t_len=400, n=5):
     rng = np.random.default_rng(seed)
-    return rng.normal(0.0003, 0.012, (T, n))
+    return rng.normal(0.0003, 0.012, (t_len, n))
 
 
 def test_block_bootstrap_deterministic_and_shaped():

@@ -32,15 +32,15 @@ def summarize_mc(terminal_returns: np.ndarray, var_alpha: float = 0.05,
     q_var = np.quantile(tr, var_alpha)
     q_es = np.quantile(tr, es_alpha)
     tail = tr[tr <= q_es]
-    return dict(
-        mean=float(tr.mean()), median=float(np.median(tr)),
-        p05=float(np.quantile(tr, 0.05)), p95=float(np.quantile(tr, 0.95)),
-        VaR=float(max(0.0, -q_var)),
-        CVaR=float(max(0.0, -(tail.mean() if tail.size else q_es))),
-        worst=float(tr.min()), best=float(tr.max()),
-        prob_loss=float((tr < 0).mean()),
-        prob_loss_20pct=float((tr < -0.20).mean()),
-    )
+    return {
+        "mean": float(tr.mean()), "median": float(np.median(tr)),
+        "p05": float(np.quantile(tr, 0.05)), "p95": float(np.quantile(tr, 0.95)),
+        "VaR": float(max(0.0, -q_var)),
+        "CVaR": float(max(0.0, -(tail.mean() if tail.size else q_es))),
+        "worst": float(tr.min()), "best": float(tr.max()),
+        "prob_loss": float((tr < 0).mean()),
+        "prob_loss_20pct": float((tr < -0.20).mean()),
+    }
 
 
 def mc_student_t(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 252,
@@ -62,7 +62,7 @@ def mc_student_t(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 
         daily = mu + (t * scale) @ L.T
         port = daily @ w
         terminal[p] = np.prod(1 + port) - 1
-    return dict(terminal=terminal, summary=summarize_mc(terminal))
+    return {"terminal": terminal, "summary": summarize_mc(terminal)}
 
 
 def mc_block_bootstrap(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 252,
@@ -84,4 +84,4 @@ def mc_block_bootstrap(asset_returns: np.ndarray, weights: np.ndarray, horizon: 
             i = (i + 1) % T
         port = R[idx] @ w
         terminal[p] = np.prod(1 + port) - 1
-    return dict(terminal=terminal, summary=summarize_mc(terminal))
+    return {"terminal": terminal, "summary": summarize_mc(terminal)}

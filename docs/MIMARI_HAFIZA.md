@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (PDF uygunluk düzeltmeleri + V8 re-baseline)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (PDF uyum + V8 re-baseline + parametrik episode/gürültü)
 
 ---
 
@@ -82,6 +82,11 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   `golden/v7_metrics_baseline.csv`'de korunuyor. 101 test yeşil.
 - _(2026-06-19)_ §9.7 RL-pedagojik metrikleri UI Tab 2'ye eklendi; §8.3'e statik V8 sonuç
   tabloları gömüldü; §8.4'e "V7-referans, geçerli olan V8" notu eklendi.
+- _(2026-06-19)_ **UI'da parametrik episode sayısı + kontrol edilebilir fiyat-gürültüsü σ.**
+  `build_env`'e opsiyonel `price_noise_std` (None → `EnvConfig` default, golden-güvenli);
+  sidebar'da `n_episodes` (1–1000) + σ slider; `train_generator(n_iters=n_episodes)`. Fiyat-
+  gürültüsü mekanizması zaten vardı (env-yerel RNG, train-only, **her episode farklı
+  realizasyon**) — bu değişiklik onu UI'dan parametrize/görünür kılar. 107 test yeşil.
 
 ## 6. Bilinen Riskler / Açık Konular
 

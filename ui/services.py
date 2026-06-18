@@ -98,10 +98,14 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
     macro = st.session_state.get("macro_tr" if is_train else "macro_te")
     regime = st.session_state.get("regime_tr" if is_train else "regime_te")
+    # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
+    # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
+    noise_std = (st.session_state.get("price_noise_std") if is_train else None)
     return build_env(
         algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        price_noise_std=noise_std,                 # UI σ kontrolü (train-only)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
     )
 
@@ -116,9 +120,13 @@ def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
 # Eğitim jeneratörü — canlı UI için episod başına yield
 # =====================================================================
 def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
-                    rollout_len: int = 400, resume_agent=None):
-    """Episod/update başına bir telemetri kaydı yield eder. Sonsuz akış —
-    tüketici (tab_train) 'Durdur' butonuyla keser.
+                    rollout_len: int = 400, resume_agent=None,
+                    n_episodes: int | None = None):
+    """Episod/update başına bir telemetri kaydı yield eder.
+
+    n_episodes verilirse (UI'dan gelir) tam o kadar episode/update koşar ve
+    generator kendiliğinden biter. None ise sonsuz akış — tüketici (tab_train)
+    'Eğitimi Durdur' butonuyla keser.
 
     resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
     ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
@@ -131,9 +139,9 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
         agent = _make_agent(algo, env.state_dim, action_dim, hp)
     # Başarı kıyası için tren EW NAV'ı (core.trainer success'i bununla hesaplar)
     ew_tr = equal_weight(st.session_state.px_tr)["nav"]
-    # Sonsuz akış (n_iters=None) — core.trainer.train ajan tipine göre dispatch eder;
-    # tüketici (tab_train) 'Durdur' ile keser. Telemetri dict'i CLI ile ortaktır.
-    yield from train_loop(agent, env, n_iters=None, rollout_len=rollout_len, ew_nav=ew_tr)
+    # n_episodes=None → sonsuz akış; int → tam o kadar episode/update sonra generator biter.
+    # core.trainer.train ajan tipine göre dispatch eder; telemetri dict'i CLI ile ortaktır.
+    yield from train_loop(agent, env, n_iters=n_episodes, rollout_len=rollout_len, ew_nav=ew_tr)
 
 
 # =====================================================================

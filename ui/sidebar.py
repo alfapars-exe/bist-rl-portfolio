@@ -9,7 +9,8 @@ from ui.services import _load_data, load_saved_agent, model_path, save_trained_a
 from ui.state import _agent_key
 
 # SonarCloud S1192: 3+ kez tekrar eden UI literal'leri tek sabitte topla.
-_EP_HINT = "Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes."
+_EP_HINT = ("Eğitim **N episode** koşar (sidebar'daki 'Episode sayısı' değeri); "
+            "'Eğitimi Durdur' ile erken kesilebilir.")
 _LBL_POLICY_LR = "Policy LR"
 _LBL_BATCH = "Batch"
 
@@ -109,6 +110,26 @@ def sidebar_controls():
              "canlı adım tablolarını rahat okumak için kullan.",
     )
 
+    st.session_state.n_episodes = st.sidebar.number_input(
+        "Episode / iterasyon sayısı",
+        min_value=1, max_value=1000,
+        value=int(st.session_state.n_episodes),
+        step=1,
+        help="Eğitim tam bu kadar episode/iterasyon koşar; her episode train fiyatlarının "
+             "FARKLI gürültülü realizasyonudur. 'Eğitimi Durdur' erken kesebilir. "
+             "(PPO için birim 'update', diğerleri 'episode'.)",
+    )
+
+    st.session_state.price_noise_std = st.sidebar.slider(
+        "Fiyat gürültüsü σ (anti-ezber)",
+        min_value=0.0, max_value=0.01,
+        value=float(st.session_state.price_noise_std),
+        step=0.0005, format="%.4f",
+        help="Her episode train hisse getirilerine eklenen minik gürültü (virgül sonrası "
+             "basamaklara etki eder). Eğitim-YALNIZ; eval'de hep KAPALI. Her episode farklı "
+             "realizasyon → ezberi önler. 0 = kapalı.",
+    )
+
     st.sidebar.divider()
     _algos = ["DQN", "PPO", "SAC", "TD3"]
     _cur = st.session_state.selected_algo if st.session_state.selected_algo in _algos else "DQN"
@@ -163,7 +184,7 @@ def sidebar_controls():
         hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
         hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
     elif algo == "PPO":
-        st.sidebar.caption("Update sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
+        st.sidebar.caption(_EP_HINT.replace("episode", "update"))
         hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
         hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
             options=[1e-4, 3e-4, 1e-3], value=3e-4)

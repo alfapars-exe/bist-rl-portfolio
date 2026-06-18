@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from config import EnvConfig
 from data import BIST28
 from env.portfolio_env import HORIZON_PRESETS
 
@@ -32,6 +33,8 @@ def _init_state():
         "initial_capital": 100_000.0,
         "train_delay": 0.0,
         "reward_cfg": {},  # kullanıcı ayarları; boş ise env preset'leri kullanır
+        "n_episodes": 12,                          # parametrik episode sayısı (UI)
+        "price_noise_std": EnvConfig.price_noise_std,  # fiyat gürültüsü σ (UI kontrolü)
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)

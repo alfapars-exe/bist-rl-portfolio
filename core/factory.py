@@ -100,6 +100,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               horizon: str = "medium", adaptive: bool = True,
               max_steps: int, random_start: bool = False, seed: int = SEED,
               reward_overrides: dict | None = None,
+              price_noise_std: float | None = None,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
@@ -120,5 +121,6 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         ema_alpha=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
+        price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
         macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
     )

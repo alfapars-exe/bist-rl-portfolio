@@ -102,14 +102,19 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     resume_agent = st.session_state.trained_agents[key][0] if resume else None
     curve = list(st.session_state.trained_agents[key][1]) if resume else []
     iter_offset = len(curve)
+    n_episodes = int(st.session_state.get("n_episodes", 12))
     gen = train_generator(algo, horizon, adaptive, hp,
                           rollout_len=int(hp.get("rollout_len", 400)),
-                          resume_agent=resume_agent)
+                          resume_agent=resume_agent,
+                          n_episodes=n_episodes)
     t0 = time.time()
     iter_times = []  # son N iter süresi (iter/sn için)
     trained_agent = None
     stopped_early = False
     initial_capital = float(st.session_state.initial_capital)
+
+    # İlerleme çubuğu: N episode'a göre doldurulur
+    progress_bar = st.progress(0.0, text=f"Episode 0 / {n_episodes}")
 
     last_rec = None
     for rec in gen:
@@ -135,11 +140,16 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         recent = iter_times[-5:]
         rate = (len(recent) / sum(recent)) if sum(recent) > 0 else 0.0
         avg = sum(iter_times) / len(iter_times)
-        ph_iter.metric("Iter", iter_offset + rec["iter"] + 1)
+        cur_ep = iter_offset + rec["iter"] + 1
+        ph_iter.metric("Iter", cur_ep)
         ph_rate.metric("Iter/sn", f"{rate:.2f}")
         ph_avg.metric("Ort. iter süresi", f"{avg:.2f}s")
         mm = int(iter_end_elapsed // 60); ss = int(iter_end_elapsed % 60)
         ph_elapsed.metric("Toplam elapsed", f"{mm:02d}:{ss:02d}")
+
+        # İlerleme çubuğu: Episode i/N
+        _prog = min(cur_ep / n_episodes, 1.0)
+        progress_bar.progress(_prog, text=f"Episode {cur_ep} / {n_episodes}")
 
         # --- Canlı TL paneli (son episod için env.nav_history / weight_history kullan) ---
         if render_now:
@@ -152,9 +162,9 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
                 ph_bankrupt=ph_bankrupt,
             )
 
-        status.info(f"Iter {iter_offset + rec['iter'] + 1} · NAV={rec['nav']:.3f} · "
+        status.info(f"Episode {cur_ep}/{n_episodes} · NAV={rec['nav']:.3f} · "
                     f"elapsed {iter_end_elapsed:.1f}s — "
-                    f"istediğin yerde 'Eğitimi Durdur' butonuna basabilirsin")
+                    f"'Eğitimi Durdur' ile erken kesilebilir")
 
         # Kullanıcı ayarladığı gecikmeyi iter arası uygula (slider canlı okunur).
         delay = float(st.session_state.get("train_delay", 0.0))
@@ -170,6 +180,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     st.session_state.trained_agents[key] = (trained_agent, curve)
     elapsed = time.time() - t0
     stop_slot.empty()
+    progress_bar.progress(1.0, text=f"Tamamlandı — {len(curve)} episode")
     # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir)
     if curve:
         _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss)

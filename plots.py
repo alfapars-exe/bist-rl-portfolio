@@ -240,6 +240,63 @@ def run():
     plt.savefig(FIG/"f10_moving_avg_return.png"); plt.close()
     print("f10 ok")
 
+    # ===== Titizlik (rigor) figürleri — scripts/rigor_analysis.py çıktıları (golden-güvenli) =====
+    # ---------- F11: Deflated & Probabilistic Sharpe (López de Prado) + PBO ----------
+    rp = RES/"rigor_metrics.csv"
+    if rp.exists():
+        rig = pd.read_csv(rp, index_col=0)
+        fig, ax = plt.subplots(figsize=(11, 4.5))
+        x = np.arange(len(rig.index)); wd = 0.38
+        ax.bar(x - wd/2, rig["PSR"], wd, label="PSR", color="#1f77b4", edgecolor="k", lw=0.5)
+        ax.bar(x + wd/2, rig["DSR"], wd, label="DSR (deflated)", color="#d62728", edgecolor="k", lw=0.5)
+        ax.axhline(0.95, ls="--", color="gray", lw=1)
+        ax.text(len(x) - 0.5, 0.965, "0.95 eşiği", fontsize=8, color="gray", ha="right")
+        ax.set_xticks(x); ax.set_xticklabels(rig.index, rotation=25); ax.set_ylim(0, 1.05)
+        ax.set_title("Probabilistic & Deflated Sharpe (çoklu-deneme düzeltmeli) — López de Prado")
+        ax.set_ylabel("Olasılık"); ax.legend(fontsize=9, loc="lower right")
+        sp = RES/"rigor_summary.csv"
+        if sp.exists():
+            s = pd.read_csv(sp, index_col=0, header=None).iloc[:, 0]
+            try:
+                ax.text(0.01, 0.93, f"PBO = {float(s.get('PBO')):.2f}", transform=ax.transAxes,
+                        fontsize=11, fontweight="bold", color="#555")
+            except (TypeError, ValueError):
+                pass
+        plt.tight_layout(); plt.savefig(FIG/"f11_deflated_sharpe.png"); plt.close()
+        print("f11 ok")
+
+    # ---------- F12: Monte-Carlo stres — terminal getiri dağılımı + VaR/CVaR ----------
+    mp = RES/"rigor_mc_terminal.csv"
+    if mp.exists():
+        mc = pd.read_csv(mp)
+        fig, ax = plt.subplots(figsize=(11, 4.5))
+        for col, color, lbl in [("block_bootstrap", "#2ca02c", "Blok bootstrap"),
+                                ("student_t", "#9467bd", "Student-t (ağır kuyruk)")]:
+            if col in mc.columns:
+                d = mc[col].dropna().to_numpy() * 100
+                ax.hist(d, bins=60, alpha=0.5, color=color, label=lbl, density=True)
+                ax.axvline(np.quantile(d, 0.05), ls="--", color=color, lw=1.2)   # %5 VaR
+        ax.axvline(0, color="k", lw=0.8)
+        ax.set_title("Monte-Carlo Stres — 1-yıl ileri terminal getiri dağılımı (en iyi RL ajan)")
+        ax.set_xlabel("Terminal getiri (%)  ·  kesik çizgi = %5 VaR")
+        ax.set_ylabel("Yoğunluk"); ax.legend(fontsize=9)
+        plt.tight_layout(); plt.savefig(FIG/"f12_mc_stress.png"); plt.close()
+        print("f12 ok")
+
+    # ---------- F13: Nominal (TL) vs Reel (USD-bazlı) NAV — lira illüzyonu (§9.9) ----------
+    nr = RES/"navs_real.csv"
+    if nr.exists():
+        real = pd.read_csv(nr, index_col=0, parse_dates=True)
+        fig, ax = plt.subplots(figsize=(11, 5))
+        for c in [a for a in RL_AGENTS if a in navs.columns and a in real.columns]:
+            ax.plot(navs.index, navs[c], color=PAL.get(c), lw=1.9, label=f"{c} nominal (TL)")
+            ax.plot(real.index, real[c], color=PAL.get(c), lw=1.4, ls="--", label=f"{c} reel (USD)")
+        ax.axhline(1.0, color="k", lw=0.5)
+        ax.set_title("Nominal (TL) vs Reel (USD-bazlı) NAV — Lira İllüzyonu (§9.9)")
+        ax.set_ylabel("NAV (başlangıç=1)"); ax.set_xlabel("Tarih"); ax.legend(fontsize=8, ncol=2)
+        plt.tight_layout(); plt.savefig(FIG/"f13_real_nav.png"); plt.close()
+        print("f13 ok")
+
     print(f"\nAll figures saved in {FIG}")
 
 

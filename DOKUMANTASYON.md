@@ -26,7 +26,7 @@
 | Fiyat gürültüsü (V8) | Eğitimde gerçekleşen getiriye slippage (`σ=0.001`) — anti-ezber, hocanın şartı; eval'de kapalı |
 | Algoritmalar | DQN (ayrık), PPO (sürekli on-policy), SAC (sürekli off-policy stokastik), **TD3 (sürekli off-policy deterministik — hocanın tavsiyesi)** |
 | Tahmin katmanı | CNN-LSTM bir-adım getiri tahmincisi (predict-then-optimize, sadece DQN/SAC/TD3) |
-| Doğrulama | 85 pytest + golden-master regresyon (1e-6, iterasyon-başı re-baseline) + walk-forward (3 kat) |
+| Doğrulama | 98 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
 ---
@@ -263,7 +263,8 @@ Projenin gerçek evrimi (V1→V8) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 
 ## 8. Deneysel Sonuçlar (Rapor §9.7)
 
-`python main.py` çalıştırması `results/` altına CSV'leri ve `figures/` altına 10 figürü üretir.
+`python main.py` çalıştırması `results/` altına CSV'leri (golden `metrics.csv` + `rigor_metrics.csv`)
+ve `figures/` altına 13 figürü üretir.
 
 ### 8.1. Metrikler
 
@@ -285,17 +286,33 @@ Projenin gerçek evrimi (V1→V8) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 | F3 | 60-gün rolling Sharpe |
 | F4 | Test metrikleri bar (CAGR / Sharpe / MaxDD) |
 | F5 | Risk-getiri düzlemi (Sharpe izo-çizgileriyle) |
-| F6 | DQN/PPO/SAC günlük ağırlık ısı haritaları |
-| F7 | Eğitim eğrileri (DQN ödül, PPO kayıplar, SAC NAV) |
+| F6 | DQN/PPO/SAC/TD3 günlük ağırlık ısı haritaları |
+| F7 | Eğitim eğrileri (DQN ödül, PPO kayıplar, SAC & TD3 NAV) |
 | F8 | MDP diyagramı (ajan↔ortam döngüsü) |
-| F9 | Üç ajanın mimari özeti |
+| F9 | Dört ajanın mimari özeti |
 | **F10** | **Hareketli ortalama episode getirisi** (öğrenme eğilimi — PDF §9.7) |
+| **F11** | **Deflated & Probabilistic Sharpe + PBO** (çoklu-deneme düzeltmeli — López de Prado) |
+| **F12** | **Monte-Carlo stres** (1-yıl ileri terminal getiri dağılımı + VaR/CVaR) |
+| **F13** | **Nominal (TL) vs Reel (USD) NAV** (lira illüzyonu — §9.9) |
 
 ### 8.3. Test metrikleri (golden baseline, seed=42 deterministik)
 
 Değerler `tests/golden/metrics_baseline.csv` içinde 1e-6 toleransta kilitlidir; her refactor
 sonrası `python main.py` ile yeniden üretilip doğrulanır. (Güncel değerler için `results/metrics.csv`.)
 Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metrics_baseline.csv`.
+
+**Titizlik (rigor) katmanı (PARS referans ağacından port, golden-güvenli raporlama).**
+`scripts/rigor_analysis.py`, deterministik eval NAV'larını okuyup `results/rigor_metrics.csv`
+üretir — golden `metrics.csv`'ye **dokunmaz** (ayrı dosya). Hero metrikler:
+- **Deflated Sharpe (DSR)** ve **Probabilistic Sharpe (PSR)** — Bailey & López de Prado (2014);
+  çoklu-deneme (V1→V8 + ajanlar = `n_trials`) altında gözlenen Sharpe'ın *tesadüf olmama*
+  olasılığı. Sağlam ajanları (SAC/TD3 ~0.90) fluke'tan (zayıf DQN ~0.00) **ayırır**.
+- **PBO (Probability of Backtest Overfitting)** — CSCV (López de Prado et al. 2017); IS-en-iyi
+  config'in OOS-medyan-altı olma oranı. **Yüksek PBO = RL ajanları pasif baseline'ı OOS'ta
+  sağlam geçemiyor** uyarısı (dürüst, §9.9).
+- **Reel (USD-bazlı) NAV** — nominal TL NAV ÷ (USD/TRY normalize) → lira illüzyonunu niceler.
+- **Monte-Carlo stres** — durağan blok bootstrap (Politis-Romano) + Student-t (ağır kuyruk) →
+  en iyi RL ajanın 1-yıl ileri terminal dağılımı + VaR/CVaR + P(zarar), P(>%20 düşüş).
 
 ### 8.4. İterasyon karşılaştırması — V5 → V6 → V7 (test dönemi, DQN)
 
@@ -329,7 +346,10 @@ kod/
 ├── train.py              # DataBundle; prepare_data/train_dqn/ppo/sac/evaluate/run
 ├── data.py               # BIST verisi indirme + sentetik GBM fallback + cache + train/test split
 ├── config.py             # TEK yapılandırma kaynağı (SEED, HORIZON_PRESETS, FEATURES, *Config dataclass)
-├── plots.py              # 10 figür (matplotlib)
+├── plots.py              # 13 figür (matplotlib, F1–F13)
+├── scripts/rigor_analysis.py  # DSR/PBO/Monte-Carlo stres/reel-NAV (golden-güvenli)
+├── utils/deflated_sharpe.py   # Deflated/Probabilistic Sharpe + CSCV-PBO (López de Prado)
+├── utils/stress_mc.py         # Monte-Carlo stres (Student-t + blok bootstrap)
 ├── agents/
 │   ├── base.py           # BaseAgent (act_eval) + SupportsQValues Protocol (ISP)
 │   ├── common.py         # mlp, ReplayBuffer (+ torch_utils re-export)
@@ -353,7 +373,7 @@ kod/
 ├── ui/                   # Streamlit paketi (SRP)
 │   ├── state.py · services.py · charts.py · sidebar.py
 │   └── tabs/ (mdp · train · test · compare)
-└── tests/                # 85 test + golden-master (1e-6)
+└── tests/                # 98 test + golden-master (1e-6)
 ```
 
 ### 9.2. Çalışma mantığı (uçtan uca akış)
@@ -435,17 +455,27 @@ Ek paneller: Q-değeri çubuğu (DQN), ödül-terim dekompozisyonu, adaptif kats
   stratejiler ve baseline'lar yüksek **nominal TL** getiri gösterir (BuyHold NAV ≈ 6.7×). Ancak bu
   dönemde USD/TRY ~13'ten ~35'e yükseldi (≈2.7× devalüasyon) ve enflasyon yüksekti. **Nominal NAV'ın
   büyük kısmı satın-alma-gücü artışı değil, para biriminin değer kaybıdır** — "lira illüzyonu". Hoca
-  bunu da işaret etti: *"başlangıç paranı o yılın değerine göre normalize et."* Doğru okuma için NAV,
-  USD/TRY'ye bölünerek **reel (USD-bazlı) NAV** olarak da raporlanmalıdır; makro bloğunda USD/TRY
-  zaten indiriliyor (`data.download_macro`), dolayısıyla bu normalizasyon raporlama katmanında
-  (golden'ı değiştirmeden) hesaplanabilir. Ajanlar arası **göreli** karşılaştırma para biriminden
-  bağımsız olduğundan (hepsi aynı TL evreninde) sıralama değişmez; mutlak kazanç yorumu ise reel
-  bazda yapılmalıdır.
-- **Problem daha karmaşık olsaydı ne eklenirdi?** Bu projede zaten eklenenler: **makro rejim**
-  öznitelikleri (VIX/faiz/USD/altın — V6), **rejim-amplified CVaR** kuyruk cezası (V7), **TD3** ek
-  sürekli-kontrol ajanı, ve **fiyat gürültüsü** (V8). Bundan sonrası: stres-testi (Monte Carlo),
-  çok-varlık-sınıfı evren, reel-NAV'ı doğrudan ödüle katma (davranış-değiştiren — şu an yalnız
-  raporlama). (`Reinforcement Learning Final/` referans klasörü bu yönlerin prototiplerini içerir.)
+  bunu da işaret etti: *"başlangıç paranı o yılın değerine göre normalize et."* Bu artık
+  **uygulandı** (`utils.metrics.real_nav` + F13): NAV, başlangıç USD/TRY'ye normalize edilerek
+  **reel (USD-bazlı) NAV** olarak raporlanır. Sonuç çarpıcı — nominal ≈ 5.5× kazanç reel bazda
+  ≈ 2.1×'e iner: **nominal getirinin ~%60'ı satın-alma-gücü değil, TL'nin değer kaybıdır.** Ajanlar
+  arası **göreli** sıralama para biriminden bağımsızdır (hepsi aynı TL evreni) → değişmez; mutlak
+  kazanç yorumu reel bazda yapılır. Golden-güvenli (yalnız raporlama; eğitim/eval/ödül değişmez).
+- **Strateji gerçekten sağlam mı, yoksa backtest aşırı-uyumu mu? (titizlik katmanı)** "Yüksek
+  Sharpe" yanıltıcı olabilir — çoklu-deneme (V1→V8 + 4 ajan) altında bir strateji şans eseri iyi
+  görünebilir. Bunu **Deflated Sharpe (DSR)** ve **Probabilistic Sharpe (PSR)** ile (López de Prado)
+  test ettik: sağlam ajanlar (SAC/TD3 DSR ~0.90) ile fluke (DQN DSR ~0.00) **net ayrışıyor**.
+  Dahası **PBO (Probability of Backtest Overfitting, CSCV)** yüksek çıkıyor — bu *dürüst* bir bulgu:
+  RL ajanları pasif baseline'ı (Eşit Ağırlık/BuyHold) test döneminde **sağlam biçimde geçemiyor**.
+  Bu, RL'in piyasayı "yendiği" iddiasını **abartmaktan kaçınmamızı** sağlar; literatürle de tutarlı
+  (DeMiguel et al. 2009: naif 1/N çeşitlendirmeyi ham Sharpe'ta yenmek zordur). **Monte-Carlo stres**
+  (blok bootstrap + Student-t ağır kuyruk) en iyi RL ajanın 1-yıl ileri VaR/CVaR + felaket olasılığını
+  niceler.
+- **Problem daha karmaşık olsaydı ne eklenirdi?** Bu projede zaten eklenenler: **makro rejim** (V6),
+  **rejim-amplified CVaR** (V7), **TD3** (sürekli-deterministik ajan), **fiyat gürültüsü** (V8), ve
+  **titizlik katmanı** — Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres + reel-NAV (PARS
+  referans ağacından port). Bundan sonrası: çok-varlık-sınıfı evren, nakit faiz geliri + BSMV'yi
+  *ödüle* katma (davranış-değiştiren — şu an yok), reel-NAV'ı doğrudan ödüle katma.
 
 ---
 
@@ -460,10 +490,11 @@ pip install -e ".[dev]"                              # pyproject bağımlılıkl
 ### Komutlar
 ```bash
 streamlit run app.py            # arayüz (eğitim + test + karşılaştırma)
-python main.py                  # tam akış: veri → eğitim → backtest → 10 figür
+python main.py                  # tam akış: veri → eğitim → backtest → titizlik → 13 figür
+python scripts/rigor_analysis.py # yalnız titizlik katmanı (DSR/PBO/stres/reel-NAV)
 python main.py --skip-data      # cache varsa veriyi atla
 python main.py --walkforward    # walk-forward genelleme doğrulaması (3 kat)
-pytest -q                       # 85 test
+pytest -q                       # 98 test
 pytest -m "not slow"            # hızlı yerel döngü (UI smoke hariç)
 ```
 

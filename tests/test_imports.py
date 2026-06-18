@@ -18,9 +18,11 @@ SAFE_MODULES = [
     "agents.dqn", "agents.ppo", "agents.sac", "agents.td3",
     "utils", "utils.features", "utils.metrics",
     "utils.baselines", "utils.portfolio_tl", "utils.torch_utils", "utils.macro",
+    "utils.deflated_sharpe", "utils.stress_mc",
     "forecast", "forecast.forecaster",
     "core", "core.trainer", "core.rollout", "core.features", "core.factory",
     "train", "plots", "main",
+    "scripts", "scripts.rigor_analysis",
 ]
 
 

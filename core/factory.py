@@ -104,14 +104,21 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               max_steps: int, random_start: bool = False, seed: int = SEED,
               reward_overrides: dict | None = None,
               price_noise_std: float | None = None,
+              cash_daily_rate: float | None = None,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
     reward_overrides (UI'nin reward_cfg'i): None/eksik anahtarlar env'in preset
     default'larina duser — onceki app._make_env mapping'i ile birebir ayni.
+
+    cash_daily_rate: None -> env ctor kendi config'inden turetir (EnvConfig.cash_daily_rate).
+    UI/CLI parametrik gunluk nakit faiz oranini dogrudan gecebilir.
     """
     cfg = reward_overrides or {}
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
+    # cash_daily_rate: None gecilirse env ctor config default'a duser (EnvConfig.cash_daily_rate).
+    # Parametrik gecilirse (UI/CLI) env ctor None olmayan degeri kullanir.
+    extra_cash = {} if cash_daily_rate is None else {"cash_daily_rate": float(cash_daily_rate)}
     return cls(
         prices, select_features(feats, algo),
         horizon=horizon, adaptive=adaptive, max_steps=max_steps,
@@ -139,4 +146,5 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         w_gain_speed=float(cfg.get("w_gain_speed", 0.0)),
         w_ruin_timing=float(cfg.get("w_ruin_timing", 0.0)),
         macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
+        **extra_cash,
     )

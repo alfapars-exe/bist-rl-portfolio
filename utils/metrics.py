@@ -18,9 +18,11 @@ def cagr(nav: np.ndarray) -> float:
 
 
 def sharpe(rets: np.ndarray, rf: float = 0.0) -> float:
+    sd_raw = float(np.std(rets))
+    if sd_raw < 1e-10:          # sabit-getiri (risksiz/nakit) -> Sharpe tanimsiz
+        return float("nan")
     mu = np.mean(rets) - rf / TRADING_DAYS
-    sd = np.std(rets) + 1e-9
-    return float(np.sqrt(TRADING_DAYS) * mu / sd)
+    return float(np.sqrt(TRADING_DAYS) * mu / (sd_raw + 1e-9))
 
 
 def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
@@ -37,7 +39,7 @@ def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
     downside_dev = float(np.sqrt(np.mean(np.minimum(rets - target, 0.0) ** 2)))
     if downside_dev < 1e-12:
         # Hic asagi-yonlu sapma yok: pozitif ortalamada sonsuz, aksi halde 0.
-        return float("inf") if mu > 0 else 0.0
+        return float("nan") if mu > 0 else 0.0   # pozitif sabit-getiri -> tanimsiz
     return float(np.sqrt(TRADING_DAYS) * mu / downside_dev)
 
 
@@ -49,6 +51,8 @@ def max_drawdown(nav: np.ndarray) -> float:
 
 def calmar(nav: np.ndarray) -> float:
     mdd = abs(max_drawdown(nav))
+    if mdd < 1e-10:             # dususuz (risksiz/nakit) -> Calmar tanimsiz
+        return float("nan")
     return cagr(nav) / (mdd + 1e-9)
 
 

@@ -30,9 +30,11 @@ def test_reward_decomposition_sums_to_total():
         a = rng.normal(0, 1, size=env.action_dim).astype(np.float32)
         _, r, done, trunc, info = env.step(a)
         rt = info["reward_terms"]
-        # v2: odul ozdesligine Diferansiyel Sharpe terimi eklendi (+dsr_term = w_dsr*DSR,
-        # online risk-ayar). Ozdeslik: log_return - tx_cost - drawdown - bankruptcy + dsr_term.
-        recomputed = (rt["log_return"] - rt["tx_cost"]
+        # C7 guncelleme: tx_cost artik log_r icinde (port_r_net = gross - tx_cost uzerinden
+        # log(1+port_r_net)); total'den AYRI -tx_cost terimi KALDIRILDI (cift-sayim giderildi).
+        # Ozdeslik: log_return - drawdown_penalty - bankruptcy_penalty + dsr_term - cvar_penalty
+        # (tx_cost terms["tx_cost"]'ta raporlanir ama total'e GIRMEZ).
+        recomputed = (rt["log_return"]
                       - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
                       + rt["dsr_term"] - rt["cvar_penalty"])
         assert abs(rt["total"] - recomputed) < 1e-9
@@ -67,7 +69,8 @@ def test_discrete_env_reward_invariant_holds():
     for k in range(40):
         _, r, done, trunc, info = env.step(k % env.n_discrete)
         rt = info["reward_terms"]
-        recomputed = (rt["log_return"] - rt["tx_cost"]
+        # C7: tx_cost log_r icinde; total'e ayrica GIRMEZ.
+        recomputed = (rt["log_return"]
                       - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
                       + rt["dsr_term"] - rt["cvar_penalty"])
         assert abs(rt["total"] - recomputed) < 1e-9
@@ -153,8 +156,8 @@ def test_bankruptcy_path_terminates_and_penalizes():
             bankrupted = True
             assert abs(rt["bankruptcy_penalty"] - 7.0) < 1e-9
             assert env.nav < 0.999
-            # ceza toplam odule eklendi (negatif yonde)
-            recomputed = (rt["log_return"] - rt["tx_cost"]
+            # C7: tx_cost log_r icinde (port_r_net=gross-tx uzerinden log); total'e ayrica GIRMEZ.
+            recomputed = (rt["log_return"]
                           - rt["drawdown_penalty"] - rt["bankruptcy_penalty"]
                           + rt["dsr_term"] - rt["cvar_penalty"])
             assert abs(rt["total"] - recomputed) < 1e-9

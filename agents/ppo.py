@@ -88,9 +88,15 @@ class PPOAgent(BaseAgent):
                 float(v.item()))
 
     def act_eval(self, s: np.ndarray) -> np.ndarray:
-        """Eval: politikadan ornek (mevcut eval davranisiyla birebir ayni — stokastik)."""
-        a, _, _ = self.act(s)
-        return a
+        """Eval: deterministik ortalama (mu) kullan — SAC/TD3/DQN ile tutarli.
+
+        Stokastik sample() yerine politika aginin mu ciktisini dogrudan dondurur;
+        boylece PPO backtest tekraranabilir ve tek-deterministik olur.
+        """
+        s_t = torch.as_tensor(s, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            mu, _ = self.policy(s_t)
+        return mu.cpu().numpy()[0].astype(np.float32)
 
     def remember(self, s, a, r, done, v, logp):
         self.S.append(np.asarray(s, dtype=np.float32))

@@ -31,11 +31,18 @@ def _slice(feats_raw, idx):
 def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
                  n_folds: int = 3, val_frac: float = 0.2, purge: int = 5,
                  n_iters: int = 10, rollout_len: int = 400, seed: int = 42,
-                 horizon: str = "short", adaptive: bool = True) -> dict:
+                 horizon: str = "short", adaptive: bool = True,
+                 macro=None, regime=None) -> dict:
     """Genisleyen-pencere walk-forward.
 
     agent_factory(state_dim, action_dim, seed) -> ajan. Doner:
     {"folds": [metrik dict...], "mean": {...}, "std": {...}}.
+
+    macro: (T, F_macro) numpy dizisi (tam veri uzunlugu, fold icinde dilimlenir).
+           None -> makrosuz ortam (V5 davranisi).
+    regime: (T,) numpy dizisi (tam veri uzunlugu, fold icinde dilimlenir).
+            None -> rejim amplifikasyonu kapali.
+    NOT: forecast feature WF'de DAHIL EDILMEZ (sızıntı-güvenli mevcut karar KORUNUR).
     """
     T = len(prices)
     val_len = max(1, int(T * val_frac / n_folds))
@@ -62,15 +69,23 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
         f_tr = sc.transform(_slice(feats_raw, tr_idx))
         f_va = sc.transform(_slice(feats_raw, va_idx))
 
+        # T6 (C6): macro/regime fold dilimleri (None gecilirse None kalir -> makrosuz).
+        macro_tr = macro[:tr_end] if macro is not None else None
+        macro_va = macro[val_start:val_end] if macro is not None else None
+        regime_tr = regime[:tr_end] if regime is not None else None
+        regime_va = regime[val_start:val_end] if regime is not None else None
+
         tr_env = env_cls(prices.loc[tr_idx], f_tr, horizon=horizon, adaptive=adaptive,
-                         max_steps=train_max_steps, random_start=True, seed=seed)
+                         max_steps=train_max_steps, random_start=True, seed=seed,
+                         macro=macro_tr, regime=regime_tr)
         action_dim = tr_env.n_discrete if discrete else tr_env.action_dim
         agent = agent_factory(tr_env.state_dim, action_dim, seed)
         # generator'i sonuna kadar tuket (egitim yan-etkili; ciktiya gerek yok)
         deque(train_loop(agent, tr_env, n_iters=n_iters, rollout_len=rollout_len), maxlen=0)
 
         va_env = env_cls(prices.loc[va_idx], f_va, horizon=horizon, adaptive=adaptive,
-                         max_steps=10_000, random_start=False, seed=seed)
+                         max_steps=10_000, random_start=False, seed=seed,
+                         macro=macro_va, regime=regime_va)
         bt = evaluate(agent, va_env)
         if len(bt["nav"]) > 0:
             fold_metrics.append(summary(bt["nav"], bt["rets"], bt["weights"]))

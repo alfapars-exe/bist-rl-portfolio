@@ -93,9 +93,17 @@ def test_shapes_and_finite(prices, name):
     assert len(out["rets"]) == len(prices)
     assert np.all(np.isfinite(out["nav"]))
     assert np.all(np.isfinite(out["rets"]))
-    # summary() NaN uretmemeli (rapor metrikleri)
     m = summary(out["nav"], out["rets"], out.get("weights"))
-    assert all(np.isfinite(v) for v in m.values()), m
+    # cash_riskfree(daily_rf=0.0) -> sabit getiri -> vol=0 -> Sharpe/Sortino/Calmar NaN
+    # (metrics NaN-guard: sifir-vol/sifir-MaxDD'de tanimsiz metrikler NaN doner).
+    # Diger stratejiler (riskli varliklar icerdiginden) tamamen sonlu olmali.
+    if name == "cash_riskfree":
+        # NAV, CAGR, FinalNAV, Volatility, Turnover sonlu; Sharpe/Sortino/Calmar NaN olabilir.
+        finite_keys = {"CAGR", "FinalNAV", "Volatility", "Turnover", "MaxDD"}
+        for k in finite_keys:
+            assert np.isfinite(m[k]), f"{k} sonlu olmali; {m}"
+    else:
+        assert all(np.isfinite(v) for v in m.values()), m
 
 
 # --------------------------------------------------------------------------

@@ -26,9 +26,12 @@ SEED = 42
 # rebalans frekansi, momentum/minvol pencereleri, (eta, lam, tau, gamma) base.
 # ---------------------------------------------------------------------
 HORIZON_PRESETS: Dict[str, dict] = {
-    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95),
-    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99),
-    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995),
+    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95,
+                   min_days=1,  max_days=30,  train_max_steps=30),
+    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99,
+                   min_days=30, max_days=90,  train_max_steps=90),
+    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995,
+                   min_days=90, max_days=360, train_max_steps=360),
 }
 
 
@@ -126,6 +129,29 @@ class EnvConfig:
     # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
     price_noise_std: float = 0.001
     price_noise_train_only: bool = True
+    # v10: PARAMETRIK nakit (risksiz) faiz. Nakit varlik artik 0 degil, gunluk risksiz
+    # getiri kazanir. cash_annual_rate gercekci TR 2022-24 mevduat/repo seviyesi (~%40);
+    # UI/CLI'dan ayarlanabilir. Gunluk oran bilesik tutarlilikla turetilir:
+    #   cash_daily_rate = (1 + cash_annual_rate)^(1/252) - 1
+    # SABIT oran -> RNG cagrisi YOK -> golden RNG sirasi korunur (yalniz deger degisir).
+    cash_annual_rate: float = 0.40
+    trading_days: int = 252          # yillik->gunluk bilesik donusum tabani
+
+    @property
+    def cash_daily_rate(self) -> float:
+        """Yillik nakit faizinin bilesik gunluk karsiligi: (1+R)^(1/252) - 1."""
+        return cash_daily_rate(self.cash_annual_rate, self.trading_days)
+
+
+def cash_daily_rate(cash_annual_rate: float, trading_days: int = 252) -> float:
+    """Yillik nakit (risksiz) faizini bilesik gunluk orana cevirir.
+
+    (1 + r_daily)^trading_days = 1 + cash_annual_rate  =>  r_daily = (1+R)^(1/D) - 1.
+    Bagimsiz modul-duzeyi yardimci: env ctor (cash_daily_rate is None) buradan turetir;
+    UI/CLI yillik orani gecerse env gunluk orani hesaplar. RNG kullanmaz (deterministik).
+    """
+    D = max(int(trading_days), 1)
+    return float((1.0 + float(cash_annual_rate)) ** (1.0 / D) - 1.0)
 
 
 # ---------------------------------------------------------------------

@@ -177,7 +177,11 @@ class RewardEngine:
 
         peak = max(peak, nav)
         dd = (peak - nav) / max(peak, 1e-9)
-        log_r = float(np.log(max(1.0 + gross_port_r, 1e-6)))
+        # C7: log-getiri NET getiri uzerinden (port_r_net = gross - tx_cost). Boylece
+        # islem maliyeti odule TEK SEFER girer (hem NAV'da hem ayri -tx_cost teriminde
+        # cift sayilmasi giderildi). Log-zenginlik maksimizasyonuyla (Kelly/Moody-Saffell)
+        # tutarli: ajan gerceklesen net log-fayda gorur.
+        log_r = float(np.log(max(1.0 + port_r_net, 1e-6)))
         dd_penalty = lambda_t * max(0.0, dd - tau_t)
         dsr = self.dsharpe.update(port_r_net)
         dsr_term = self.w_dsr * dsr
@@ -202,12 +206,15 @@ class RewardEngine:
         ruin_timing_mult = 1.0 + self.w_ruin_timing * (1.0 - step_frac)
         ruin_pen = (self.bankruptcy_penalty * ruin_timing_mult) if bankrupt else 0.0
 
-        total = (log_r - tx_cost - dd_penalty - ruin_pen
+        # C7: -tx_cost AYRI terimi KALDIRILDI; islem maliyeti artik log_r icinde
+        # (log(1+port_r_net), port_r_net = gross - tx_cost). terms["tx_cost"] raporlamada
+        # KALIR ama total'e ayrica EKLENMEZ (cift-sayim giderildi).
+        total = (log_r - dd_penalty - ruin_pen
                  + dsr_term - cvar_penalty + gain_bonus)
 
         # NOT: terms["bankruptcy_penalty"] = ruin_pen (efektif ceza). w_ruin_timing=0
-        # iken ruin_pen == flat bankruptcy_penalty oldugundan mevcut anahtar anlami ve
-        # test_env ozdesligi (total = ... - bankruptcy_penalty + gain_bonus) korunur.
+        # iken ruin_pen == flat bankruptcy_penalty oldugundan mevcut anahtar anlami korunur.
+        # tx_cost terms'te raporlanmaya devam eder (panel/teshis) ama total'e girmez.
         terms = dict(
             log_return=log_r, tx_cost=tx_cost,
             drawdown_penalty=dd_penalty, total=total,

@@ -35,9 +35,14 @@ def test_noise_off_in_eval():
     r2 = env._risky_returns()                       # ayni t -> rng tuketilmez -> birebir ayni
     np.testing.assert_array_equal(r1, r2)
     # analitik (gurultusuz) getiriye esit olmali
+    # v10: nakit varlik artik 0.0 degil, cash_daily_rate kazanir (SABIT skaler).
+    # float64->float32 donusumu kucuk yuvarlama hatasi (<1e-7) getirebilir; allclose kullan.
     p0, p1 = env.prices[env.t], env.prices[env.t + 1]
-    clean = np.concatenate([(p1 - p0) / np.maximum(p0, 1e-9), [0.0]]).astype(np.float32)
-    np.testing.assert_array_equal(r1, clean)
+    clean = np.concatenate(
+        [(p1 - p0) / np.maximum(p0, 1e-9), [env.cash_daily_rate]]
+    ).astype(np.float32)
+    np.testing.assert_allclose(r1, clean, atol=1e-6,
+                               err_msg="Eval risky_returns gurultusuz analitik degerle eslesmeli")
 
 
 def test_noise_on_in_training():
@@ -51,8 +56,11 @@ def test_noise_on_in_training():
     r2 = env._risky_returns()
     assert env.t == t0, "_risky_returns t'yi ilerletmemeli"
     assert not np.array_equal(r1, r2), "gurultu aktifken ardisik draw'lar farkli olmali"
-    # nakit varligi gurultusuz kalmali (slippage yalniz riskli varliklarda)
-    assert np.isclose(r1[-1], 0.0) and np.isclose(r2[-1], 0.0)
+    # nakit varligi gurultusuz kalmali (slippage yalniz riskli varliklarda).
+    # v10: nakit getirisi 0.0 degil cash_daily_rate (SABIT skaler, gurultusuz).
+    dr = env.cash_daily_rate
+    assert np.isclose(r1[-1], dr), f"Nakit getirisi cash_daily_rate={dr} olmali; {r1[-1]}"
+    assert np.isclose(r2[-1], dr), f"Nakit getirisi cash_daily_rate={dr} olmali; {r2[-1]}"
 
 
 def test_eval_rollout_invariant_to_noise_setting():

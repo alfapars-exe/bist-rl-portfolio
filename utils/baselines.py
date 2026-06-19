@@ -1,18 +1,55 @@
-"""Klasik baseline stratejiler — karşılaştırma için."""
+"""Klasik baseline stratejiler — karşılaştırma için.
+
+İŞLEM MALİYETİ SİMETRİSİ (C2):
+RL ortamı her rebalansta `eta·||Δw||₁` işlem maliyeti düşer (env/reward.py →
+tx_cost = eta_t * delta_w_l1). Baseline'lar maliyetsiz olursa ASİMETRİK bir
+karşılaştırma çıkar (baseline yapay olarak avantajlı). Bu yüzden tüm
+YENİDEN-DENGELEYEN baseline'lar (equal_weight, mean_variance, risk_parity,
+inverse_volatility, min_variance, momentum) RL ile SİMETRİK işlem maliyeti
+düşer: her rebalans gününde günlük net getiri = port_r − eta·||w_yeni−w_eski||₁.
+
+eta KAYNAĞI: RL'in kanonik ortamıyla AYNI base oran —
+`config.HORIZON_PRESETS["medium"]["eta"]` (kanonik vade = medium, eta_base=0.0010).
+RL adaptif ölçekleme (turnover_ewma/turnover_target) uygular; baseline'lar
+deterministik kalsın diye SABIT base eta kullanır (RNG yok, golden-uyumlu).
+Fonksiyon imzaları geriye-uyumlu: eta opsiyonel, default = medium preset eta.
+
+buy_and_hold_index rebalans yapmaz → maliyet 0 (değişmez).
+"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
+from config import HORIZON_PRESETS, EnvConfig, cash_daily_rate
 
-def equal_weight(prices: pd.DataFrame) -> dict:
-    """Günlük rebalansla eşit ağırlık."""
+# RL kanonik ortamıyla aynı base işlem-maliyeti oranı (vade = medium).
+DEFAULT_ETA: float = float(HORIZON_PRESETS["medium"]["eta"])
+
+
+def equal_weight(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
+    """Günlük rebalansla eşit ağırlık — RL ile simetrik işlem maliyeti düşülür.
+
+    Her gün eşit-ağırlığa geri dönülür (drift düzeltme). Önceki günkü fiyat
+    hareketiyle kayan ağırlıklar (w_drift) tekrar 1/N'e çekilir; bu rebalansın
+    ||Δw||₁'i kadar `eta` maliyeti net getiriden düşülür. Drift küçük olduğundan
+    maliyet de küçüktür ama 0 değildir (RL ile simetri)."""
     r = prices.pct_change().fillna(0).values
-    N = prices.shape[1]
-    w = np.ones(N) / N
-    rets = (r * w).sum(axis=1)
+    T, N = r.shape
+    w_target = np.ones(N) / N
+    rets = np.empty(T)
+    w_prev = w_target.copy()                  # gün 0 başlangıcı: eşit ağırlık
+    for t in range(T):
+        # Gün başında hedef = eşit ağırlık; rebalans maliyeti w_prev'e göre.
+        turnover = float(np.abs(w_target - w_prev).sum())
+        port_r = float((w_target * r[t]).sum())
+        rets[t] = port_r - eta * turnover
+        # Gün içi getiriyle ağırlıklar kayar (drift) -> ertesi gün w_prev.
+        w_drift = w_target * (1.0 + r[t])
+        s = w_drift.sum()
+        w_prev = w_drift / s if s > 1e-12 else w_target.copy()
     nav = np.cumprod(1 + rets)
-    return dict(nav=nav, rets=rets, weights=np.tile(w, (len(rets), 1)))
+    return dict(nav=nav, rets=rets, weights=np.tile(w_target, (T, 1)))
 
 
 def buy_and_hold_index(prices: pd.DataFrame) -> dict:
@@ -29,8 +66,12 @@ def buy_and_hold_index(prices: pd.DataFrame) -> dict:
 
 
 def mean_variance(prices: pd.DataFrame, lookback: int = 120,
-                  rebalance: int = 20, risk_aversion: float = 5.0) -> dict:
-    """Kısıtlı long-only Markowitz; yuvarlanan pencere + periyodik rebalans."""
+                  rebalance: int = 20, risk_aversion: float = 5.0,
+                  eta: float = DEFAULT_ETA) -> dict:
+    """Kısıtlı long-only Markowitz; yuvarlanan pencere + periyodik rebalans.
+
+    RL ile simetrik: her rebalans gününde ||w_yeni−w_eski||₁ kadar `eta`
+    işlem maliyeti net getiriden düşülür."""
     from scipy.optimize import minimize
 
     r = prices.pct_change().fillna(0).values
@@ -38,6 +79,7 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
     navs = [1.0]; rets = []; w_hist = []
     w = np.ones(N) / N
     for t in range(T):
+        tx = 0.0
         if t >= lookback and (t - lookback) % rebalance == 0:
             hist = r[t - lookback: t]
             mu = hist.mean(axis=0)
@@ -51,8 +93,10 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
                 bounds=[(0, 0.2)] * N,
                 constraints=({"type": "eq", "fun": lambda w_: w_.sum() - 1}),
             )
-            w = res.x
-        port_r = float((w * r[t]).sum())
+            w_new = res.x
+            tx = eta * float(np.abs(w_new - w).sum())   # RL-simetrik tx-cost
+            w = w_new
+        port_r = float((w * r[t]).sum()) - tx
         rets.append(port_r)
         navs.append(navs[-1] * (1 + port_r))
         w_hist.append(w.copy())
@@ -71,26 +115,30 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
 # rebalans, ilk lookback gunu esit-agirlik isinma (warm-up).
 # =====================================================================
 def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
-                      rebalance: int) -> dict:
-    """Determinist yuvarlanan-pencere backtest cekirdegi.
+                      rebalance: int, eta: float = DEFAULT_ETA) -> dict:
+    """Determinist yuvarlanan-pencere backtest cekirdegi (RL-simetrik tx-cost).
 
     weight_fn(hist_returns:(L,N), w_prev:(N,)) -> w_new:(N,) dondurur.
     Donen agirliklar long-only normalize edilir (clip>=0, toplam=1).
-    mean_variance ile ayni stilde tx-cost UYGULANMAZ — net edge karsilastirmasi
-    Turnover kolonu uzerinden yapilir (golden tutarliligi). Hicbir np.random
-    cagrisi yok -> golden RNG sirasi etkilenmez."""
+    Her rebalans gununde RL ile SIMETRIK islem maliyeti dusulur:
+        net_r = port_r - eta * ||w_yeni - w_eski||_1
+    eta = config.HORIZON_PRESETS['medium']['eta'] (RL kanonik base oran).
+    Hicbir np.random cagrisi yok -> golden RNG sirasi etkilenmez (determinist)."""
     r = prices.pct_change().fillna(0.0).values
     T, N = r.shape
     navs = [1.0]; rets = []; w_hist = []
     w = np.ones(N) / N
     for t in range(T):
+        tx = 0.0
         if t >= lookback and (t - lookback) % rebalance == 0:
             hist = r[t - lookback: t]
             w_new = np.asarray(weight_fn(hist, w), dtype=float)
             w_new = np.clip(w_new, 0.0, None)
             s = w_new.sum()
-            w = w_new / s if s > 1e-12 else np.ones(N) / N
-        port_r = float((w * r[t]).sum())
+            w_new = w_new / s if s > 1e-12 else np.ones(N) / N
+            tx = eta * float(np.abs(w_new - w).sum())   # RL-simetrik tx-cost
+            w = w_new
+        port_r = float((w * r[t]).sum()) - tx
         rets.append(port_r)
         navs.append(navs[-1] * (1 + port_r))
         w_hist.append(w.copy())
@@ -99,7 +147,7 @@ def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
 
 
 def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
-                       rebalance: int = 20) -> dict:
+                       rebalance: int = 20, eta: float = DEFAULT_ETA) -> dict:
     """Ters-volatilite (1/sigma) agirligi — yuvarlanan vol uzerinden.
 
     Mantik: w_i ∝ 1/sigma_i (sigma_i = pencere getiri std'i), normalize edilir.
@@ -110,11 +158,12 @@ def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
     def f(hist, w):
         iv = 1.0 / (hist.std(axis=0) + 1e-9)
         return iv / iv.sum()
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
 def risk_parity(prices: pd.DataFrame, lookback: int = 120,
-                rebalance: int = 20, n_iter: int = 100) -> dict:
+                rebalance: int = 20, n_iter: int = 100,
+                eta: float = DEFAULT_ETA) -> dict:
     """Esit risk katkisi (ERC / risk parity) — iteratif sabit-nokta.
 
     Hedef: her varligin TOPLAM portfoy riskine katkisi esit olsun:
@@ -133,11 +182,12 @@ def risk_parity(prices: pd.DataFrame, lookback: int = 120,
             wv = 1.0 / np.maximum(mrc, 1e-8)
             wv /= wv.sum()
         return wv
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
 def min_variance(prices: pd.DataFrame, lookback: int = 120,
-                 rebalance: int = 20, max_weight: float = 0.4) -> dict:
+                 rebalance: int = 20, max_weight: float = 0.4,
+                 eta: float = DEFAULT_ETA) -> dict:
     """Saf minimum-varyans portfoyu — getiri tahmini KULLANMAZ.
 
     Cozulen problem:  min_w  w' Sigma w   s.t.  sum(w)=1, 0<=w_i<=max_weight.
@@ -155,11 +205,11 @@ def min_variance(prices: pd.DataFrame, lookback: int = 120,
                    bounds=[(0, max_weight)] * n,
                    constraints=({"type": "eq", "fun": lambda x: x.sum() - 1}))
         return res.x
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
 def momentum(prices: pd.DataFrame, lookback: int = 60, rebalance: int = 20,
-             top_k: int = 5) -> dict:
+             top_k: int = 5, eta: float = DEFAULT_ETA) -> dict:
     """Kesitsel momentum — pencere getirisi en yuksek top_k hisseye esit agirlik.
 
     Mantik: lookback penceresinde kumulatif getiri  cum_i = prod(1+r) - 1
@@ -176,19 +226,25 @@ def momentum(prices: pd.DataFrame, lookback: int = 60, rebalance: int = 20,
         out = np.zeros(n)
         out[idx] = 1.0 / len(idx)
         return out
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
-def cash_riskfree(prices: pd.DataFrame, daily_rf: float = 0.0) -> dict:
+def cash_riskfree(prices: pd.DataFrame,
+                  daily_rf: float | None = None) -> dict:
     """Nakit / risk-free benchmark — tum sermaye nakitte, sabit gunluk getiri.
 
     En muhafazakar referans: piyasaya HIC maruz kalmadan elde edilen getiri.
-    daily_rf=0 -> NAV duz 1.0 (sermaye korunumu, sifir risk). Pozitif daily_rf
-    ile basit bir mevduat/repo getirisi modellenir (NAV=(1+rf)^t). Risk
-    varliklarina agirlik 0 oldugundan weights tamamen sifirdir (Turnover=0).
+    daily_rf default'u RL ortamiyla AYNI gercek risksiz faizden gelir:
+        cash_daily_rate(EnvConfig.cash_annual_rate)  (~%40 yillik -> ~0.001336/gun)
+    -> NAV = (1+rf)^t ~ 1.40x/yil (252 gun). Boylece nakit baseline'i de RL'in
+    nakit varligiyla SIMETRIK risksiz getiri kazanir (eski NAV=1.0 / %0 degil).
+    daily_rf acikca verilirse o kullanilir (geriye-uyumlu override). Risk
+    varliklarina agirlik 0 -> weights tamamen sifirdir (Turnover=0).
     'RL piyasaya girmeyi hak ediyor mu?' sorusunun tabanini olusturur: bir ajan
-    bu duz cizgiyi risk-ayarli olarak gecemiyorsa piyasa riskini almak bosunadir.
-    Tamamen determinist (kapali-form, np.random yok)."""
+    bu (artik egimi pozitif) cizgiyi risk-ayarli gecemiyorsa piyasa riskini
+    almak bosunadir. Tamamen determinist (kapali-form, np.random yok)."""
+    if daily_rf is None:
+        daily_rf = cash_daily_rate(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
     T, N = prices.shape
     rets = np.full(T, float(daily_rf))
     nav = np.cumprod(1.0 + rets)

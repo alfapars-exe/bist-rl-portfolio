@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (akademik revizyon: reprodüklenebilir golden + multi-seed + genişletilmiş baseline)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (V11: adil-karşılaştırma + nakit-faizi revizyonu; hakem #1–#8 + 5 yeni ister; 191 test)
 
 ---
 
@@ -119,10 +119,32 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   spread); **η (5-15bps tek-yön) GERÇEKÇİ**, kalibrasyon değişmez. SAC turnover 0.011 → maliyet-bağışık
   (drag@50bps %1.35); DQN çöker (Sharpe 0.42→−0.46), PPO/Momentum bozulur → SAC'ın düşük-turnover'ı
   gerçek net-edge. İkisi golden-güvenli (yeni script, RNG sırası değişmez). 159 test yeşil.
+- _(2026-06-19)_ **V11 — Adil-karşılaştırma + nakit-faizi revizyonu (hakem #1–#8 + 5 yeni ister).**
+  Golden 5. kez re-baseline; **191 test yeşil**; determinizm ≤1e-6. Sekiz adalet düzeltmesi:
+  **C1** metrik tarih HİZALAMA + ortak-pencere `NAV[0]=1` yeniden-tabanlama (RL+baseline AYNI gün
+  sayısı; `train.py`+`extra_baselines.py`) — FinalNAV adil pencere büyümesi; **C2** maliyetli
+  baseline'lar (η=0.0010 simetrik; `utils/baselines.py`); **C3** başarı=`success_vs_benchmark` (EW),
+  CLI'daki `nav>1` override kalktı; **C4** PPO eval deterministik (mu, sample değil); **C5**
+  `--allow-synthetic` koruması (`main.py`); **C6** walk-forward'a macro/regime; **C7** reward
+  `log(1+net)` (tx_cost çift-sayım giderildi); **C8** app caption TD3. Yeni isterler: **nakit faizi**
+  (`EnvConfig.cash_annual_rate=0.40` PARAMETRİK; `config.cash_daily_rate()`; env nakit varlığı +
+  `cash_riskfree` baseline gerçek faiz kazanır); **vade gün-limiti** (HORIZON_PRESETS
+  min/max_days/train_max_steps: short 1/30, medium 30/90, long 90/360; eğitim episode=train_max_steps,
+  eval=tam test dönemi); **model liste UI** (`{algo}_{horizon}_{adaptive}.pt` + sidebar selectbox;
+  CLI save da `model_path` kullanır); **metrics NaN-guard** (sıfır-vol/sıfır-DD → Sharpe/Calmar NaN,
+  yalnız CashRiskFree). **KİLİT BULGU:** adalet düzeltmeleri RL'i GÜÇLENDİRDİ (önce RL maliyet öderken
+  baseline ödemiyordu + RL nakiti %0 kazanıyordu = haksız ceza). Yeni adil kanonik: SAC 2.141 / TD3
+  2.151 Sharpe → InverseVol(2.16)/RiskParity(2.14) düzeyinde, EqualWeight(2.09) + risksiz hurdle
+  (NAV 2.5x) üstünde; MinVar(2.32) hâlâ önde ama makas kapandı. DQN zayıf (0.484). Altın/dolar
+  tradeable YAPILMADI (makro-feature kaldı — kullanıcı kararı).
 
 ## 6. Bilinen Riskler / Açık Konular
 
 - Ortam pyarrow/yfinance'a bağlı; bazı kabuklarda eksik olabilir (golden env-kilitli).
-- Golden artık **V8 referansı** (2026-06-19'da bu ortamda donduruldu); nöral satırlar
-  torch/numpy sürümüne duyarlı — başka ortamda kayarsa kanonik ortamda yeniden dondur.
+- Golden artık **V11 referansı** (adil-karşılaştırma + nakit-faizi; 2026-06-19'da bu ortamda
+  donduruldu, ≤1e-6 reprodüklenebilir); nöral satırlar torch/numpy sürümüne duyarlı — başka
+  ortamda kayarsa kanonik ortamda yeniden dondur.
+- **Nakit faizi varsayımı (V11):** `cash_annual_rate=0.40` parametrik; bu, evalüasyonda nakit
+  hurdle'ını (NAV ~2.5x) belirler. Sharpe NOMİNAL'dir (rf=0); rf-hurdle CashRiskFree satırında
+  ayrıca gösterilir. Oran UI/config'ten değiştirilebilir → sonuçlar buna duyarlıdır.
 - `KOZAA.IS`, `KOZAL.IS` evrenden hariç (28 hisse).

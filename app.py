@@ -58,7 +58,7 @@ def main():
     algo, horizon, adaptive, hp = sidebar_controls()
 
     st.title("📈 BIST 28 Pekiştirmeli Öğrenme Portföy Yönetimi")
-    st.caption("UYİK 2026 · DQN/PPO/SAC · Vade preset'leri · Adaptif ödül şekillendirici")
+    st.caption("UYİK 2026 · DQN/PPO/SAC/TD3 · Vade preset'leri · Adaptif ödül şekillendirici")
 
     t1, t2, t3, t4 = st.tabs([
         "📐 Veri & MDP",

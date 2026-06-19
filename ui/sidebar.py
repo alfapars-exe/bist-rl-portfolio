@@ -5,9 +5,10 @@ import datetime
 
 import streamlit as st
 
-from config import SEED, DataConfig, EnvConfig, RewardConfig
+from config import SEED, DataConfig, EnvConfig, RewardConfig, cash_daily_rate as _cash_daily_rate
 from env.portfolio_env import HORIZON_PRESETS
-from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
+from core.persistence import MODELS_DIR, model_path
+from ui.services import _load_data, load_saved_agent, load_saved_agent_from_path, save_trained_agent
 from ui.state import _agent_key
 
 _dc = DataConfig()
@@ -236,6 +237,63 @@ def sidebar_controls():
         f"λ={preset['lam']} · τ={preset['tau']} · γ={preset['gamma']}"
     )
 
+    # ------------------------------------------------------------------
+    # N10: Vade gün-aralığı gösterimi + eğitim episode uzunluğu slider
+    # ------------------------------------------------------------------
+    _min_d = preset["min_days"]
+    _max_d = preset["max_days"]
+    _default_steps = preset["train_max_steps"]
+    st.sidebar.caption(
+        f"Vade gün aralığı: {_min_d}–{_max_d} gün  "
+        f"(preset eğitim uzunluğu: {_default_steps} adım)"
+    )
+    # Eğitim episode uzunluğu slider: min_days–max_days; default train_max_steps.
+    # Bu değer train_generator → _make_env → env.max_steps'e bağlanır.
+    # Eval env TAM test dönemini koşmaya devam eder (max_steps=10_000).
+    _cur_steps = int(st.session_state.get("train_max_steps", _default_steps))
+    # Slider min=max olursa Streamlit hata verir; koru.
+    _slider_min = max(1, _min_d)
+    _slider_max = max(_slider_min + 1, _max_d)
+    _cur_steps = max(_slider_min, min(_slider_max, _cur_steps))
+    st.session_state.train_max_steps = st.sidebar.slider(
+        "Eğitim episode uzunluğu (adım)",
+        min_value=_slider_min,
+        max_value=_slider_max,
+        value=_cur_steps,
+        step=max(1, (_slider_max - _slider_min) // 20),
+        help=(
+            f"Her eğitim episodunun kaç adım (iş günü) süreceği. "
+            f"Seçili vade aralığı: {_min_d}–{_max_d} gün. "
+            "Eval/test ortamı bu değerden bağımsız — tam test dönemini koşar."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # N12: Nakit yıllık faiz oranı
+    # ------------------------------------------------------------------
+    _cur_annual = float(st.session_state.get("cash_annual_rate", EnvConfig.cash_annual_rate))
+    _new_annual = st.sidebar.number_input(
+        "Nakit yıllık faiz (risksiz) %",
+        min_value=0.0, max_value=1.0,
+        value=_cur_annual,
+        step=0.05, format="%.2f",
+        help=(
+            "Portföydeki nakit kısmının yıllık bileşik getirisi (risksiz faiz). "
+            "TR 2022-24 mevduat/repo ~ %40 → 0.40. "
+            "Günlük oran: (1+R)^(1/252)-1 formülüyle türetilir. "
+            "Eğitim & test envlerine uygulanır — 'hisse mi nakit mi daha karlı' kıyasını canlı gösterir."
+        ),
+        key="ui_cash_annual_rate",
+    )
+    st.session_state.cash_annual_rate = _new_annual
+    # Günlük oranı hesapla ve session'a yaz — _make_env buradan okur.
+    _daily = _cash_daily_rate(_new_annual, EnvConfig.trading_days)
+    st.session_state.cash_daily_rate = _daily
+    st.sidebar.caption(
+        f"Günlük nakit getirisi: {_daily*100:.5f}%  "
+        f"(yıllık %{_new_annual*100:.1f} → (1+R)^(1/252)-1)"
+    )
+
     _sidebar_reward_editor(preset)
 
     st.session_state.adaptive = st.sidebar.checkbox(
@@ -386,22 +444,63 @@ def sidebar_controls():
             options=[0.005, 0.01, 0.05], value=0.005)
         hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
 
-    # 💾 Model kalıcılığı (PDF §11): eğitilmiş modeli diske kaydet / diskten yükle.
+    # 💾 Model kalıcılığı (PDF §11 + N11): eğitilmiş modeli diske kaydet / diskten yükle.
+    # N11: dosya adı algo_{horizon}_{adaptive}.pt — farklı vade/adaptive birbirini ezmez.
     st.sidebar.divider()
     st.sidebar.subheader("💾 Model (kaydet / yükle)")
+
     cur_key = _agent_key(algo, st.session_state.horizon, st.session_state.adaptive)
     has_trained = (cur_key in st.session_state.trained_agents
                    and st.session_state.trained_agents[cur_key][0] is not None)
     if has_trained and st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
         p = save_trained_agent(algo, st.session_state.horizon, st.session_state.adaptive)
         st.sidebar.success(f"Kaydedildi: {p}")
-    if model_path(algo).exists():
-        if st.sidebar.button(f"📂 Kaydedilmiş {algo} modelini yükle", use_container_width=True):
-            load_saved_agent(algo)
-            st.sidebar.success(f"{algo} modeli yüklendi — Test sekmesinde çalıştırılabilir.")
-            st.rerun()
+
+    # N11: models/*.pt dosyalarını glob'la, selectbox ile göster.
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _saved_files = sorted(MODELS_DIR.glob("*.pt"))
+    if _saved_files:
+        st.sidebar.markdown("**Kayıtlı modeller**")
+        # Dosya adından okunabilir etiket üret: "DQN | short | adaptif"
+        def _pt_label(p):
+            stem = p.stem  # ör. "DQN_short_true"
+            parts = stem.split("_", 2)
+            if len(parts) == 3:
+                _algo_s, _hor_s, _adp_s = parts
+                _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(_hor_s, _hor_s)
+                _adp_tr = "adaptif" if _adp_s == "true" else "sabit"
+                return f"{_algo_s} | {_hor_tr} | {_adp_tr}"
+            return stem
+
+        _labels = [_pt_label(f) for f in _saved_files]
+        _selected_label = st.sidebar.selectbox(
+            "Model seç",
+            options=_labels,
+            key="ui_model_selectbox",
+            help="Kayıtlı modeller — dosya adı: algo_vade_adaptive.pt. "
+                 "Seçip 'Yükle' butonuna bas.",
+        )
+        _sel_idx = _labels.index(_selected_label) if _selected_label in _labels else 0
+        _sel_path = _saved_files[_sel_idx]
+        st.sidebar.caption(f"Dosya: {_sel_path.name}")
+
+        if st.sidebar.button("📂 Seçili modeli yükle", use_container_width=True):
+            result = load_saved_agent_from_path(_sel_path)
+            if result:
+                _lkey, _lmeta = result
+                st.sidebar.success(
+                    f"{_lmeta['algo']} ({_lmeta['horizon']} / "
+                    f"{'adaptif' if _lmeta['adaptive'] else 'sabit'}) yüklendi — "
+                    "Test sekmesinde çalıştırılabilir."
+                )
+                st.rerun()
+            else:
+                st.sidebar.error("Model yüklenemedi.")
     else:
-        st.sidebar.caption(f"Kayıtlı {algo} modeli yok (CLI ile üret: python main.py).")
+        st.sidebar.caption(
+            "Kayıtlı model yok. Eğit ve 'Kaydet' butonunu kullan "
+            "ya da CLI ile üret: python main.py"
+        )
 
     st.sidebar.caption(f"Seed: {SEED} (sabit)")
     return algo, st.session_state.horizon, st.session_state.adaptive, hp

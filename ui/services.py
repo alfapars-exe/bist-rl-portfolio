@@ -15,7 +15,7 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import SEED, ForecastConfig, MacroConfig
 from core.factory import build_agent, build_env
-from core.persistence import load_agent, save_agent
+from core.persistence import load_agent, model_path, save_agent
 from core.trainer import train as train_loop
 from data import align_macro, download_bist, download_macro, train_test_split
 from env.portfolio_env import ACTION_NAMES
@@ -26,30 +26,46 @@ from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
 
 # PDF §11: egitilmis modeller diske burada kaydedilir/yuklenir (sunum kaliciligi).
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
-
-
-def model_path(algo: str) -> Path:
-    return MODELS_DIR / f"{algo}.pt"
+# N11: MODELS_DIR ve model_path artik core.persistence'da tanimlidi; buradan re-export.
+from core.persistence import MODELS_DIR  # noqa: E402 (import blogunun sonunda)
 
 
 def save_trained_agent(algo: str, horizon: str, adaptive: bool):
-    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None)."""
+    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None).
+
+    N11: dosya adi algo_{horizon}_{adaptive}.pt — farkli vade/adaptive birbirini ezmez.
+    """
     entry = st.session_state.trained_agents.get(_agent_key(algo, horizon, adaptive))
     if not entry or entry[0] is None:
         return None
-    return save_agent(entry[0], algo, model_path(algo), horizon=horizon, adaptive=adaptive)
+    path = model_path(algo, horizon, adaptive)
+    return save_agent(entry[0], algo, path, horizon=horizon, adaptive=adaptive)
 
 
-def load_saved_agent(algo: str):
-    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner."""
-    path = model_path(algo)
+def load_saved_agent(algo: str, horizon: str = "medium", adaptive: bool = True):
+    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner.
+
+    N11: horizon + adaptive parametreleri dosya adini belirler.
+    """
+    path = model_path(algo, horizon, adaptive)
     if not path.exists():
         return None
     agent, meta = load_agent(path)
     key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
     st.session_state.trained_agents[key] = (agent, [])   # disk'ten geldi; egitim egrisi yok
     return key
+
+
+def load_saved_agent_from_path(path):
+    """N11: Tam yol verilince dogrudan yukler (selectbox ile secilen model icin)."""
+    from pathlib import Path as _Path
+    path = _Path(path)
+    if not path.exists():
+        return None
+    agent, meta = load_agent(path)
+    key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
+    st.session_state.trained_agents[key] = (agent, [])
+    return key, meta
 
 
 def _load_data():
@@ -107,8 +123,15 @@ def _load_data():
     st.session_state.data_loaded = True
 
 
-def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
-    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3)."""
+def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int,
+              cash_daily_rate: float | None = None):
+    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3).
+
+    N12: cash_daily_rate None verilirse session_state.cash_daily_rate okunur;
+         o da yoksa env kendi config default'unu kullanir.
+    N10: is_train=True ise max_steps egitim episode uzunlugu (sidebar slider'dan);
+         is_train=False ise max_steps=10_000 (tam test donemi — degistirilmez).
+    """
     px_df = st.session_state.px_tr if is_train else st.session_state.px_te
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
     macro = st.session_state.get("macro_tr" if is_train else "macro_te")
@@ -116,12 +139,16 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
     # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
     noise_std = (st.session_state.get("price_noise_std") if is_train else None)
+    # N12: nakit faiz — önce parametre, sonra session_state, sonra env default (None).
+    if cash_daily_rate is None:
+        cash_daily_rate = st.session_state.get("cash_daily_rate", None)
     return build_env(
         algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
         price_noise_std=noise_std,                 # UI σ kontrolü (train-only)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
+        cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
     )
 
 
@@ -144,8 +171,13 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
     'Eğitimi Durdur' butonuyla keser.
 
     resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
-    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
-    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}[algo]
+    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder.
+
+    N10: session_state.train_max_steps varsa o değer kullanılır (sidebar slider);
+         yoksa algo'ya özgü sabit fallback.
+    """
+    _algo_defaults = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}
+    max_steps = int(st.session_state.get("train_max_steps", _algo_defaults.get(algo, 252)))
     env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
     if resume_agent is not None:
         agent = resume_agent

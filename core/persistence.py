@@ -10,6 +10,9 @@ gerekmez. Yukleme core.factory.build_agent ile ayni mimaride iskelet kurup
 state_dict'leri ad'a gore geri yukler (cikarim icin ag agirliklari yeterli —
 optimizer/replay buffer kaydedilmez).
 
+N11: Dosya adi semasindan algo_{horizon}_{adaptive}.pt — ayni algoritmay
+farkli vade/adaptive ile kaydedince birbirinin uzerine yazmaz.
+
 DAVRANIS: golden-irrelevant. Yalniz kalicilik; egitim/odul/eval sayisal yoluna
 dokunmaz.
 """
@@ -23,6 +26,19 @@ import torch.nn as nn
 from core.factory import build_agent
 
 FORMAT = 1
+
+# Tum kaydedilmis modellerin bulundugu dizin (proje koku / models/).
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+
+def model_path(algo: str, horizon: str = "medium", adaptive: bool = True) -> Path:
+    """N11: algo_{horizon}_{adaptive}.pt — vade+adaptive farklilastirir.
+
+    Ornek: model_path("DQN", "short", False) -> models/DQN_short_False.pt
+    Eski tek-dosya yolunun yerine gecer; farkli vade/adaptive birbirini ezmez.
+    """
+    suffix = f"{adaptive}".lower()   # true / false — tutarli, kucuk harf
+    return MODELS_DIR / f"{algo}_{horizon}_{suffix}.pt"
 
 
 def _action_dim(agent) -> int:

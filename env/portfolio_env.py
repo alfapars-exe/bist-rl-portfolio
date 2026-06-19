@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from config import EnvConfig, HORIZON_PRESETS, RewardConfig
+from config import cash_daily_rate as _cash_daily_rate_from_annual
 # P7 (SRP): odul siniflari env/reward.py'ye tasindi; buradan re-export edilir
 # (test_env ve dis kullanicilar `from env.portfolio_env import DifferentialSharpe`
 # yapmaya devam edebilir).
@@ -87,6 +88,7 @@ class PortfolioEnv:
                  seed: int | None = None,
                  price_noise_std: float = EnvConfig.price_noise_std,
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
+                 cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
                  w_cvar: float | None = None,
@@ -170,6 +172,13 @@ class PortfolioEnv:
         self.price_noise_std = float(price_noise_std)
         self._noise_active = (self.price_noise_std > 0.0 and
                               (self.random_start if price_noise_train_only else True))
+        # v10: nakit (risksiz) gunluk faiz. None -> config EnvConfig.cash_annual_rate'ten
+        # bilesik turetilir; UI/CLI gunluk orani dogrudan gecebilir. SABIT skaler -> RNG
+        # cagrisi YOK, _risky_returns'te 0.0 yerine bu oran nakit varliga atanir.
+        self.cash_daily_rate = float(
+            _cash_daily_rate_from_annual(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
+            if cash_daily_rate is None else cash_daily_rate
+        )
         self._reset_state()
 
     def _reset_state(self):
@@ -220,7 +229,9 @@ class PortfolioEnv:
             # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
             r = r + self.rng.normal(0.0, self.price_noise_std, size=r.shape).astype(np.float32)
         if self.cash_asset:
-            r = np.concatenate([r, [0.0]])
+            # v10: nakit varlik artik 0 degil; gunluk risksiz faiz kazanir (SABIT skaler,
+            # RNG kullanmaz -> golden RNG sirasi korunur, yalniz deger degisir).
+            r = np.concatenate([r, [self.cash_daily_rate]])
         return r
 
     def _should_rebalance(self) -> bool:

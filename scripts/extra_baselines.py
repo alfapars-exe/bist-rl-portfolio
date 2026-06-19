@@ -64,8 +64,9 @@ def compute_extra_baselines(px_te: pd.DataFrame) -> dict:
         "MinVariance": min_variance(px_te, lookback=MINVOL_WINDOW, rebalance=REBALANCE),
         # Kesitsel momentum: vade momentum penceresi (kisa/orta/uzun -> 5/20/60).
         "Momentum": momentum(px_te, lookback=MOM_WINDOW, rebalance=REBALANCE, top_k=5),
-        # Nakit taban: sifir risk, sifir getiri (rf=0) -> NAV duz 1.0.
-        "CashRiskFree": cash_riskfree(px_te, daily_rf=0.0),
+        # Nakit taban: GERCEK risksiz faiz (config cash_annual_rate ~%40) -> RL'in
+        # nakit varligiyla SIMETRIK (env de faiz kazanir); NAV ~ (1+rf)^t.
+        "CashRiskFree": cash_riskfree(px_te),
     }
 
 
@@ -106,11 +107,22 @@ def run() -> pd.DataFrame:
           f"{px_te.index[0].date()} -> {px_te.index[-1].date()}  "
           f"(horizon={HORIZON}, rebalance={REBALANCE})")
 
-    # 2) Yeni baseline metriklerini hesapla.
+    # 2) Yeni baseline metriklerini hesapla — ANA STRATEJILERLE AYNI hizali
+    #    pencerede (C1): navs_aligned.csv ortak min_len + yeniden-tabanlama (NAV[0]=1).
+    navs_aligned_csv = RES / "navs_aligned.csv"
+    min_len = (len(pd.read_csv(navs_aligned_csv, index_col=0))
+               if navs_aligned_csv.exists() else len(px_te))
     bts = compute_extra_baselines(px_te)
     new_metrics = {}
     for name, d in bts.items():
-        m = summary(d["nav"], d["rets"], d.get("weights"))
+        nav = np.asarray(d["nav"], dtype=float)[-min_len:]
+        nav = nav / nav[0]                      # ortak pencere baslangicina tabanla
+        rets = (np.asarray(d["rets"], dtype=float)[-min_len:]
+                if d.get("rets") is not None else np.diff(nav) / nav[:-1])
+        w = d.get("weights")
+        if w is not None:
+            w = np.asarray(w)[-min_len:]
+        m = summary(nav, rets, w)
         new_metrics[name] = m
         print(f"[TEST] {name:<12}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
               f"Sortino={m['Sortino']:+.2f}  MaxDD={m['MaxDD']:+.2%}  "

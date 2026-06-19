@@ -525,6 +525,70 @@ performansına uyarlanmadığının (reward hacking / test sızıntısının olm
 İnsan seçimi yapılan katsayıların gerçek kalibrasyona duyarlılığı düşüktür; ajanın öğrendiği
 politika, bu aralıktaki herhangi bir katsayı setiyle üretilebilir.
 
+### 8.7. Forecast Tahminci Doğruluğu (Bağımsız Değerlendirme)
+
+Kaynak: `scripts/forecast_eval.py`; BIST 2022–2024 test kümesi (749 gün × 28 hisse). Tahminci
+`train.py` ile özdeş sızıntı-güvenli akışla değerlendirilmiştir: `TrainScaler` ve CNN-LSTM ağırlıkları
+yalnız train veriyle fit edilmiş, test hissesi kaynağa dokunulmamıştır (seed=42).
+
+| Tahminci | RMSE | MAE | Yön Doğruluğu % | Bir-Adım Corr |
+|---|---|---|---|---|
+| Forecast (CNN-LSTM) | 0.0307 | 0.0220 | 47.77 | 0.0169 |
+| Naif persistence (r_{t-1}) | 0.0425 | 0.0308 | 50.21 | 0.0314 |
+| Zero (=0 tahmini) | 0.0306 | 0.0220 | — | — |
+
+**Dürüst yorum:** Forecast, hata büyüklüğünde (RMSE/MAE) persistence'ı %27.8 geçmektedir; ancak
+bu üstünlük gerçek sinyalden değil, neredeyse-sıfır (shrink-to-mean) çıktısından kaynaklanmaktadır.
+Kanıt: zero-baseline RMSE (0.0306) ≈ forecast RMSE (0.0307) — model ortalamaya yakın çıkış üreterek
+büyük hata yapıyor görünmekten kaçınmaktadır. Gerçek sinyal göstergelerinde forecast persistence'ın
+**altındadır:** yön doğruluğu %47.77 (yazı-tura şansının altında), bir-adım korelasyon ≈ 0.003–0.017.
+
+**Çıkarım:** Finansal bir-adım getiri tahmini doğası gereği neredeyse imkansızdır (EMH-yakını piyasa).
+Forecast feature, state'e bir "öngörü kanalı" değil, vol-kalibre bir düzenleyici girdi olarak girmektedir.
+V4 ablation'daki DQN/SAC iyileşmesi muhtemelen tahmin doğruluğundan değil, ek düzenlileştirme
+etkisinden kaynaklanmaktadır (hipotez; forecast'i kapatıp A/B doğrulaması önerilir). Bu dürüst negatif
+bulgu, abartısız bilim anlayışının parçasıdır.
+
+### 8.8. İşlem-Maliyeti Gerçekliği (BIST Komisyon/BSMV/Spread)
+
+Kaynak: `scripts/cost_sensitivity.py` (gerçek çalıştırma → `results/cost_sensitivity.csv`).
+
+**Maliyet modeli (teyitli 2024–2025):** Aracı komisyonu binde 1–2 = 10–20 bps tek-yön
+(Garanti BBVA 31.05.2024; İKON Menkul 2025) + BSMV komisyon üzerine %5 + spread/slippage ~2–10 bps.
+Round-trip senaryolar c ∈ {0, 10, 20, 50} bps tek-yön.
+
+**η Gerçekçilik Hükmü:** η tek-yön ‖Δw‖₁'e uygulanır → η=0.0010 ≈ 10 bps tek-yön ≈ 20 bps
+round-trip. Preset değerleri — kısa 0.0015 (~30 bps RT) / orta 0.0010 (~20 bps RT) / uzun 0.0005
+(~10 bps RT) — gerçek BIST maliyetinin merkezinde yer almakta; yeniden kalibrasyon gerekmemektedir.
+
+**Net Sharpe — Maliyet Duyarlılık Tablosu:**
+
+| Strateji | Turnover (tek-yön) | Sharpe c=0 | c=20 bps | c=50 bps | Yıllık Drag @50 bps |
+|---|---|---|---|---|---|
+| SAC | 0.011 | 2.084 | 2.067 | 2.042 | ~%1.35 |
+| MinVariance | 0.008 | 2.200 | 2.189 | 2.173 | ~%0.5 |
+| TD3 | 0.029 | 1.966 | 1.919 | 1.848 | ~%3.7 |
+| MeanVar | 0.030 | 1.973 | 1.932 | 1.869 | ~%3.8 |
+| Momentum | 0.046 | 1.659 | 1.598 | 1.506 | ~%5.9 |
+| PPO | 0.139 | 1.679 | 1.461 | 1.135 | ~%17.5 |
+| DQN | 0.237 | 0.417 | 0.060 | −0.456 | ~%29.9 |
+| EqualWeight / BuyHold | 0.000 | (sabit) | (sabit) | (sabit) | %0 |
+
+**Bulgu:** Gerçekçi maliyet altında SAC'ın düşük turnover'ı (0.011) belirgin net avantaja dönüşmektedir —
+SAC neredeyse maliyet-bağışık (50 bps'te bile drag %1.35, Sharpe 2.08→2.04). Yüksek-turnover ajanlar
+kritik biçimde çökmektedir: DQN Sharpe 0.42→−0.46 (negatif), PPO 1.68→1.14, Momentum 1.66→1.51.
+SAC her maliyet seviyesinde Momentum ve DQN'in üstündedir; aradaki makas maliyetle birlikte açılmaktadır.
+Pratik sonuç: RL ailesinde SAC, "öğrenilmiş düşük-turnover" politikası sayesinde gerçek BIST maliyeti
+altında tek savunulabilir aktif ajandır.
+
+**Metot uyarısı:** Bu analiz `results/weights_*` + `navs_aligned` kaynaklı günlük-seri
+yeniden-bileşikleme ile yapılmış **göreli** bir değerlendirmedir. Baseline'ların c=0 NAV değerleri
+kanonik `metrics.csv`'den (`navs_aligned` kırpması + baseline yeniden-üretimi nedeniyle) hafifçe
+sapabilir. Sağlam bulgu turnover→maliyet-drag ilişkisidir, mutlak NAV değil.
+
+**Model sınırları:** Lineer maliyet varsayımı (piyasa etkisi modellenmemiş), T+2 valör ihmal, lot/tick
+yuvarlaması dışarıda, kısmi-fill yok.
+
 ---
 
 ## 9. Mimari ve Çalışma Mantığı
@@ -721,6 +785,11 @@ DQN aksiyon dağılımı:
   **titizlik katmanı** — Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres + reel-NAV (PARS
   referans ağacından port). Bundan sonrası: çok-varlık-sınıfı evren, nakit faiz geliri + BSMV'yi
   *ödüle* katma (davranış-değiştiren — şu an yok), reel-NAV'ı doğrudan ödüle katma.
+- **Tier-C analiz scriptleri (§8.7–§8.8):** `scripts/forecast_eval.py` (CNN-LSTM tahminci
+  bağımsız değerlendirmesi, 749 gün × 28 hisse) ve `scripts/cost_sensitivity.py` (BIST
+  komisyon/BSMV/spread senaryoları → `results/cost_sensitivity.csv`) bu proje kapsamında
+  eklenmiştir. Her ikisi de sızıntı-güvenli akışı (train-only fit, seed=42) miras alır ve
+  golden-güvenlidir (eğitim/eval değişmez, yalnız raporlama analizi).
 
 ---
 

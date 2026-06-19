@@ -335,6 +335,14 @@ def sidebar_controls():
     st.sidebar.divider()
     st.sidebar.subheader(f"🎛 Hiperparametreler ({algo})")
     hp = {}
+    # γ (discount): vade preset default'u; override edilirse hp üzerinden TÜM ajanlara uygulanır.
+    hp["gamma"] = st.sidebar.number_input(
+        "γ (discount / iskonto)", value=float(preset["gamma"]),
+        min_value=0.90, max_value=0.999, step=0.005, format="%.3f",
+        key=f"gamma_{st.session_state.horizon}",
+        help="İskonto faktörü. Vade preset default verir (Kısa 0.95 / Orta 0.99 / Uzun 0.995); "
+             "burada değiştirilebilir — DQN/PPO/SAC/TD3'ün hepsine uygulanır.",
+    )
     if algo == "DQN":
         st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",

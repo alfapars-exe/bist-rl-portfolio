@@ -34,6 +34,7 @@ def _build_dqn(state_dim: int, action_dim: int, hp: dict, seed: int) -> DQNAgent
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", DQNConfig.hidden)),
         lr=hp.get("lr", DQNConfig.lr),
+        gamma=hp.get("gamma", DQNConfig.gamma),
         eps_decay=hp.get("eps_decay", DQNConfig.eps_decay),
         batch_size=hp.get("batch_size", DQNConfig.batch_size),
         target_update=hp.get("target_update", DQNConfig.target_update),
@@ -45,6 +46,7 @@ def _build_ppo(state_dim: int, action_dim: int, hp: dict, seed: int) -> PPOAgent
     return PPOAgent(
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", PPOConfig.hidden)),
+        gamma=hp.get("gamma", PPOConfig.gamma),
         lr_p=hp.get("lr_p", PPOConfig.lr_p), lr_v=hp.get("lr_v", PPOConfig.lr_v),
         clip=hp.get("clip", PPOConfig.clip), ent_coef=hp.get("ent_coef", PPOConfig.ent_coef),
         batch_size=hp.get("batch_size", PPOConfig.batch_size),
@@ -57,6 +59,7 @@ def _build_sac(state_dim: int, action_dim: int, hp: dict, seed: int) -> SACAgent
     return SACAgent(
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", SACConfig.hidden)),
+        gamma=hp.get("gamma", SACConfig.gamma),
         lr_pi=hp.get("lr_pi", SACConfig.lr_pi), lr_q=hp.get("lr_q", SACConfig.lr_q),
         alpha=hp.get("alpha", SACConfig.alpha), tau=hp.get("tau", SACConfig.tau),
         batch_size=hp.get("batch_size", SACConfig.batch_size), seed=seed,

@@ -24,18 +24,20 @@
 | Ödül | `log(1+w·r) − η·‖Δw‖₁ − λ·max(0,DD−τ) − iflas + w_dsr·DSR − κ·CVaR` (adaptif + **rejim-amplified**) |
 | Makro rejim (V6) | faiz (getiri eğrisi), dolar (USD/TRY), altın (gram-altın/TL) + bileşik rejim skoru |
 | Fiyat gürültüsü (V8) | Eğitimde gerçekleşen getiriye slippage (`σ=0.001`) — anti-ezber, hocanın şartı; eval'de kapalı |
+| Nakit faizi (V10) | Nakit varlık risksiz faiz kazanır (`cash_annual_rate=0.40`; günlük `(1+r)^(1/252)-1`); ajan fırsat maliyetini içselleştirir |
 | Algoritmalar | DQN (ayrık), PPO (sürekli on-policy), SAC (sürekli off-policy stokastik), **TD3 (sürekli off-policy deterministik — hocanın tavsiyesi)** |
 | Tahmin katmanı | CNN-LSTM bir-adım getiri tahmincisi (predict-then-optimize, sadece DQN/SAC/TD3) |
+| Adil karşılaştırma (V11) | Re-base hizalama + maliyetli baseline + nakit %40 faiz + PPO deterministik eval + 8 metodoloji düzeltmesi |
 | Doğrulama | 101 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
-> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02, 5-seed) naif 1/N eşit-ağırlık (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde geçememiştir (BuyHold 6.713, EqualWeight 6.685 — en iyi RL SAC 5.502). En olgun katkı: düşük-turnover politikası (SAC turnover 0.011), reprodüklenebilir titizlik çerçevesi ve dürüst çoklu-seed analizi (DQN CV ~%47 → tek-seed güvenilmez; SAC CV ~%1 → en stabil).
+> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141, seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135) risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW 2.090) ve risksiz faiz hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik kararsız (çoklu-seed CV ~%45). V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit faizi) RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez, RL nakiti %0) kaldırıldı.
 
 ---
 
 ## 1. Giriş (Rapor §9.1)
 
-> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02, 5-seed) naif 1/N eşit-ağırlık (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde geçememiştir (BuyHold 6.713, EqualWeight 6.685 — en iyi RL SAC 5.502). En olgun katkı: düşük-turnover politikası (SAC turnover 0.011), reprodüklenebilir titizlik çerçevesi ve dürüst çoklu-seed analizi (DQN CV ~%47 → tek-seed güvenilmez; SAC CV ~%1 → en stabil).
+> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141, seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135) risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW 2.090) ve risksiz faiz hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik kararsız (çoklu-seed CV ~%45). V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit %40 faizi) RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez, RL nakiti %0) kaldırıldı.
 
 **Problem neden önemli?** Portföy yönetimi, sınırlı sermayeyi zaman içinde değişen riskli
 varlıklara dağıtma problemidir. Her gün piyasa yeni bilgi üretir; yatırımcı işlem maliyeti,
@@ -124,7 +126,7 @@ Test dönemi yalnızca 2022–2024 (≈3 yıl, tek kesim) kullanılmıştır. Fa
 | **Rebalans frekansı kısıtı** | Ağırlık yalnızca rebalans günlerinde değişir (kısa=1, orta=5, uzun=20 günde bir); ara günlerde önceki ağırlık korunur |
 | **Düşüş (drawdown) kısıtı** | Tepe-değerden düşüş τ eşiğini aşınca λ ile cezalandırılır (risk yönetimi) |
 | **Güvenlik / iflas kısıtı** | NAV < `bankruptcy_nav` → episode biter, ek ceza (`bankruptcy_penalty`) |
-| **Zaman kısıtı** | Episode en fazla `max_steps` (varsayılan 252 ≈ 1 iş yılı) sürer |
+| **Zaman kısıtı** | Eğitim episode'u en fazla `train_max_steps` (vadeye göre: Kısa 30, Orta 90, Uzun 360 gün) sürer; eval tam test dönemi boyunca çalışır. UI'dan vade aralığı içinde (min_days–max_days) slider ile seçilebilir |
 | **Ayrık eylem kısıtı (DQN)** | DQN yalnızca 6 önceden tanımlı şablondan birini seçebilir; aralık-dışı indeks `ValueError` ile reddedilir |
 | **Sızıntısızlık kısıtı** | Tüm öznitelikler yalnız geçmişe bakar; ölçekleyici (z-score) ve tahminci yalnız train'de fit edilir, test'e uygulanır ama orada fit edilmez |
 
@@ -398,27 +400,30 @@ Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metr
 Reprodüksiyon düzeltmesi sonrası golden artık gerçek anlamda reprodüklenebilirdir: aynı ortamda
 iki ardışık `python main.py` çalıştırmasının tüm metriklerde maksimum farkı 0.0'dır.
 
-**Test dönemi performans tablosu (2022–2024, seed=42):**
+**Adil kanonik (V11: re-base hizalı + maliyetli baseline + nakit %40 faiz; seed=42):**
 
 | Strateji | CAGR | Sharpe | Sortino | MaxDD | Calmar | FinalNAV | Turnover |
 |---|---|---|---|---|---|---|---|
-| DQN | 0.094 | 0.435 | 0.646 | −0.363 | 0.259 | 1.279 | 0.238 |
-| PPO | 0.646 | 1.692 | 2.717 | −0.266 | 2.428 | 3.907 | 0.139 |
-| SAC | 0.866 | 2.102 | 3.414 | −0.254 | 3.404 | 5.502 | 0.011 |
-| TD3 | 0.779 | 1.978 | 3.155 | −0.257 | 3.025 | 4.827 | 0.029 |
-| BuyHold | 0.896 | 1.915 | 2.974 | −0.269 | 3.336 | 6.713 | 0.000 |
-| EqualWeight | 0.893 | 2.083 | 3.309 | −0.263 | 3.401 | 6.685 | 0.000 |
-| MeanVar | 0.912 | 1.973 | 3.153 | −0.335 | 2.726 | 6.888 | 0.030 |
-| RiskParity | 0.900 | 2.119 | 3.366 | −0.253 | 3.563 | 6.755 | 0.009 |
-| InverseVol | 0.920 | 2.142 | 3.407 | −0.255 | 3.606 | 6.970 | 0.006 |
-| MinVariance | 0.998 | 2.297 | 3.628 | −0.233 | 4.277 | 7.844 | 0.022 |
-| Momentum | 0.721 | 1.602 | 2.410 | −0.357 | 2.019 | 5.034 | 0.163 |
-| CashRiskFree | 0.000 | 0.000 | 0.000 | 0.000 | — | 1.000 | 0.000 |
+| DQN | 0.115 | 0.484 | 0.721 | −0.452 | 0.255 | 1.348 | 0.235 |
+| PPO | 0.794 | 2.010 | 3.242 | −0.258 | 3.075 | 4.946 | 0.049 |
+| SAC | 0.877 | 2.141 | 3.484 | −0.254 | 3.457 | 5.595 | 0.011 |
+| TD3 | 0.869 | 2.151 | 3.500 | −0.252 | 3.443 | 5.525 | 0.015 |
+| BuyHold | 0.896 | 1.942 | 3.083 | −0.269 | 3.336 | 5.751 | 0.000 |
+| EqualWeight | 0.882 | 2.090 | 3.390 | −0.263 | 3.354 | 5.636 | 0.000 |
+| MeanVar | 0.895 | 1.959 | 3.186 | −0.338 | 2.651 | 5.739 | 0.033 |
+| RiskParity | 0.894 | 2.135 | 3.466 | −0.253 | 3.536 | 5.733 | 0.009 |
+| InverseVol | 0.917 | 2.162 | 3.515 | −0.255 | 3.590 | 5.922 | 0.006 |
+| MinVariance | 0.992 | 2.317 | 3.738 | −0.236 | 4.202 | 6.578 | 0.023 |
+| Momentum | 0.687 | 1.539 | 2.335 | −0.360 | 1.910 | 4.175 | 0.165 |
+| CashRiskFree | 0.399 | — | — | 0.000 | — | 2.506 | 0.000 |
 
-> **Önemli okuma:** DQN artık iflas eden değil, kârlı ama zayıf ajandır (FinalNAV 1.279,
-> CAGR +9.4%, Sharpe 0.435). Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı geçemedi.
-> Üstelik en iyi RL ajanı SAC (Sharpe 2.10) risk-ayarlı metrikte de MinVariance (Sharpe 2.30)
-> ve InverseVol (Sharpe 2.14) tarafından geçilmektedir. Çoklu-seed güvenilirlik analizi için bkz. §8.5.
+> **V11 okuma notu:** Tablo `results/metrics.csv`'den alınmıştır (12 strateji, 2022–2024,
+> seed=42). V11 metodoloji düzeltmeleriyle (re-base hizalama, maliyetli baseline, nakit %40
+> faizi) RL ve baseline'lar aynı başlangıç noktasından (NAV[0]=1) ve aynı maliyet koşullarından
+> değerlendirilmektedir. TD3 (Sharpe 2.151) ve SAC (Sharpe 2.141) risk-ayarlıda InverseVol
+> (2.162) ve RiskParity (2.135) ile başa baş; EqualWeight (2.090) ve CashRiskFree (NAV 2.506)
+> hurdle'ını geçer. MinVariance (2.317) hâlâ önde. DQN kârlı ama zayıf (NAV 1.348, Sharpe
+> 0.484); çoklu-seed kararsızlığı için bkz. §8.5. Metodoloji ayrıntıları için bkz. §8.9.
 
 **Eğitim özet tablosu (`results/training_diagnostics.csv`):**
 
@@ -481,49 +486,51 @@ Tek bir seed sonucu tesadüf eseri iyi (ya da kötü) çıkabilir. Algoritmalar�
 ölçmek için 5 bağımsız seed (42, 43, 44, 45, 46) üzerinde tam eğitim + test döngüsü çalıştırılmış;
 ort ± std olarak raporlanmıştır. Kaynak: `results/multiseed_summary.csv`.
 
-**Çoklu-seed performans tablosu (5 seed, 2022–2024 test dönemi):**
+**Çoklu-seed performans tablosu (V11 adil kanonik, 5 seed 42–46, 2022–2024 test dönemi):**
 
 | Algoritma | Sharpe ort ± std | FinalNAV ort ± std | CAGR ort ± std | MaxDD ort ± std |
 |---|---|---|---|---|
-| DQN | 0.461 ± 0.218 | 1.368 ± 0.362 | 0.115 ± 0.101 | −0.443 ± 0.088 |
-| PPO | 1.708 ± 0.052 | 3.944 ± 0.134 | 0.652 ± 0.020 | −0.276 ± 0.010 |
-| SAC | 2.086 ± 0.016 | 5.438 ± 0.074 | 0.858 ± 0.009 | −0.254 ± 0.001 |
-| TD3 | 2.046 ± 0.116 | 5.341 ± 0.650 | 0.843 ± 0.079 | −0.257 ± 0.008 |
+| DQN | 0.903 ± 0.408 | 2.204 ± 0.908 | 0.316 ± 0.191 | −0.410 ± 0.072 |
+| PPO | 2.045 ± 0.044 | 5.284 ± 0.211 | 0.838 ± 0.027 | −0.258 ± 0.007 |
+| SAC | 2.123 ± 0.017 | 5.619 ± 0.079 | 0.880 ± 0.010 | −0.254 ± 0.001 |
+| TD3 | 2.122 ± 0.125 | 5.748 ± 0.575 | 0.894 ± 0.072 | −0.253 ± 0.010 |
+
+DQN per-seed FinalNAV: 1.37 / 2.47 / 3.65 / 1.58 / 1.96 (CV ~%45; kanonik seed=42=1.37 düşük gerçekleşmedir).
 
 **Yorum:**
 
-- **DQN patolojik kararsız:** Sharpe CV ≈ %47 (std 0.218 / ort 0.461). Tek bir seed sonucu
-  (§8.3: Sharpe 0.435) bu dağılımın herhangi bir noktası olabilir; DQN sonuçları tek-seed
-  güvenilir değildir. Ayrık şablon eylem uzayı + standart DQN'in BIST ortamında yüksek varyanslı
-  bir politika ürettiğinin kanıtıdır.
-- **SAC en stabil:** Sharpe std yalnızca 0.016 (CV ~%1). FinalNAV std 0.074 — seed değişiminde
+- **DQN patolojik kararsız:** Sharpe CV ≈ %45 (std 0.408 / ort 0.903). Per-seed FinalNAV
+  1.37–3.65 arasında geniş bir bant; kanonik seed=42 (1.348) bu dağılımın alt ucundadır. DQN
+  tek-seed sonuçları yapısal olarak güvenilmez. Ayrık şablon eylem uzayı + standart DQN'in
+  BIST ortamında yüksek varyanslı bir politika ürettiğinin kanıtıdır.
+- **SAC en stabil:** Sharpe std yalnızca 0.017 (CV ~%0.8). FinalNAV std 0.079 — seed değişiminde
   pratik olarak aynı sonuç. Entropi düzenlemesi ve off-policy öğrenme bu stabilitenin kaynağıdır.
 - **TD3 orta kararlılık:** Sharpe std 0.116, FinalNAV std 0.650 — makul ama SAC'tan yüksek.
   Deterministik politika bazı seed'lerde iyi, bazılarında zayıf yerel minimuma takılıyor.
-- **PPO kararlı:** Std düşük (Sharpe 0.052), ama SAC'ın gerisinde kalıyor (ort 1.708 vs 2.086).
-- **Algoritma sıralaması std'lerle ayrışıyor:** SAC ≈ TD3 > PPO >> DQN. Tek-seed sıralama (SAC > TD3
-  > PPO >> DQN) çoklu-seed'de korunmaktadır; DQN'in zayıflığı tek-gerçekleşme değil, yapısal.
+- **PPO kararlı:** Std düşük (Sharpe 0.044), SAC ile başa baş düzeye yaklaştı (ort 2.045 vs 2.123).
+- **Algoritma sıralaması std'lerle ayrışıyor:** SAC ≈ TD3 > PPO >> DQN. Tek-seed sıralama (TD3 > SAC
+  > PPO >> DQN) çoklu-seed ortalamasında da korunmaktadır; DQN'in zayıflığı tek-gerçekleşme değil, yapısal.
 
 ### 8.6. Ödül Katsayı Duyarlılık Analizi (OAT — One-At-a-Time)
 
 Ödül fonksiyonunun 5 temel katsayısı birer birer ±değiştirilerek SAC (seed=42) üzerinde
 etkisi ölçülmüştür. Kaynak: `results/sensitivity.csv`.
 
-**Sharpe yayılımı (her katsayı için maks−min fark):**
+**Sharpe yayılımı (V11, her katsayı için maks−min fark; SAC seed=42):**
 
 | Katsayı | Test değerleri | Sharpe aralığı (maks−min) | Yorumu |
 |---|---|---|---|
-| `eta_base` (işlem cezası) | 0.0005 / 0.001 / 0.002 | 0.041 | En geniş yayılım; işlem maliyeti en duyarlı eksen |
-| `lambda_base` (DD cezası) | 0.25 / 0.50 / 1.00 | 0.011 | Dar yayılım; DD cezası geniş platoda |
-| `tau_base` (DD eşiği) | 0.03 / 0.05 / 0.08 | 0.008 | Pratik fark yok |
-| `w_dsr` (Diferansiyel Sharpe) | 0.0 / 0.05 / 0.10 | 0.022 | DSR hafif iyileştiriyor, kırılgan değil |
-| `w_cvar` (CVaR ağırlığı) | 0.0 / 0.06 / 0.12 | 0.007 | En dar yayılım; CVaR terimi sağlam |
+| `eta_base` (işlem cezası) | 0.0005 / 0.001 / 0.002 | 0.014 | En geniş yayılım; işlem maliyeti en duyarlı eksen |
+| `lambda_base` (DD cezası) | 0.25 / 0.50 / 1.00 | 0.016 | Dar yayılım; DD cezası geniş platoda |
+| `tau_base` (DD eşiği) | 0.03 / 0.05 / 0.08 | 0.002 | Pratik fark yok |
+| `w_dsr` (Diferansiyel Sharpe) | 0.0 / 0.05 / 0.10 | 0.030 | DSR hafif iyileştiriyor, kırılgan değil |
+| `w_cvar` (CVaR ağırlığı) | 0.0 / 0.06 / 0.12 | 0.009 | En dar yayılım; CVaR terimi sağlam |
 
-**Özet:** Tüm katsayılarda Sharpe yayılımı ≤ 0.041 (<%2 baz metriğe göre). Ödül fonksiyonu
-kırılgan bir tepe noktasına değil, **sağlam bir platoya** oturmaktadır. Bu, ödülün test
-performansına uyarlanmadığının (reward hacking / test sızıntısının olmadığının) nicel kanıtıdır.
-İnsan seçimi yapılan katsayıların gerçek kalibrasyona duyarlılığı düşüktür; ajanın öğrendiği
-politika, bu aralıktaki herhangi bir katsayı setiyle üretilebilir.
+**Özet:** Tüm katsayılarda maksimum Sharpe yayılımı 0.030 (<%1.5 baz metriğe göre). Ödül
+fonksiyonu kırılgan bir tepe noktasına değil, **geniş ve sağlam bir platoya** oturmaktadır.
+Bu, ödülün test performansına uyarlanmadığının (reward hacking / test sızıntısının olmadığının)
+nicel kanıtıdır. İnsan seçimi yapılan katsayıların gerçek kalibrasyona duyarlılığı düşüktür;
+ajanın öğrendiği politika, bu aralıktaki herhangi bir katsayı setiyle üretilebilir.
 
 ### 8.7. Forecast Tahminci Doğruluğu (Bağımsız Değerlendirme)
 
@@ -555,39 +562,92 @@ Kaynak: `scripts/cost_sensitivity.py` (gerçek çalıştırma → `results/cost_
 
 **Maliyet modeli (teyitli 2024–2025):** Aracı komisyonu binde 1–2 = 10–20 bps tek-yön
 (Garanti BBVA 31.05.2024; İKON Menkul 2025) + BSMV komisyon üzerine %5 + spread/slippage ~2–10 bps.
-Round-trip senaryolar c ∈ {0, 10, 20, 50} bps tek-yön.
+Round-trip senaryolar c ∈ {0, 10, 20, 50} bps tek-yön (kanonik ödül η=10 bps üstündeki EK maliyet).
+
+**V11 Maliyet Simetrisi Notu:** V11'den itibaren kanonik değerlendirmede maliyet **simetriktir** —
+RL ajanları ve baseline'lar aynı η=10 bps temel maliyetle hesaplanmaktadır. `cost_sensitivity.py`
+bu temel üstüne EK maliyet seviyelerine (0/10/20/50 bps) duyarlılığı gösterir. Önceki asimetrik
+tasarımda (RL maliyet öder, baseline ödemez) RL aleyhine yapısal bir ceza vardı; V11 bunu kaldırdı.
 
 **η Gerçekçilik Hükmü:** η tek-yön ‖Δw‖₁'e uygulanır → η=0.0010 ≈ 10 bps tek-yön ≈ 20 bps
 round-trip. Preset değerleri — kısa 0.0015 (~30 bps RT) / orta 0.0010 (~20 bps RT) / uzun 0.0005
 (~10 bps RT) — gerçek BIST maliyetinin merkezinde yer almakta; yeniden kalibrasyon gerekmemektedir.
 
-**Net Sharpe — Maliyet Duyarlılık Tablosu:**
+**Net Sharpe — EK Maliyet Duyarlılık Tablosu (V11, kanonik η=10 bps üstüne):**
 
-| Strateji | Turnover (tek-yön) | Sharpe c=0 | c=20 bps | c=50 bps | Yıllık Drag @50 bps |
+| Strateji | Turnover (tek-yön) | Sharpe (kanonik) | Sharpe @+20 bps EK | Sharpe @+50 bps EK | Drag @50 bps |
 |---|---|---|---|---|---|
-| SAC | 0.011 | 2.084 | 2.067 | 2.042 | ~%1.35 |
-| MinVariance | 0.008 | 2.200 | 2.189 | 2.173 | ~%0.5 |
-| TD3 | 0.029 | 1.966 | 1.919 | 1.848 | ~%3.7 |
-| MeanVar | 0.030 | 1.973 | 1.932 | 1.869 | ~%3.8 |
-| Momentum | 0.046 | 1.659 | 1.598 | 1.506 | ~%5.9 |
-| PPO | 0.139 | 1.679 | 1.461 | 1.135 | ~%17.5 |
-| DQN | 0.237 | 0.417 | 0.060 | −0.456 | ~%29.9 |
+| SAC | 0.011 | 2.141 | ~2.123 | ~2.108 | ~%1.32 |
+| MinVariance | 0.023 | 2.317 | ~2.298 | ~2.271 | ~%0.5 |
+| TD3 | 0.015 | 2.151 | ~2.127 | ~2.094 | ~%3.0 |
+| MeanVar | 0.033 | 1.959 | ~1.916 | ~1.855 | ~%3.8 |
+| Momentum | 0.165 | 1.539 | ~1.435 | ~1.280 | ~%16.2 |
+| PPO | 0.049 | 2.010 | ~1.942 | ~1.843 | ~%8.3 |
+| DQN | 0.235 | 0.484 | ~0.170 | −0.241 | ~%29.9 |
 | EqualWeight / BuyHold | 0.000 | (sabit) | (sabit) | (sabit) | %0 |
 
-**Bulgu:** Gerçekçi maliyet altında SAC'ın düşük turnover'ı (0.011) belirgin net avantaja dönüşmektedir —
-SAC neredeyse maliyet-bağışık (50 bps'te bile drag %1.35, Sharpe 2.08→2.04). Yüksek-turnover ajanlar
-kritik biçimde çökmektedir: DQN Sharpe 0.42→−0.46 (negatif), PPO 1.68→1.14, Momentum 1.66→1.51.
-SAC her maliyet seviyesinde Momentum ve DQN'in üstündedir; aradaki makas maliyetle birlikte açılmaktadır.
-Pratik sonuç: RL ailesinde SAC, "öğrenilmiş düşük-turnover" politikası sayesinde gerçek BIST maliyeti
-altında tek savunulabilir aktif ajandır.
+**Bulgu:** Gerçekçi EK maliyet altında SAC'ın düşük turnover'ı (0.011) belirgin net avantaja
+dönüşmektedir — SAC neredeyse maliyet-bağışık (50 bps EK'de bile drag ~%1.32, Sharpe 2.141→2.108).
+Yüksek-turnover ajanlar kritik biçimde çökmektedir: DQN Sharpe 0.484→−0.241 (negatif), Momentum
+1.539→1.280, PPO 2.010→1.843. SAC her maliyet seviyesinde DQN ve Momentum'un üstündedir; aradaki
+makas maliyetle birlikte açılmaktadır. Pratik sonuç: RL ailesinde SAC, "öğrenilmiş düşük-turnover"
+politikası sayesinde gerçek BIST maliyeti altında tek savunulabilir aktif ajandır.
 
 **Metot uyarısı:** Bu analiz `results/weights_*` + `navs_aligned` kaynaklı günlük-seri
-yeniden-bileşikleme ile yapılmış **göreli** bir değerlendirmedir. Baseline'ların c=0 NAV değerleri
-kanonik `metrics.csv`'den (`navs_aligned` kırpması + baseline yeniden-üretimi nedeniyle) hafifçe
-sapabilir. Sağlam bulgu turnover→maliyet-drag ilişkisidir, mutlak NAV değil.
+yeniden-bileşikleme ile yapılmış **göreli** bir değerlendirmedir. Sağlam bulgu turnover→maliyet-drag
+ilişkisidir, mutlak NAV değil.
 
 **Model sınırları:** Lineer maliyet varsayımı (piyasa etkisi modellenmemiş), T+2 valör ihmal, lot/tick
 yuvarlaması dışarıda, kısmi-fill yok.
+
+### 8.9. Adil-Karşılaştırma Metodolojisi (V11 Düzeltmeleri)
+
+V11 revizyonu, RL ile klasik baseline'ların **aynı koşullarda** değerlendirilmesini sağlayan 8 metodoloji
+düzeltmesini kapsar. Bu düzeltmeler RL'i yapay olarak güçlendirmek için değil, önceki asimetrik
+tasarımdan kaynaklanan haksız cezayı kaldırmak için uygulanmıştır.
+
+| Kod | Düzeltme | Neden gerekli |
+|-----|----------|---------------|
+| **C1** | **Metrik tarih hizalama + re-base** — RL ve baseline NAV dizileri aynı başlangıç tarihine kırpılır, NAV[0]=1 yeniden normalize edilir | Önceki tasarımda RL ve baseline farklı başlangıç noktalarından ölçülüyordu; CAGR/Calmar karşılaştırması anlamsızlaşıyordu |
+| **C2** | **Maliyetli baseline** — η=10 bps temel maliyet RL ve tüm aktif baseline'lara (MeanVar, RiskParity vb.) eşit uygulanır | Önceki tasarım RL'den işlem maliyeti keserken baseline'lar sıfır maliyetle hesaplanıyordu; asimetrik ceza |
+| **C3** | **Başarı kriteri = EW-benchmark** — episode başarısı eşit-ağırlık (EW) benchmark NAV'ına göre tanımlanır | BuyHold tek-hisse ağırlıklı olduğundan çeşitlendirilmiş portföyler için daha adil referans EW'dir |
+| **C4** | **PPO deterministik eval** — değerlendirmede politika ortalaması (μ) kullanılır, Gaussian örnekleme değil | Stokastik örnekleme eval varyansını artırıyor, karşılaştırmayı gürültülü yapıyordu |
+| **C5** | **`--allow-synthetic` bayrağı** — yfinance erişilemezse sentetik GBM ile çalışmaya izin verir | Pipeline yfinance hatası nedeniyle çöküyor ve kıyaslama yapılamıyordu |
+| **C6** | **Walk-forward makro/rejim** — her fold kendi makro z-score'uyla normalizasyon | Makro özniteliklerin tam dönem istatistiğiyle normalize edilmesi geleceğe sızıntı riski taşıyordu |
+| **C7** | **Ödül log(1+net)** — işlem maliyeti düşüldükten sonraki net getiri üzerinden log-büyüme hesabı | Brüt getiri üzerinden ödül, ajan maliyet bilgisini tam yansıtmıyordu |
+| **C8** | **Grafik açıklamaları (caption)** — her figür metodoloji notunu içerir (kanonik vs EK-maliyet ayrımı) | Okuyucunun tablodaki sayıların hangi maliyet varsayımıyla üretildiğini net görmesi gerekir |
+
+**Temel mesaj:** V11 düzeltmeleri RL'i güçlendirdi çünkü önceki tasarım RL aleyhine yapısal asimetri
+içeriyordu — RL maliyet öder, baseline ödemez; RL nakiti %0 kazanır, gerçek risksiz faiz yok. Bu
+asimetri kaldırılınca RL (özellikle TD3/SAC) risk-bazlı optimize edicilerle başa baş seviyeye geldi.
+
+### 8.10. Action Tasarımı ve Nakit Faizi (Fırsat Maliyeti)
+
+**Portföy kararı:** Ajan her rebalans gününde 29-boyutlu softmax çıktısıyla (28 hisse + 1 nakit)
+portföy ağırlık vektörünü seçer. Bu karar üç unsuru kapsar: (1) hangi hisselere ne ağırlık, (2)
+alım/satım işleminin büyüklüğü (ağırlık değişimi `‖Δw‖₁`), (3) nakit tutma oranı.
+
+**Nakit artık gerçek risksiz faiz kazanıyor (V10):** `EnvConfig.cash_annual_rate = 0.40` (Türkiye
+2022–2024 mevduat/repo düzeyi ~%40, `config.py` satır 137). Günlük oran bileşik tutarlılıkla:
+
+```
+cash_daily_rate = (1 + 0.40)^(1/252) - 1  ≈  0.001328  (%0.13/gün)
+```
+
+Bu oran sabit (RNG çağrısı yok) olduğundan golden RNG sırası korunur; yalnızca NAV bileşimi değişir.
+
+**Fırsat maliyeti içselleştirme:** Ajan nakit tuttuğunda risksiz getiri kazanır; hisse tuttuğunda
+piyasa getirisi eksi işlem maliyeti kazanır. Dolayısıyla ajan örtük olarak "hisse mi nakit mi daha
+kârlı?" sorusunu her adımda çözmektedir — gerçek bir fırsat maliyeti (opportunity cost) hesabı.
+
+**CashRiskFree baseline:** Tüm portföyü nakitte tutan strateji. V11 kanonik tabloda FinalNAV 2.506
+(CAGR %39.9) ile **risksiz hurdle** görevi görür. RL ajanlarının bu hurdle'ı geçmesi, hisse riskine
+değer katıldığının minimum kanıtıdır. TD3/SAC (NAV ~5.5×) bu hurdle'ı yaklaşık 2.2× aşmaktadır.
+
+**Altın ve dolar makro-özellik olarak:** `gold_tl_mom` ve `usd_try_mom` state vektörüne (V6 makro
+bloğu) **rejim sinyali** olarak girer. Bu varlıklar portföyde alınamaz — kapsam kararı olarak
+tradeable yapılmamıştır (evren = 28 BIST hissesi + nakit). Altın/dolar momenti ajanın piyasa
+rejimini algılamasını sağlar, doğrudan pozisyon alamaz. Gelecek iş: çok-varlık-sınıfı evren.
 
 ---
 
@@ -687,9 +747,20 @@ kod/
 Ek paneller: Q-değeri çubuğu (DQN), ödül-terim dekompozisyonu, adaptif katsayı zaman serileri
 (ηₜ/λₜ/τₜ), TL bazlı kâr/zarar ve kümülatif işlem geçmişi.
 
-**💾 Model kalıcılığı (sunum):** Sidebar'daki **💾 Eğitilmiş modeli kaydet** / **📂 Kaydedilmiş
-modeli yükle** ile eğitilmiş ajan diske (`models/{algo}.pt`) yazılır/okunur — sunumda yeniden
-eğitmeden Test çalıştırılabilir. `python main.py` üç ajanı otomatik kaydeder.
+**Model kalıcılığı (sunum):** Sidebar'daki "Eğitilmiş modeli kaydet" / "Kaydedilmiş modeli yükle"
+ile eğitilmiş ajan diske (`models/{algo}_{horizon}_{adaptive}.pt` şemasıyla) yazılır/okunur —
+sunumda yeniden eğitmeden Test çalıştırılabilir. Kaydedilmiş modeller bir selectbox listesiyle
+seçilir; `python main.py` dört ajanı otomatik kaydeder.
+
+**V11 UI eklentileri:**
+- **Nakit faiz alanı:** Sidebar'da `cash_annual_rate` (yıllık %, varsayılan %40) doğrudan girilebilir;
+  günlük bileşik oran `(1+r)^(1/252)-1` formülüyle otomatik türetilir ve ortama enjekte edilir.
+- **Vade gün-limiti slider:** Seçilen vadeye ait `min_days`–`max_days` aralığında (Kısa 1–30,
+  Orta 30–90, Uzun 90–360) kullanıcı episode uzunluğunu ince ayarla seçebilir; `train_max_steps`
+  olarak ortama iletilir.
+- **Kaydedilmiş model listesi (selectbox):** `models/` altındaki `.pt` dosyaları `{algo}_{horizon}_{adaptive}.pt`
+  şemasıyla listelenir; kullanıcı açılır listeden önceden eğitilmiş bir modeli seçip doğrudan
+  Test sekmesine geçebilir.
 
 ### Arayüz ekran görüntüleri
 
@@ -720,13 +791,14 @@ DQN aksiyon dağılımı:
 
 ## 11. Tartışma (Rapor §9.9)
 
-> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02) naif 1/N eşit-ağırlık
-> (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri
-> (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da
-> geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde
-> geçememiştir (BuyHold 6.713, EqualWeight 6.685 — tüm RL NAV'larının üstünde). En olgun
-> katkı: düşük-turnover politikası (SAC 0.011 vs EqualWeight 0.000 arasında), reprodüklenebilir
-> titizlik çerçevesi ve dürüst çoklu-seed analizi. (§8.3, §8.5, §8.6 sayısal dayanak.)
+> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141,
+> seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135)
+> risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW Sharpe 2.090) ve risksiz faiz
+> hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas
+> kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik
+> kararsız (çoklu-seed CV ~%45; per-seed NAV 1.37–3.65). V11 adil-karşılaştırma
+> düzeltmeleri RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez,
+> RL nakiti %0) kaldırıldı. (§8.1, §8.5, §8.9 sayısal dayanak.)
 
 - **İlk state tasarımı neden yetersizdi?** 5 teknik öznitelik tek-ölçekli sinyal veriyordu;
   çoklu-ölçek trend/volatilite ve ileri-görü (forecast) olmadan ajan rejim ayrımı yapamıyordu.
@@ -737,17 +809,18 @@ DQN aksiyon dağılımı:
   ablation forecast'ı yalnız DQN/SAC'a vermeyi gerektirdi.
 - **Ajan hangi davranışı öğrendi?** Düşük-turnover, düşüş-bilinçli tahsis; volatil dönemde
   nakit/ters-volatilite ağırlıklı, sakin dönemde momentum ağırlıklı davranış.
-- **Ajan nerede başarısız kaldı?** Somut bulgular (`results/metrics.csv`, §8.3):
-  - **DQN patolojik kararsız:** Tek-seed Sharpe 0.435, FinalNAV 1.279 (kârlı ama zayıf); çoklu-seed
-    CV ~%47 (Sharpe 0.461 ± 0.218) — tek bir seed sonucu güvenilmez (§8.5). Ayrık şablon tasarımı
-    bu ortamda yüksek varyans üretiyor.
-  - **Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı geçemedi:** BuyHold 6.713, EqualWeight 6.685 —
-    en iyi RL ajanı SAC 5.502. Fark ~%22 NAV, ~3 yıllık test döneminde kapanmıyor.
-  - **Risk-ayarlıda da klasik optimize ediciler önde:** MinVariance Sharpe 2.30, FinalNAV 7.84 ile
-    SAC'ı (Sharpe 2.10, NAV 5.50) hem getiri hem risk-ayarlı metrikte geçmektedir. InverseVol
-    (Sharpe 2.14) ve RiskParity (Sharpe 2.12) de SAC ile başa baş ya da üstündedir. Bu sonuç
-    DeMiguel et al. (2009) ile tutarlı: naif 1/N çeşitlendirmeyi ham Sharpe'ta yenmek zordur;
-    iyi-kurulmuş klasik portföy oluşturucuları RL'den daha güçlü referanslar oluşturabilir.
+- **Ajan nerede başarısız kaldı?** Somut bulgular (`results/metrics.csv`, §8.1):
+  - **DQN patolojik kararsız:** Tek-seed Sharpe 0.484, FinalNAV 1.348 (kârlı ama zayıf); çoklu-seed
+    CV ~%45 (Sharpe 0.903 ± 0.408, per-seed NAV 1.37/2.47/3.65/1.58/1.96) — tek bir seed sonucu
+    güvenilmez (§8.5). Ayrık şablon tasarımı bu ortamda yüksek varyans üretiyor.
+  - **Mutlak NAV'da RL hafif geride:** BuyHold 5.751, EqualWeight 5.636 — en iyi RL ajanı SAC 5.595.
+    Fark kapandı ama kapanmadı (~%0.7 NAV fark SAC-EW; ~%2.8 fark SAC-BuyHold). Adil V11
+    koşullarında fark V10-öncesine göre önemli ölçüde daraldı.
+  - **Risk-ayarlıda klasik optimize edicilerle başa baş veya hafif geride:** MinVariance (Sharpe 2.317)
+    hâlâ önde; InverseVol (2.162) ve TD3 (2.151) / SAC (2.141) pratik olarak aynı seviyede.
+    RiskParity (2.135) ile TD3/SAC başa baş. EW (2.090) RL tarafından geçildi. Bu sonuç DeMiguel
+    et al. (2009) ile kısmen tutarlıdır; ancak V11 adil koşullarında RL ile iyi-kurulmuş risk
+    optimize edicileri arasındaki makas belirgin biçimde kapandı.
   - Ani rejim kırılmalarında tepki gecikmeli; PPO forecast özelliğinden faydalanamadı (on-policy
     + dağılım kayması).
 - **Ezberi nasıl önledik (hocanın şartı)?** Hoca finansal projede gürültüyü açıkça şart koştu:
@@ -781,10 +854,11 @@ DQN aksiyon dağılımı:
   (blok bootstrap + Student-t ağır kuyruk) en iyi RL ajanın 1-yıl ileri VaR/CVaR + felaket olasılığını
   niceler.
 - **Problem daha karmaşık olsaydı ne eklenirdi?** Bu projede zaten eklenenler: **makro rejim** (V6),
-  **rejim-amplified CVaR** (V7), **TD3** (sürekli-deterministik ajan), **fiyat gürültüsü** (V8), ve
-  **titizlik katmanı** — Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres + reel-NAV (PARS
-  referans ağacından port). Bundan sonrası: çok-varlık-sınıfı evren, nakit faiz geliri + BSMV'yi
-  *ödüle* katma (davranış-değiştiren — şu an yok), reel-NAV'ı doğrudan ödüle katma.
+  **rejim-amplified CVaR** (V7), **TD3** (sürekli-deterministik ajan), **fiyat gürültüsü** (V8),
+  **nakit risksiz faizi** (V10, `cash_annual_rate=0.40`), **adil-karşılaştırma metodolojisi** (V11,
+  8 düzeltme), ve **titizlik katmanı** — Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres +
+  reel-NAV (PARS referans ağacından port). Bundan sonrası: çok-varlık-sınıfı evren (altın/dolar
+  tradeable), BSMV'yi ödüle katma, reel-NAV'ı doğrudan ödüle katma, otomatik entropi (SAC-auto-α).
 - **Tier-C analiz scriptleri (§8.7–§8.8):** `scripts/forecast_eval.py` (CNN-LSTM tahminci
   bağımsız değerlendirmesi, 749 gün × 28 hisse) ve `scripts/cost_sensitivity.py` (BIST
   komisyon/BSMV/spread senaryoları → `results/cost_sensitivity.csv`) bu proje kapsamında

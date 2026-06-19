@@ -13,13 +13,16 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Evren**: 28 BIST hissesi (`KOZAA.IS` ve `KOZAL.IS` hariç), 2015-01-01 → 2024-12-31
 - **Durum (güncel)**: ℝ³⁹⁷ = 13 özellik (12 teknik + 1 CNN-LSTM forecast) × 28 hisse + 4 makro + 29 ağırlık (nakit dâhil), train-only z-score — DQN/SAC/TD3; PPO ℝ³⁶⁹ (forecast hariç, 12×28+4+29) (393/365 = makro-öncesi V5 tabanı)
 - **Eylem (DQN)**: 6 şablon (Nakit, Eşit, Top-3 Mom, Top-5 Mom, Ters-Vol, Min-Vol)
-- **Eylem (PPO/SAC)**: 29-boyutlu softmax (sürekli)
+- **Eylem (PPO/SAC/TD3)**: 29-boyutlu softmax (sürekli; 28 hisse + nakit)
 - **Ödül**: `log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)` — 4 terim ayrı ayrı raporlanır
-- **Vade Preset'leri**: Kısa / Orta / Uzun — (η, λ, τ, γ, rebalans frekansı) değişir
+- **Nakit faizi (V10)**: Nakit varlık risksiz faiz kazanır (`cash_annual_rate=0.40`, günlük bileşik); ajan fırsat maliyetini içselleştirir
+- **Adil karşılaştırma (V11)**: Re-base hizalama + maliyetli baseline + nakit %40 faiz + 8 metodoloji düzeltmesi — RL ve baseline aynı koşullarda değerlendirilir
+- **Vade Preset'leri**: Kısa (1–30 gün) / Orta (30–90 gün) / Uzun (90–360 gün) — (η, λ, τ, γ, rebalans frekansı, train_max_steps) değişir; UI'dan aralık içinde slider ile seçilir
+- **Model listesi**: Kaydedilmiş modeller `{algo}_{horizon}_{adaptive}.pt` şemasıyla selectbox'ta listelenir; yeniden eğitmeden Test sekmesine geçilebilir
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
 
-> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02, 5-seed) naif 1/N eşit-ağırlık (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde geçememiştir (BuyHold 6.713, EqualWeight 6.685 — en iyi RL SAC 5.502). En olgun katkı: düşük-turnover politikası (SAC turnover 0.011), reprodüklenebilir titizlik çerçevesi ve dürüst çoklu-seed analizi (DQN CV ~%47 → tek-seed güvenilmez; SAC CV ~%1 → en stabil). Ayrıntılı metrikler: `DOKUMANTASYON.md §8.3`, §8.5 (çoklu-seed), §8.6 (duyarlılık), `§11`.
+> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141, seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135) risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW Sharpe 2.090) ve risksiz faiz hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik kararsız (çoklu-seed CV ~%45; per-seed NAV 1.37–3.65). V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit %40 faizi) RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez, RL nakiti %0) kaldırıldı. Ayrıntılı metrikler: `DOKUMANTASYON.md §8.1`, §8.5 (çoklu-seed), §8.6 (duyarlılık), §8.9 (adil-karşılaştırma metodolojisi), §8.10 (nakit faizi), `§11`.
 
 > **Veri sınırlılıkları:** Evren bugünkü BIST 30 bileşenlerinden seçilmiştir — dönem içinde endeksten çıkan hisseler dahil edilmemiştir (survivorship bias riski). Fiyatlar yfinance `auto_adjust=True` ile temettü/split düzeltmeli kapanış fiyatlarıdır. Bid-ask spread, fiyat limiti ve likidite kısıtları modellenmemiştir. Ayrıntılar: `DOKUMANTASYON.md §2b`.
 
@@ -143,6 +146,8 @@ kod/
 
 | | Kısa | Orta | Uzun |
 |---|---|---|---|
+| Episode gün aralığı (UI slider) | 1–30 gün | 30–90 gün | 90–360 gün |
+| Eğitim episode uzunluğu (`train_max_steps`) | 30 | 90 | 360 |
 | Rebalans (gün) | 1 | 5 | 20 |
 | Momentum pencere | 5 | 20 | 60 |
 | Min-vol pencere | 20 | 60 | 120 |

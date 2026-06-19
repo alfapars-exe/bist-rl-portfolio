@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 37 kaynak dosya, ~5785 satır.**
+**Toplam: 37 kaynak dosya, ~6162 satır.**
 
 ---
 
@@ -37,9 +37,12 @@ SEED = 42
 # rebalans frekansi, momentum/minvol pencereleri, (eta, lam, tau, gamma) base.
 # ---------------------------------------------------------------------
 HORIZON_PRESETS: Dict[str, dict] = {
-    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95),
-    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99),
-    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995),
+    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95,
+                   min_days=1,  max_days=30,  train_max_steps=30),
+    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99,
+                   min_days=30, max_days=90,  train_max_steps=90),
+    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995,
+                   min_days=90, max_days=360, train_max_steps=360),
 }
 
 
@@ -137,6 +140,29 @@ class EnvConfig:
     # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
     price_noise_std: float = 0.001
     price_noise_train_only: bool = True
+    # v10: PARAMETRIK nakit (risksiz) faiz. Nakit varlik artik 0 degil, gunluk risksiz
+    # getiri kazanir. cash_annual_rate gercekci TR 2022-24 mevduat/repo seviyesi (~%40);
+    # UI/CLI'dan ayarlanabilir. Gunluk oran bilesik tutarlilikla turetilir:
+    #   cash_daily_rate = (1 + cash_annual_rate)^(1/252) - 1
+    # SABIT oran -> RNG cagrisi YOK -> golden RNG sirasi korunur (yalniz deger degisir).
+    cash_annual_rate: float = 0.40
+    trading_days: int = 252          # yillik->gunluk bilesik donusum tabani
+
+    @property
+    def cash_daily_rate(self) -> float:
+        """Yillik nakit faizinin bilesik gunluk karsiligi: (1+R)^(1/252) - 1."""
+        return cash_daily_rate(self.cash_annual_rate, self.trading_days)
+
+
+def cash_daily_rate(cash_annual_rate: float, trading_days: int = 252) -> float:
+    """Yillik nakit (risksiz) faizini bilesik gunluk orana cevirir.
+
+    (1 + r_daily)^trading_days = 1 + cash_annual_rate  =>  r_daily = (1+R)^(1/D) - 1.
+    Bagimsiz modul-duzeyi yardimci: env ctor (cash_daily_rate is None) buradan turetir;
+    UI/CLI yillik orani gecerse env gunluk orani hesaplar. RNG kullanmaz (deterministik).
+    """
+    D = max(int(trading_days), 1)
+    return float((1.0 + float(cash_annual_rate)) ** (1.0 / D) - 1.0)
 
 
 # ---------------------------------------------------------------------
@@ -746,9 +772,11 @@ def cagr(nav: np.ndarray) -> float:
 
 
 def sharpe(rets: np.ndarray, rf: float = 0.0) -> float:
+    sd_raw = float(np.std(rets))
+    if sd_raw < 1e-10:          # sabit-getiri (risksiz/nakit) -> Sharpe tanimsiz
+        return float("nan")
     mu = np.mean(rets) - rf / TRADING_DAYS
-    sd = np.std(rets) + 1e-9
-    return float(np.sqrt(TRADING_DAYS) * mu / sd)
+    return float(np.sqrt(TRADING_DAYS) * mu / (sd_raw + 1e-9))
 
 
 def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
@@ -765,7 +793,7 @@ def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
     downside_dev = float(np.sqrt(np.mean(np.minimum(rets - target, 0.0) ** 2)))
     if downside_dev < 1e-12:
         # Hic asagi-yonlu sapma yok: pozitif ortalamada sonsuz, aksi halde 0.
-        return float("inf") if mu > 0 else 0.0
+        return float("nan") if mu > 0 else 0.0   # pozitif sabit-getiri -> tanimsiz
     return float(np.sqrt(TRADING_DAYS) * mu / downside_dev)
 
 
@@ -777,6 +805,8 @@ def max_drawdown(nav: np.ndarray) -> float:
 
 def calmar(nav: np.ndarray) -> float:
     mdd = abs(max_drawdown(nav))
+    if mdd < 1e-10:             # dususuz (risksiz/nakit) -> Calmar tanimsiz
+        return float("nan")
     return cagr(nav) / (mdd + 1e-9)
 
 
@@ -880,21 +910,58 @@ def real_nav(nav: np.ndarray, usdtry: np.ndarray) -> np.ndarray:
 ## `utils/baselines.py`
 
 ```python
-"""Klasik baseline stratejiler — karşılaştırma için."""
+"""Klasik baseline stratejiler — karşılaştırma için.
+
+İŞLEM MALİYETİ SİMETRİSİ (C2):
+RL ortamı her rebalansta `eta·||Δw||₁` işlem maliyeti düşer (env/reward.py →
+tx_cost = eta_t * delta_w_l1). Baseline'lar maliyetsiz olursa ASİMETRİK bir
+karşılaştırma çıkar (baseline yapay olarak avantajlı). Bu yüzden tüm
+YENİDEN-DENGELEYEN baseline'lar (equal_weight, mean_variance, risk_parity,
+inverse_volatility, min_variance, momentum) RL ile SİMETRİK işlem maliyeti
+düşer: her rebalans gününde günlük net getiri = port_r − eta·||w_yeni−w_eski||₁.
+
+eta KAYNAĞI: RL'in kanonik ortamıyla AYNI base oran —
+`config.HORIZON_PRESETS["medium"]["eta"]` (kanonik vade = medium, eta_base=0.0010).
+RL adaptif ölçekleme (turnover_ewma/turnover_target) uygular; baseline'lar
+deterministik kalsın diye SABIT base eta kullanır (RNG yok, golden-uyumlu).
+Fonksiyon imzaları geriye-uyumlu: eta opsiyonel, default = medium preset eta.
+
+buy_and_hold_index rebalans yapmaz → maliyet 0 (değişmez).
+"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
+from config import HORIZON_PRESETS, EnvConfig, cash_daily_rate
 
-def equal_weight(prices: pd.DataFrame) -> dict:
-    """Günlük rebalansla eşit ağırlık."""
+# RL kanonik ortamıyla aynı base işlem-maliyeti oranı (vade = medium).
+DEFAULT_ETA: float = float(HORIZON_PRESETS["medium"]["eta"])
+
+
+def equal_weight(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
+    """Günlük rebalansla eşit ağırlık — RL ile simetrik işlem maliyeti düşülür.
+
+    Her gün eşit-ağırlığa geri dönülür (drift düzeltme). Önceki günkü fiyat
+    hareketiyle kayan ağırlıklar (w_drift) tekrar 1/N'e çekilir; bu rebalansın
+    ||Δw||₁'i kadar `eta` maliyeti net getiriden düşülür. Drift küçük olduğundan
+    maliyet de küçüktür ama 0 değildir (RL ile simetri)."""
     r = prices.pct_change().fillna(0).values
-    N = prices.shape[1]
-    w = np.ones(N) / N
-    rets = (r * w).sum(axis=1)
+    T, N = r.shape
+    w_target = np.ones(N) / N
+    rets = np.empty(T)
+    w_prev = w_target.copy()                  # gün 0 başlangıcı: eşit ağırlık
+    for t in range(T):
+        # Gün başında hedef = eşit ağırlık; rebalans maliyeti w_prev'e göre.
+        turnover = float(np.abs(w_target - w_prev).sum())
+        port_r = float((w_target * r[t]).sum())
+        rets[t] = port_r - eta * turnover
+        # Gün içi getiriyle ağırlıklar kayar (drift) -> ertesi gün w_prev.
+        w_drift = w_target * (1.0 + r[t])
+        s = w_drift.sum()
+        w_prev = w_drift / s if s > 1e-12 else w_target.copy()
     nav = np.cumprod(1 + rets)
-    return dict(nav=nav, rets=rets, weights=np.tile(w, (len(rets), 1)))
+    return dict(nav=nav, rets=rets, weights=np.tile(w_target, (T, 1)))
 
 
 def buy_and_hold_index(prices: pd.DataFrame) -> dict:
@@ -911,8 +978,12 @@ def buy_and_hold_index(prices: pd.DataFrame) -> dict:
 
 
 def mean_variance(prices: pd.DataFrame, lookback: int = 120,
-                  rebalance: int = 20, risk_aversion: float = 5.0) -> dict:
-    """Kısıtlı long-only Markowitz; yuvarlanan pencere + periyodik rebalans."""
+                  rebalance: int = 20, risk_aversion: float = 5.0,
+                  eta: float = DEFAULT_ETA) -> dict:
+    """Kısıtlı long-only Markowitz; yuvarlanan pencere + periyodik rebalans.
+
+    RL ile simetrik: her rebalans gününde ||w_yeni−w_eski||₁ kadar `eta`
+    işlem maliyeti net getiriden düşülür."""
     from scipy.optimize import minimize
 
     r = prices.pct_change().fillna(0).values
@@ -920,6 +991,7 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
     navs = [1.0]; rets = []; w_hist = []
     w = np.ones(N) / N
     for t in range(T):
+        tx = 0.0
         if t >= lookback and (t - lookback) % rebalance == 0:
             hist = r[t - lookback: t]
             mu = hist.mean(axis=0)
@@ -933,8 +1005,10 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
                 bounds=[(0, 0.2)] * N,
                 constraints=({"type": "eq", "fun": lambda w_: w_.sum() - 1}),
             )
-            w = res.x
-        port_r = float((w * r[t]).sum())
+            w_new = res.x
+            tx = eta * float(np.abs(w_new - w).sum())   # RL-simetrik tx-cost
+            w = w_new
+        port_r = float((w * r[t]).sum()) - tx
         rets.append(port_r)
         navs.append(navs[-1] * (1 + port_r))
         w_hist.append(w.copy())
@@ -953,26 +1027,30 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
 # rebalans, ilk lookback gunu esit-agirlik isinma (warm-up).
 # =====================================================================
 def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
-                      rebalance: int) -> dict:
-    """Determinist yuvarlanan-pencere backtest cekirdegi.
+                      rebalance: int, eta: float = DEFAULT_ETA) -> dict:
+    """Determinist yuvarlanan-pencere backtest cekirdegi (RL-simetrik tx-cost).
 
     weight_fn(hist_returns:(L,N), w_prev:(N,)) -> w_new:(N,) dondurur.
     Donen agirliklar long-only normalize edilir (clip>=0, toplam=1).
-    mean_variance ile ayni stilde tx-cost UYGULANMAZ — net edge karsilastirmasi
-    Turnover kolonu uzerinden yapilir (golden tutarliligi). Hicbir np.random
-    cagrisi yok -> golden RNG sirasi etkilenmez."""
+    Her rebalans gununde RL ile SIMETRIK islem maliyeti dusulur:
+        net_r = port_r - eta * ||w_yeni - w_eski||_1
+    eta = config.HORIZON_PRESETS['medium']['eta'] (RL kanonik base oran).
+    Hicbir np.random cagrisi yok -> golden RNG sirasi etkilenmez (determinist)."""
     r = prices.pct_change().fillna(0.0).values
     T, N = r.shape
     navs = [1.0]; rets = []; w_hist = []
     w = np.ones(N) / N
     for t in range(T):
+        tx = 0.0
         if t >= lookback and (t - lookback) % rebalance == 0:
             hist = r[t - lookback: t]
             w_new = np.asarray(weight_fn(hist, w), dtype=float)
             w_new = np.clip(w_new, 0.0, None)
             s = w_new.sum()
-            w = w_new / s if s > 1e-12 else np.ones(N) / N
-        port_r = float((w * r[t]).sum())
+            w_new = w_new / s if s > 1e-12 else np.ones(N) / N
+            tx = eta * float(np.abs(w_new - w).sum())   # RL-simetrik tx-cost
+            w = w_new
+        port_r = float((w * r[t]).sum()) - tx
         rets.append(port_r)
         navs.append(navs[-1] * (1 + port_r))
         w_hist.append(w.copy())
@@ -981,7 +1059,7 @@ def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
 
 
 def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
-                       rebalance: int = 20) -> dict:
+                       rebalance: int = 20, eta: float = DEFAULT_ETA) -> dict:
     """Ters-volatilite (1/sigma) agirligi — yuvarlanan vol uzerinden.
 
     Mantik: w_i ∝ 1/sigma_i (sigma_i = pencere getiri std'i), normalize edilir.
@@ -992,11 +1070,12 @@ def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
     def f(hist, w):
         iv = 1.0 / (hist.std(axis=0) + 1e-9)
         return iv / iv.sum()
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
 def risk_parity(prices: pd.DataFrame, lookback: int = 120,
-                rebalance: int = 20, n_iter: int = 100) -> dict:
+                rebalance: int = 20, n_iter: int = 100,
+                eta: float = DEFAULT_ETA) -> dict:
     """Esit risk katkisi (ERC / risk parity) — iteratif sabit-nokta.
 
     Hedef: her varligin TOPLAM portfoy riskine katkisi esit olsun:
@@ -1015,11 +1094,12 @@ def risk_parity(prices: pd.DataFrame, lookback: int = 120,
             wv = 1.0 / np.maximum(mrc, 1e-8)
             wv /= wv.sum()
         return wv
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
 def min_variance(prices: pd.DataFrame, lookback: int = 120,
-                 rebalance: int = 20, max_weight: float = 0.4) -> dict:
+                 rebalance: int = 20, max_weight: float = 0.4,
+                 eta: float = DEFAULT_ETA) -> dict:
     """Saf minimum-varyans portfoyu — getiri tahmini KULLANMAZ.
 
     Cozulen problem:  min_w  w' Sigma w   s.t.  sum(w)=1, 0<=w_i<=max_weight.
@@ -1037,11 +1117,11 @@ def min_variance(prices: pd.DataFrame, lookback: int = 120,
                    bounds=[(0, max_weight)] * n,
                    constraints=({"type": "eq", "fun": lambda x: x.sum() - 1}))
         return res.x
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
 def momentum(prices: pd.DataFrame, lookback: int = 60, rebalance: int = 20,
-             top_k: int = 5) -> dict:
+             top_k: int = 5, eta: float = DEFAULT_ETA) -> dict:
     """Kesitsel momentum — pencere getirisi en yuksek top_k hisseye esit agirlik.
 
     Mantik: lookback penceresinde kumulatif getiri  cum_i = prod(1+r) - 1
@@ -1058,19 +1138,25 @@ def momentum(prices: pd.DataFrame, lookback: int = 60, rebalance: int = 20,
         out = np.zeros(n)
         out[idx] = 1.0 / len(idx)
         return out
-    return _rolling_backtest(prices, f, lookback, rebalance)
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
-def cash_riskfree(prices: pd.DataFrame, daily_rf: float = 0.0) -> dict:
+def cash_riskfree(prices: pd.DataFrame,
+                  daily_rf: float | None = None) -> dict:
     """Nakit / risk-free benchmark — tum sermaye nakitte, sabit gunluk getiri.
 
     En muhafazakar referans: piyasaya HIC maruz kalmadan elde edilen getiri.
-    daily_rf=0 -> NAV duz 1.0 (sermaye korunumu, sifir risk). Pozitif daily_rf
-    ile basit bir mevduat/repo getirisi modellenir (NAV=(1+rf)^t). Risk
-    varliklarina agirlik 0 oldugundan weights tamamen sifirdir (Turnover=0).
+    daily_rf default'u RL ortamiyla AYNI gercek risksiz faizden gelir:
+        cash_daily_rate(EnvConfig.cash_annual_rate)  (~%40 yillik -> ~0.001336/gun)
+    -> NAV = (1+rf)^t ~ 1.40x/yil (252 gun). Boylece nakit baseline'i de RL'in
+    nakit varligiyla SIMETRIK risksiz getiri kazanir (eski NAV=1.0 / %0 degil).
+    daily_rf acikca verilirse o kullanilir (geriye-uyumlu override). Risk
+    varliklarina agirlik 0 -> weights tamamen sifirdir (Turnover=0).
     'RL piyasaya girmeyi hak ediyor mu?' sorusunun tabanini olusturur: bir ajan
-    bu duz cizgiyi risk-ayarli olarak gecemiyorsa piyasa riskini almak bosunadir.
-    Tamamen determinist (kapali-form, np.random yok)."""
+    bu (artik egimi pozitif) cizgiyi risk-ayarli gecemiyorsa piyasa riskini
+    almak bosunadir. Tamamen determinist (kapali-form, np.random yok)."""
+    if daily_rf is None:
+        daily_rf = cash_daily_rate(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
     T, N = prices.shape
     rets = np.full(T, float(daily_rf))
     nav = np.cumprod(1.0 + rets)
@@ -1715,6 +1801,7 @@ import numpy as np
 import pandas as pd
 
 from config import EnvConfig, HORIZON_PRESETS, RewardConfig
+from config import cash_daily_rate as _cash_daily_rate_from_annual
 # P7 (SRP): odul siniflari env/reward.py'ye tasindi; buradan re-export edilir
 # (test_env ve dis kullanicilar `from env.portfolio_env import DifferentialSharpe`
 # yapmaya devam edebilir).
@@ -1777,6 +1864,7 @@ class PortfolioEnv:
                  seed: int | None = None,
                  price_noise_std: float = EnvConfig.price_noise_std,
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
+                 cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
                  w_cvar: float | None = None,
@@ -1860,6 +1948,13 @@ class PortfolioEnv:
         self.price_noise_std = float(price_noise_std)
         self._noise_active = (self.price_noise_std > 0.0 and
                               (self.random_start if price_noise_train_only else True))
+        # v10: nakit (risksiz) gunluk faiz. None -> config EnvConfig.cash_annual_rate'ten
+        # bilesik turetilir; UI/CLI gunluk orani dogrudan gecebilir. SABIT skaler -> RNG
+        # cagrisi YOK, _risky_returns'te 0.0 yerine bu oran nakit varliga atanir.
+        self.cash_daily_rate = float(
+            _cash_daily_rate_from_annual(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
+            if cash_daily_rate is None else cash_daily_rate
+        )
         self._reset_state()
 
     def _reset_state(self):
@@ -1910,7 +2005,9 @@ class PortfolioEnv:
             # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
             r = r + self.rng.normal(0.0, self.price_noise_std, size=r.shape).astype(np.float32)
         if self.cash_asset:
-            r = np.concatenate([r, [0.0]])
+            # v10: nakit varlik artik 0 degil; gunluk risksiz faiz kazanir (SABIT skaler,
+            # RNG kullanmaz -> golden RNG sirasi korunur, yalniz deger degisir).
+            r = np.concatenate([r, [self.cash_daily_rate]])
         return r
 
     def _should_rebalance(self) -> bool:
@@ -2195,7 +2292,11 @@ class RewardEngine:
 
         peak = max(peak, nav)
         dd = (peak - nav) / max(peak, 1e-9)
-        log_r = float(np.log(max(1.0 + gross_port_r, 1e-6)))
+        # C7: log-getiri NET getiri uzerinden (port_r_net = gross - tx_cost). Boylece
+        # islem maliyeti odule TEK SEFER girer (hem NAV'da hem ayri -tx_cost teriminde
+        # cift sayilmasi giderildi). Log-zenginlik maksimizasyonuyla (Kelly/Moody-Saffell)
+        # tutarli: ajan gerceklesen net log-fayda gorur.
+        log_r = float(np.log(max(1.0 + port_r_net, 1e-6)))
         dd_penalty = lambda_t * max(0.0, dd - tau_t)
         dsr = self.dsharpe.update(port_r_net)
         dsr_term = self.w_dsr * dsr
@@ -2220,12 +2321,15 @@ class RewardEngine:
         ruin_timing_mult = 1.0 + self.w_ruin_timing * (1.0 - step_frac)
         ruin_pen = (self.bankruptcy_penalty * ruin_timing_mult) if bankrupt else 0.0
 
-        total = (log_r - tx_cost - dd_penalty - ruin_pen
+        # C7: -tx_cost AYRI terimi KALDIRILDI; islem maliyeti artik log_r icinde
+        # (log(1+port_r_net), port_r_net = gross - tx_cost). terms["tx_cost"] raporlamada
+        # KALIR ama total'e ayrica EKLENMEZ (cift-sayim giderildi).
+        total = (log_r - dd_penalty - ruin_pen
                  + dsr_term - cvar_penalty + gain_bonus)
 
         # NOT: terms["bankruptcy_penalty"] = ruin_pen (efektif ceza). w_ruin_timing=0
-        # iken ruin_pen == flat bankruptcy_penalty oldugundan mevcut anahtar anlami ve
-        # test_env ozdesligi (total = ... - bankruptcy_penalty + gain_bonus) korunur.
+        # iken ruin_pen == flat bankruptcy_penalty oldugundan mevcut anahtar anlami korunur.
+        # tx_cost terms'te raporlanmaya devam eder (panel/teshis) ama total'e girmez.
         terms = dict(
             log_return=log_r, tx_cost=tx_cost,
             drawdown_penalty=dd_penalty, total=total,
@@ -2620,9 +2724,15 @@ class PPOAgent(BaseAgent):
                 float(v.item()))
 
     def act_eval(self, s: np.ndarray) -> np.ndarray:
-        """Eval: politikadan ornek (mevcut eval davranisiyla birebir ayni — stokastik)."""
-        a, _, _ = self.act(s)
-        return a
+        """Eval: deterministik ortalama (mu) kullan — SAC/TD3/DQN ile tutarli.
+
+        Stokastik sample() yerine politika aginin mu ciktisini dogrudan dondurur;
+        boylece PPO backtest tekraranabilir ve tek-deterministik olur.
+        """
+        s_t = torch.as_tensor(s, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            mu, _ = self.policy(s_t)
+        return mu.cpu().numpy()[0].astype(np.float32)
 
     def remember(self, s, a, r, done, v, logp):
         self.S.append(np.asarray(s, dtype=np.float32))
@@ -3124,14 +3234,21 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               max_steps: int, random_start: bool = False, seed: int = SEED,
               reward_overrides: dict | None = None,
               price_noise_std: float | None = None,
+              cash_daily_rate: float | None = None,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
     reward_overrides (UI'nin reward_cfg'i): None/eksik anahtarlar env'in preset
     default'larina duser — onceki app._make_env mapping'i ile birebir ayni.
+
+    cash_daily_rate: None -> env ctor kendi config'inden turetir (EnvConfig.cash_daily_rate).
+    UI/CLI parametrik gunluk nakit faiz oranini dogrudan gecebilir.
     """
     cfg = reward_overrides or {}
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
+    # cash_daily_rate: None gecilirse env ctor config default'a duser (EnvConfig.cash_daily_rate).
+    # Parametrik gecilirse (UI/CLI) env ctor None olmayan degeri kullanir.
+    extra_cash = {} if cash_daily_rate is None else {"cash_daily_rate": float(cash_daily_rate)}
     return cls(
         prices, select_features(feats, algo),
         horizon=horizon, adaptive=adaptive, max_steps=max_steps,
@@ -3159,6 +3276,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         w_gain_speed=float(cfg.get("w_gain_speed", 0.0)),
         w_ruin_timing=float(cfg.get("w_ruin_timing", 0.0)),
         macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
+        **extra_cash,
     )
 
 ```
@@ -3455,11 +3573,18 @@ def _slice(feats_raw, idx):
 def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
                  n_folds: int = 3, val_frac: float = 0.2, purge: int = 5,
                  n_iters: int = 10, rollout_len: int = 400, seed: int = 42,
-                 horizon: str = "short", adaptive: bool = True) -> dict:
+                 horizon: str = "short", adaptive: bool = True,
+                 macro=None, regime=None) -> dict:
     """Genisleyen-pencere walk-forward.
 
     agent_factory(state_dim, action_dim, seed) -> ajan. Doner:
     {"folds": [metrik dict...], "mean": {...}, "std": {...}}.
+
+    macro: (T, F_macro) numpy dizisi (tam veri uzunlugu, fold icinde dilimlenir).
+           None -> makrosuz ortam (V5 davranisi).
+    regime: (T,) numpy dizisi (tam veri uzunlugu, fold icinde dilimlenir).
+            None -> rejim amplifikasyonu kapali.
+    NOT: forecast feature WF'de DAHIL EDILMEZ (sızıntı-güvenli mevcut karar KORUNUR).
     """
     T = len(prices)
     val_len = max(1, int(T * val_frac / n_folds))
@@ -3486,15 +3611,23 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
         f_tr = sc.transform(_slice(feats_raw, tr_idx))
         f_va = sc.transform(_slice(feats_raw, va_idx))
 
+        # T6 (C6): macro/regime fold dilimleri (None gecilirse None kalir -> makrosuz).
+        macro_tr = macro[:tr_end] if macro is not None else None
+        macro_va = macro[val_start:val_end] if macro is not None else None
+        regime_tr = regime[:tr_end] if regime is not None else None
+        regime_va = regime[val_start:val_end] if regime is not None else None
+
         tr_env = env_cls(prices.loc[tr_idx], f_tr, horizon=horizon, adaptive=adaptive,
-                         max_steps=train_max_steps, random_start=True, seed=seed)
+                         max_steps=train_max_steps, random_start=True, seed=seed,
+                         macro=macro_tr, regime=regime_tr)
         action_dim = tr_env.n_discrete if discrete else tr_env.action_dim
         agent = agent_factory(tr_env.state_dim, action_dim, seed)
         # generator'i sonuna kadar tuket (egitim yan-etkili; ciktiya gerek yok)
         deque(train_loop(agent, tr_env, n_iters=n_iters, rollout_len=rollout_len), maxlen=0)
 
         va_env = env_cls(prices.loc[va_idx], f_va, horizon=horizon, adaptive=adaptive,
-                         max_steps=10_000, random_start=False, seed=seed)
+                         max_steps=10_000, random_start=False, seed=seed,
+                         macro=macro_va, regime=regime_va)
         bt = evaluate(agent, va_env)
         if len(bt["nav"]) > 0:
             fold_metrics.append(summary(bt["nav"], bt["rets"], bt["weights"]))
@@ -3523,6 +3656,9 @@ gerekmez. Yukleme core.factory.build_agent ile ayni mimaride iskelet kurup
 state_dict'leri ad'a gore geri yukler (cikarim icin ag agirliklari yeterli —
 optimizer/replay buffer kaydedilmez).
 
+N11: Dosya adi semasindan algo_{horizon}_{adaptive}.pt — ayni algoritmay
+farkli vade/adaptive ile kaydedince birbirinin uzerine yazmaz.
+
 DAVRANIS: golden-irrelevant. Yalniz kalicilik; egitim/odul/eval sayisal yoluna
 dokunmaz.
 """
@@ -3536,6 +3672,19 @@ import torch.nn as nn
 from core.factory import build_agent
 
 FORMAT = 1
+
+# Tum kaydedilmis modellerin bulundugu dizin (proje koku / models/).
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+
+def model_path(algo: str, horizon: str = "medium", adaptive: bool = True) -> Path:
+    """N11: algo_{horizon}_{adaptive}.pt — vade+adaptive farklilastirir.
+
+    Ornek: model_path("DQN", "short", False) -> models/DQN_short_False.pt
+    Eski tek-dosya yolunun yerine gecer; farkli vade/adaptive birbirini ezmez.
+    """
+    suffix = f"{adaptive}".lower()   # true / false — tutarli, kucuk harf
+    return MODELS_DIR / f"{algo}_{horizon}_{suffix}.pt"
 
 
 def _action_dim(agent) -> int:
@@ -3617,10 +3766,10 @@ from utils.features import add_features, TrainScaler
 from utils.macro import add_macro_features, MacroScaler
 from utils.metrics import summary, training_diagnostics
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
-from config import SEED, TrainConfig, EnvConfig, ForecastConfig, MacroConfig, TD3Config  # noqa: F401
+from config import SEED, TrainConfig, EnvConfig, ForecastConfig, MacroConfig, TD3Config, HORIZON_PRESETS  # noqa: F401
 from core.factory import build_agent, build_env
 from core.features import select_features
-from core.persistence import save_agent
+from core.persistence import save_agent, model_path
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
 
@@ -3693,18 +3842,30 @@ def _feats_for(feats: dict, algo: str) -> dict:
     return select_features(feats, algo)
 
 
+def _ew_nav_train(bundle: DataBundle) -> np.ndarray:
+    """Egitim seti icin esit-agirlikli benchmark NAV dizisi (C3: basari metriginde
+    kullanilir; train fonksiyonlari bu diziyi ew_nav olarak train_loop'a gecer).
+    Sifir boylukta guvenli (None yerine bos dizi degil)."""
+    return equal_weight(bundle.px_tr)["nav"]
+
+
 # -------------------- DQN training --------------------
 def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
               horizon: str = "medium", adaptive: bool = True):
+    # T7: egitim env'i vade-bazli train_max_steps kullanir (medium=90).
+    train_max_steps = int(HORIZON_PRESETS[horizon]["train_max_steps"])
     env = build_env("DQN", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=252, random_start=EnvConfig.random_start, seed=SEED,
+                    max_steps=train_max_steps, random_start=EnvConfig.random_start, seed=SEED,
                     macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("DQN", env.state_dim, env.n_discrete, seed=SEED)
+    # C3: egitim seti EW benchmark'i — trainer success_vs_benchmark'e gecer.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_episodes):
+    for rec in train_loop(agent, env, n_iters=n_episodes, ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir (success_vs_benchmark); override yok.
         curve.append(dict(episode=rec["episode"], reward=rec["reward"],
                           train_nav=rec["train_nav"], eps=rec["eps"],
-                          gain=rec["gain"], success=int(rec["nav"] > 1.0),
+                          gain=rec["gain"], success=rec["success"],
                           steps=len(rec.get("actions") or [])))
         print(f"[DQN] ep {rec['episode']:02d}  ret={rec['reward']:+.3f}  "
               f"NAV={rec['train_nav']:.3f}  eps={rec['eps']:.3f}")
@@ -3715,16 +3876,24 @@ def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
 def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
               rollout_len: int = TrainConfig.ppo_rollout_len,
               horizon: str = "medium", adaptive: bool = True):
+    # T7: PPO on-policy; rollout_len zaten episode'u belirler; max_steps > rollout_len olsun.
+    # Vade bazlı train_max_steps ile uyumlu (büyük değer verirsek sorun yok ama
+    # train_max_steps * 5 ile rollout'ların kesintisiz akmasına izin verelim).
+    train_max_steps = int(HORIZON_PRESETS[horizon]["train_max_steps"]) * 5
     env = build_env("PPO", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=10_000, random_start=EnvConfig.random_start, seed=SEED,
+                    max_steps=train_max_steps, random_start=EnvConfig.random_start, seed=SEED,
                     macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("PPO", env.state_dim, env.action_dim, seed=SEED)
+    # C3: egitim seti EW benchmark'i.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len):
+    for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len,
+                          ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir; override yok.
         curve.append(dict(update=rec["update"], p_loss=rec["p_loss"], v_loss=rec["v_loss"],
                           ent=rec["ent"], kl=rec["kl"], mean_nav=rec["mean_nav"],
                           reward=rec["reward"], gain=rec["gain"],
-                          success=int(rec["mean_nav"] > 1.0), steps=rollout_len))
+                          success=rec["success"], steps=rollout_len))
         print(f"[PPO] upd {rec['update']:02d}  p_loss={rec['p_loss']:.3f} "
               f"v_loss={rec['v_loss']:.3f} ent={rec['ent']:.2f} kl={rec['kl']:.3f}")
     return agent, curve
@@ -3734,16 +3903,24 @@ def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
 def train_sac(bundle: DataBundle, n_episodes: int = TrainConfig.sac_episodes,
               max_steps_per_episode: int = TrainConfig.sac_episode_len,
               horizon: str = "medium", adaptive: bool = True):
+    # T7: egitim env'i vade-bazli train_max_steps ile sinirlanir.
+    # sac_episode_len config degeri zaten train_max_steps ile uyumlu;
+    # HORIZON_PRESETS[horizon]["train_max_steps"] yoksa sac_episode_len'e duser.
+    train_max_steps = int(HORIZON_PRESETS[horizon]["train_max_steps"])
+    effective_steps = max(train_max_steps, max_steps_per_episode)
     env = build_env("SAC", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=max_steps_per_episode,
+                    max_steps=effective_steps,
                     random_start=EnvConfig.random_start, seed=SEED,
                     macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("SAC", env.state_dim, env.action_dim, seed=SEED)
+    # C3: egitim seti EW benchmark'i.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_episodes):
+    for rec in train_loop(agent, env, n_iters=n_episodes, ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir; override yok.
         curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"],
                           reward=rec["reward"], gain=rec["gain"],
-                          success=int(rec["nav"] > 1.0)))
+                          success=rec["success"]))
         print(f"[SAC] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 
@@ -3753,24 +3930,33 @@ def train_td3(bundle: DataBundle, n_episodes: int = TrainConfig.td3_episodes,
               max_steps_per_episode: int = TrainConfig.td3_episode_len,
               horizon: str = "medium", adaptive: bool = True):
     # TD3 surekli-kontrol (hocanin tavsiyesi) — SAC ile ayni off-policy rejim.
+    # T7: egitim env'i vade-bazli train_max_steps ile sinirlanir.
+    train_max_steps = int(HORIZON_PRESETS[horizon]["train_max_steps"])
+    effective_steps = max(train_max_steps, max_steps_per_episode)
     env = build_env("TD3", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=max_steps_per_episode,
+                    max_steps=effective_steps,
                     random_start=EnvConfig.random_start, seed=SEED,
                     macro=bundle.macro_tr, regime=bundle.regime_tr)
     agent = build_agent("TD3", env.state_dim, env.action_dim, seed=SEED)
+    # C3: egitim seti EW benchmark'i.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_episodes):
+    for rec in train_loop(agent, env, n_iters=n_episodes, ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir; override yok.
         curve.append({"episode": rec["episode"], "train_nav": rec["train_nav"], "steps": rec["steps"],
                       "reward": rec["reward"], "gain": rec["gain"],
-                      "success": int(rec["nav"] > 1.0)})
+                      "success": rec["success"]})
         print(f"[TD3] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 
 
 # -------------------- Evaluation --------------------
 def evaluate(bundle: DataBundle, agent, algo: str, horizon: str = "medium", adaptive: bool = True):
+    # T7: eval env TAM test donemini kosturur — max_steps = len(test) (backtest
+    # tum test penceresini kapsar, egitim episode uzunlugundan bagimsiz).
+    eval_max_steps = len(bundle.px_te) + 10   # +10: env sinir kontrolune karsı tampon
     env = build_env(algo, bundle.px_te, bundle.feats_te, horizon=horizon, adaptive=adaptive,
-                    max_steps=10_000, macro=bundle.macro_te, regime=bundle.regime_te)
+                    max_steps=eval_max_steps, macro=bundle.macro_te, regime=bundle.regime_te)
     return rollout_evaluate(agent, env)
 
 
@@ -3798,30 +3984,55 @@ def run():
     print("TD3 total time:", round(time.time() - t3, 1), "s")
 
     print("=" * 60)
-    results = {}
+
+    # ---- T2 (C1): once ham eval; sonra ORTAK min_len ile hizala; metrics.csv
+    # hizali dizilerden uretilir -> RL + baseline ayni gun sayisinda kiyaslanir. ----
+    raw_results = {}
     for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent),
                         ("SAC", sac_agent), ("TD3", td3_agent)]:
         bt = evaluate(bundle, agent, name)
-        m = summary(bt["nav"], bt["rets"], bt["weights"])
-        results[name] = dict(backtest=bt, metrics=m)
-        print(f"[TEST] {name:<3}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
-              f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
+        raw_results[name] = bt
 
-    print("-" * 60)
     bh = buy_and_hold_index(bundle.px_te)
     ew = equal_weight(bundle.px_te)
     mv = mean_variance(bundle.px_te, lookback=120, rebalance=20)
     for name, d in [("BuyHold", bh), ("EqualWeight", ew), ("MeanVar", mv)]:
-        m = summary(d["nav"], d["rets"], d.get("weights"))
-        results[name] = dict(backtest=d, metrics=m)
+        raw_results[name] = d
+
+    # Ortak takvim kuyruğu: tum stratejilerin NAV dizilerinin minimum uzunlugu.
+    min_len = min(len(v["nav"]) for v in raw_results.values())
+
+    results = {}
+    for name, bt in raw_results.items():
+        # Hizalama: son min_len elemanı al (ortak takvim kuyruğu) VE ortak pencere
+        # başlangıcına YENİDEN-TABANLA (NAV[0]=1) -> FinalNAV/CAGR tüm stratejiler
+        # için AYNI pencere büyümesini ölçer; baseline'lar RL'in görmediği ilk
+        # ~window günü dahil etmez (C1 adil karşılaştırma tam olarak sağlanır).
+        nav_aligned  = np.array(bt["nav"], dtype=float)[-min_len:]
+        nav_aligned  = nav_aligned / nav_aligned[0]
+        rets_aligned = np.array(bt["rets"])[-min_len:] if bt.get("rets") is not None else np.diff(nav_aligned) / nav_aligned[:-1]
+        w_aligned    = bt.get("weights")
+        if w_aligned is not None:
+            w_aligned = np.array(w_aligned)[-min_len:]
+        # Hizali diziler uzerinden metrik hesapla (C1 duzeltme).
+        m = summary(nav_aligned, rets_aligned, w_aligned)
+        results[name] = dict(backtest=bt, nav_aligned=nav_aligned, metrics=m)
+        if name in ("DQN", "PPO", "SAC", "TD3"):
+            print(f"[TEST] {name:<3}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
+                  f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
+
+    print("-" * 60)
+    for name in ("BuyHold", "EqualWeight", "MeanVar"):
+        m = results[name]["metrics"]
         print(f"[TEST] {name:<12}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
               f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
 
-    min_len = min(len(v["backtest"]["nav"]) for v in results.values())
-    dfn = pd.DataFrame({k: v["backtest"]["nav"][-min_len:] for k, v in results.items()})
+    # navs_aligned.csv: hizali NAV dizileri (T2: metrics.csv ile AYNI pencere).
+    dfn = pd.DataFrame({k: v["nav_aligned"] for k, v in results.items()})
     dfn.index = bundle.px_te.index[-min_len:]
     dfn.to_csv(RES / "navs_aligned.csv")
 
+    # metrics.csv: hizali dizilerden hesaplanan metrikler (C1 duzeltme).
     met_df = pd.DataFrame({k: v["metrics"] for k, v in results.items()}).T
     met_df.to_csv(RES / "metrics.csv")
     print(met_df.round(4))
@@ -3841,7 +4052,7 @@ def run():
     # PDF §11: egitilmis modelleri diske kaydet (sunumda yeniden egitmeden test).
     for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent),
                         ("SAC", sac_agent), ("TD3", td3_agent)]:
-        save_agent(agent, name, MODELS / f"{name}.pt", horizon="medium", adaptive=True)
+        save_agent(agent, name, model_path(name, "medium", True), horizon="medium", adaptive=True)
     print("Modeller kaydedildi:", MODELS)
 
     for name in ["DQN", "PPO", "SAC", "TD3"]:
@@ -3894,7 +4105,7 @@ RES.mkdir(exist_ok=True)
 FIG.mkdir(exist_ok=True)
 
 
-def step_data():
+def step_data(allow_synthetic: bool = False):
     print("=" * 70)
     print("[1/4] BIST 28 fiyatları hazırlanıyor ...")
     print("=" * 70)
@@ -3902,6 +4113,14 @@ def step_data():
     from utils.features import add_features
     prices_path = RES / "bist30_prices.csv"
     px = download_bist()
+    # T5 (C5): sentetik veri koruması — akademik sonuç sentetik veriyle üretilemez.
+    if px.attrs.get("synthetic") and not allow_synthetic:
+        raise SystemExit(
+            "HATA: sentetik veri ile akademik sonuc uretilemez; "
+            "--allow-synthetic bayragi ile zorla."
+        )
+    if px.attrs.get("synthetic") and allow_synthetic:
+        print("  UYARI: Sentetik veri kullaniliyor (--allow-synthetic aktif).")
     px.to_csv(prices_path)
     feats = add_features(px)
     for name, f in feats.items():
@@ -3909,12 +4128,21 @@ def step_data():
     print(f"  Kaydedildi: {prices_path}  (shape={px.shape})")
 
 
-def step_train():
+def step_train(allow_synthetic: bool = False):
     print("=" * 70)
     print("[2/4] DQN + PPO + SAC + TD3 eğitimi ve backtest ...")
     print("=" * 70)
-    import train
-    train.run()
+    # T5 (C5): egitim adiminda da sentetik veri kontrolu (veri indirilmeden
+    # dogrudan --skip-data ile train atlandiysa cache'den gelir).
+    from data import download_bist
+    px = download_bist()
+    if px.attrs.get("synthetic") and not allow_synthetic:
+        raise SystemExit(
+            "HATA: sentetik veri ile akademik sonuc uretilemez; "
+            "--allow-synthetic bayragi ile zorla."
+        )
+    import train as train_mod
+    train_mod.run()
 
 
 def step_rigor():
@@ -3938,21 +4166,36 @@ def step_walkforward():
     print("=" * 70)
     print("[WF] Walk-forward dogrulama (PPO, train donemi, fold-yerel olcekleme) ...")
     print("=" * 70)
-    from data import download_bist, train_test_split
+    from data import download_bist, train_test_split, download_macro, align_macro
     from utils.features import add_features
+    from utils.macro import add_macro_features, MacroScaler
     from core.walkforward import walk_forward
     from agents import PPOAgent
-    from config import PPOConfig, SEED
+    from config import PPOConfig, SEED, MacroConfig
+    import numpy as np
     px = download_bist()
     px_tr, _ = train_test_split(px)
     feats_raw = add_features(px_tr)        # teknik feat (forecast haric -> fold-yerel leak-safe)
+
+    # T6 (C6): macro/regime walk-forward'a gecirilir (fold icinde dilimlenir).
+    # Forecast feature WF'de DAHIL EDILMEZ (sizinti-guvenli mevcut karar KORUNUR).
+    macro_tr = regime_tr = None
+    if MacroConfig.enabled:
+        mraw = align_macro(download_macro(), px.index)
+        mfeat = add_macro_features(mraw)
+        regime_full = mfeat["regime"]
+        msc = MacroScaler().fit(mfeat.loc[px_tr.index])   # YALNIZ train (sizintisiz)
+        macro_z = msc.transform(mfeat.loc[px_tr.index])
+        macro_tr = macro_z.to_numpy(np.float32)
+        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
 
     def ppo_factory(sd, ad, seed):
         return PPOAgent(sd, ad, hidden=PPOConfig.hidden, lr_p=PPOConfig.lr_p,
                         lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
                         n_epochs=PPOConfig.n_epochs, seed=seed)
 
-    rep = walk_forward(px_tr, feats_raw, ppo_factory, n_folds=3, n_iters=12, seed=SEED)
+    rep = walk_forward(px_tr, feats_raw, ppo_factory, n_folds=3, n_iters=12, seed=SEED,
+                       macro=macro_tr, regime=regime_tr)
     print(f"  Fold sayisi: {len(rep['folds'])}")
     for key in ("CAGR", "Sharpe", "Sortino", "MaxDD", "Calmar"):
         print(f"  {key:<8} mean={rep['mean'].get(key, 0):+.4f}  std={rep['std'].get(key, 0):.4f}")
@@ -3966,11 +4209,14 @@ def main():
     ap.add_argument("--skip-plots", action="store_true", help="Çizim adımını atla")
     ap.add_argument("--skip-rigor", action="store_true", help="Titizlik (DSR/PBO/stres) adımını atla")
     ap.add_argument("--walkforward", action="store_true", help="Walk-forward doğrulama çalıştır (v2)")
+    # T5 (C5): sentetik veri koruması — akademik sonuç sentetik veriyle üretilemez.
+    ap.add_argument("--allow-synthetic", action="store_true",
+                    help="Sentetik/eksik BIST verisiyle çalışmaya izin ver (yalnız test/debug için)")
     args = ap.parse_args()
 
     t0 = time.time()
-    if not args.skip_data:  step_data()
-    if not args.skip_train: step_train()
+    if not args.skip_data:  step_data(allow_synthetic=args.allow_synthetic)
+    if not args.skip_train: step_train(allow_synthetic=args.allow_synthetic)
     if not args.skip_rigor: step_rigor()       # plot'tan ÖNCE (F11-F13 rigor çıktısını okur)
     if not args.skip_plots: step_plots()
     if args.walkforward:    step_walkforward()
@@ -4364,7 +4610,7 @@ def main():
     algo, horizon, adaptive, hp = sidebar_controls()
 
     st.title("📈 BIST 28 Pekiştirmeli Öğrenme Portföy Yönetimi")
-    st.caption("UYİK 2026 · DQN/PPO/SAC · Vade preset'leri · Adaptif ödül şekillendirici")
+    st.caption("UYİK 2026 · DQN/PPO/SAC/TD3 · Vade preset'leri · Adaptif ödül şekillendirici")
 
     t1, t2, t3, t4 = st.tabs([
         "📐 Veri & MDP",
@@ -4481,7 +4727,7 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import SEED, ForecastConfig, MacroConfig
 from core.factory import build_agent, build_env
-from core.persistence import load_agent, save_agent
+from core.persistence import load_agent, model_path, save_agent
 from core.trainer import train as train_loop
 from data import align_macro, download_bist, download_macro, train_test_split
 from env.portfolio_env import ACTION_NAMES
@@ -4492,30 +4738,46 @@ from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
 
 # PDF §11: egitilmis modeller diske burada kaydedilir/yuklenir (sunum kaliciligi).
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
-
-
-def model_path(algo: str) -> Path:
-    return MODELS_DIR / f"{algo}.pt"
+# N11: MODELS_DIR ve model_path artik core.persistence'da tanimlidi; buradan re-export.
+from core.persistence import MODELS_DIR  # noqa: E402 (import blogunun sonunda)
 
 
 def save_trained_agent(algo: str, horizon: str, adaptive: bool):
-    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None)."""
+    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None).
+
+    N11: dosya adi algo_{horizon}_{adaptive}.pt — farkli vade/adaptive birbirini ezmez.
+    """
     entry = st.session_state.trained_agents.get(_agent_key(algo, horizon, adaptive))
     if not entry or entry[0] is None:
         return None
-    return save_agent(entry[0], algo, model_path(algo), horizon=horizon, adaptive=adaptive)
+    path = model_path(algo, horizon, adaptive)
+    return save_agent(entry[0], algo, path, horizon=horizon, adaptive=adaptive)
 
 
-def load_saved_agent(algo: str):
-    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner."""
-    path = model_path(algo)
+def load_saved_agent(algo: str, horizon: str = "medium", adaptive: bool = True):
+    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner.
+
+    N11: horizon + adaptive parametreleri dosya adini belirler.
+    """
+    path = model_path(algo, horizon, adaptive)
     if not path.exists():
         return None
     agent, meta = load_agent(path)
     key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
     st.session_state.trained_agents[key] = (agent, [])   # disk'ten geldi; egitim egrisi yok
     return key
+
+
+def load_saved_agent_from_path(path):
+    """N11: Tam yol verilince dogrudan yukler (selectbox ile secilen model icin)."""
+    from pathlib import Path as _Path
+    path = _Path(path)
+    if not path.exists():
+        return None
+    agent, meta = load_agent(path)
+    key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
+    st.session_state.trained_agents[key] = (agent, [])
+    return key, meta
 
 
 def _load_data():
@@ -4573,8 +4835,15 @@ def _load_data():
     st.session_state.data_loaded = True
 
 
-def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
-    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3)."""
+def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int,
+              cash_daily_rate: float | None = None):
+    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3).
+
+    N12: cash_daily_rate None verilirse session_state.cash_daily_rate okunur;
+         o da yoksa env kendi config default'unu kullanir.
+    N10: is_train=True ise max_steps egitim episode uzunlugu (sidebar slider'dan);
+         is_train=False ise max_steps=10_000 (tam test donemi — degistirilmez).
+    """
     px_df = st.session_state.px_tr if is_train else st.session_state.px_te
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
     macro = st.session_state.get("macro_tr" if is_train else "macro_te")
@@ -4582,12 +4851,16 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
     # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
     noise_std = (st.session_state.get("price_noise_std") if is_train else None)
+    # N12: nakit faiz — önce parametre, sonra session_state, sonra env default (None).
+    if cash_daily_rate is None:
+        cash_daily_rate = st.session_state.get("cash_daily_rate", None)
     return build_env(
         algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
         price_noise_std=noise_std,                 # UI σ kontrolü (train-only)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
+        cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
     )
 
 
@@ -4610,8 +4883,13 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
     'Eğitimi Durdur' butonuyla keser.
 
     resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
-    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
-    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}[algo]
+    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder.
+
+    N10: session_state.train_max_steps varsa o değer kullanılır (sidebar slider);
+         yoksa algo'ya özgü sabit fallback.
+    """
+    _algo_defaults = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}
+    max_steps = int(st.session_state.get("train_max_steps", _algo_defaults.get(algo, 252)))
     env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
     if resume_agent is not None:
         agent = resume_agent
@@ -4806,9 +5084,10 @@ import datetime
 
 import streamlit as st
 
-from config import SEED, DataConfig, EnvConfig, RewardConfig
+from config import SEED, DataConfig, EnvConfig, RewardConfig, cash_daily_rate as _cash_daily_rate
 from env.portfolio_env import HORIZON_PRESETS
-from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
+from core.persistence import MODELS_DIR, model_path
+from ui.services import _load_data, load_saved_agent, load_saved_agent_from_path, save_trained_agent
 from ui.state import _agent_key
 
 _dc = DataConfig()
@@ -5037,6 +5316,63 @@ def sidebar_controls():
         f"λ={preset['lam']} · τ={preset['tau']} · γ={preset['gamma']}"
     )
 
+    # ------------------------------------------------------------------
+    # N10: Vade gün-aralığı gösterimi + eğitim episode uzunluğu slider
+    # ------------------------------------------------------------------
+    _min_d = preset["min_days"]
+    _max_d = preset["max_days"]
+    _default_steps = preset["train_max_steps"]
+    st.sidebar.caption(
+        f"Vade gün aralığı: {_min_d}–{_max_d} gün  "
+        f"(preset eğitim uzunluğu: {_default_steps} adım)"
+    )
+    # Eğitim episode uzunluğu slider: min_days–max_days; default train_max_steps.
+    # Bu değer train_generator → _make_env → env.max_steps'e bağlanır.
+    # Eval env TAM test dönemini koşmaya devam eder (max_steps=10_000).
+    _cur_steps = int(st.session_state.get("train_max_steps", _default_steps))
+    # Slider min=max olursa Streamlit hata verir; koru.
+    _slider_min = max(1, _min_d)
+    _slider_max = max(_slider_min + 1, _max_d)
+    _cur_steps = max(_slider_min, min(_slider_max, _cur_steps))
+    st.session_state.train_max_steps = st.sidebar.slider(
+        "Eğitim episode uzunluğu (adım)",
+        min_value=_slider_min,
+        max_value=_slider_max,
+        value=_cur_steps,
+        step=max(1, (_slider_max - _slider_min) // 20),
+        help=(
+            f"Her eğitim episodunun kaç adım (iş günü) süreceği. "
+            f"Seçili vade aralığı: {_min_d}–{_max_d} gün. "
+            "Eval/test ortamı bu değerden bağımsız — tam test dönemini koşar."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # N12: Nakit yıllık faiz oranı
+    # ------------------------------------------------------------------
+    _cur_annual = float(st.session_state.get("cash_annual_rate", EnvConfig.cash_annual_rate))
+    _new_annual = st.sidebar.number_input(
+        "Nakit yıllık faiz (risksiz) %",
+        min_value=0.0, max_value=1.0,
+        value=_cur_annual,
+        step=0.05, format="%.2f",
+        help=(
+            "Portföydeki nakit kısmının yıllık bileşik getirisi (risksiz faiz). "
+            "TR 2022-24 mevduat/repo ~ %40 → 0.40. "
+            "Günlük oran: (1+R)^(1/252)-1 formülüyle türetilir. "
+            "Eğitim & test envlerine uygulanır — 'hisse mi nakit mi daha karlı' kıyasını canlı gösterir."
+        ),
+        key="ui_cash_annual_rate",
+    )
+    st.session_state.cash_annual_rate = _new_annual
+    # Günlük oranı hesapla ve session'a yaz — _make_env buradan okur.
+    _daily = _cash_daily_rate(_new_annual, EnvConfig.trading_days)
+    st.session_state.cash_daily_rate = _daily
+    st.sidebar.caption(
+        f"Günlük nakit getirisi: {_daily*100:.5f}%  "
+        f"(yıllık %{_new_annual*100:.1f} → (1+R)^(1/252)-1)"
+    )
+
     _sidebar_reward_editor(preset)
 
     st.session_state.adaptive = st.sidebar.checkbox(
@@ -5187,22 +5523,63 @@ def sidebar_controls():
             options=[0.005, 0.01, 0.05], value=0.005)
         hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
 
-    # 💾 Model kalıcılığı (PDF §11): eğitilmiş modeli diske kaydet / diskten yükle.
+    # 💾 Model kalıcılığı (PDF §11 + N11): eğitilmiş modeli diske kaydet / diskten yükle.
+    # N11: dosya adı algo_{horizon}_{adaptive}.pt — farklı vade/adaptive birbirini ezmez.
     st.sidebar.divider()
     st.sidebar.subheader("💾 Model (kaydet / yükle)")
+
     cur_key = _agent_key(algo, st.session_state.horizon, st.session_state.adaptive)
     has_trained = (cur_key in st.session_state.trained_agents
                    and st.session_state.trained_agents[cur_key][0] is not None)
     if has_trained and st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
         p = save_trained_agent(algo, st.session_state.horizon, st.session_state.adaptive)
         st.sidebar.success(f"Kaydedildi: {p}")
-    if model_path(algo).exists():
-        if st.sidebar.button(f"📂 Kaydedilmiş {algo} modelini yükle", use_container_width=True):
-            load_saved_agent(algo)
-            st.sidebar.success(f"{algo} modeli yüklendi — Test sekmesinde çalıştırılabilir.")
-            st.rerun()
+
+    # N11: models/*.pt dosyalarını glob'la, selectbox ile göster.
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _saved_files = sorted(MODELS_DIR.glob("*.pt"))
+    if _saved_files:
+        st.sidebar.markdown("**Kayıtlı modeller**")
+        # Dosya adından okunabilir etiket üret: "DQN | short | adaptif"
+        def _pt_label(p):
+            stem = p.stem  # ör. "DQN_short_true"
+            parts = stem.split("_", 2)
+            if len(parts) == 3:
+                _algo_s, _hor_s, _adp_s = parts
+                _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(_hor_s, _hor_s)
+                _adp_tr = "adaptif" if _adp_s == "true" else "sabit"
+                return f"{_algo_s} | {_hor_tr} | {_adp_tr}"
+            return stem
+
+        _labels = [_pt_label(f) for f in _saved_files]
+        _selected_label = st.sidebar.selectbox(
+            "Model seç",
+            options=_labels,
+            key="ui_model_selectbox",
+            help="Kayıtlı modeller — dosya adı: algo_vade_adaptive.pt. "
+                 "Seçip 'Yükle' butonuna bas.",
+        )
+        _sel_idx = _labels.index(_selected_label) if _selected_label in _labels else 0
+        _sel_path = _saved_files[_sel_idx]
+        st.sidebar.caption(f"Dosya: {_sel_path.name}")
+
+        if st.sidebar.button("📂 Seçili modeli yükle", use_container_width=True):
+            result = load_saved_agent_from_path(_sel_path)
+            if result:
+                _lkey, _lmeta = result
+                st.sidebar.success(
+                    f"{_lmeta['algo']} ({_lmeta['horizon']} / "
+                    f"{'adaptif' if _lmeta['adaptive'] else 'sabit'}) yüklendi — "
+                    "Test sekmesinde çalıştırılabilir."
+                )
+                st.rerun()
+            else:
+                st.sidebar.error("Model yüklenemedi.")
     else:
-        st.sidebar.caption(f"Kayıtlı {algo} modeli yok (CLI ile üret: python main.py).")
+        st.sidebar.caption(
+            "Kayıtlı model yok. Eğit ve 'Kaydet' butonunu kullan "
+            "ya da CLI ile üret: python main.py"
+        )
 
     st.sidebar.caption(f"Seed: {SEED} (sabit)")
     return algo, st.session_state.horizon, st.session_state.adaptive, hp

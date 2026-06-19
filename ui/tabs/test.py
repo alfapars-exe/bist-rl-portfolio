@@ -86,13 +86,13 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
 
         if snap["q_values"] is not None:
             st.plotly_chart(_q_bar(snap["q_values"], snap["action_idx"]),
-                            use_container_width=True)
+                            use_container_width=True, key="test_q_bar")
 
     with right:
         st.plotly_chart(_weights_pie(snap["weights_after"]),
-                        use_container_width=True)
+                        use_container_width=True, key="test_weights_pie")
         st.plotly_chart(_reward_bar(snap["reward_terms"]),
-                        use_container_width=True)
+                        use_container_width=True, key="test_reward_bar")
 
     # --- İflas uyarısı (eğer bu adım bankrupt ise) ---
     if snap["reward_terms"].get("bankrupt"):
@@ -157,14 +157,14 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         fig_cum.update_layout(title="Kümülatif Kâr/Zarar (TL)", height=300,
                               margin=dict(t=40, b=30), xaxis_title="Adım",
                               yaxis_title="TL")
-        st.plotly_chart(fig_cum, use_container_width=True)
+        st.plotly_chart(fig_cum, use_container_width=True, key="test_cum_pnl")
     with pnl_right:
         colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_arr]
         fig_step = go.Figure(go.Bar(x=steps_idx, y=step_arr, marker_color=colors))
         fig_step.update_layout(title="Adım P&L (TL)", height=300,
                                margin=dict(t=40, b=30), xaxis_title="Adım",
                                yaxis_title="TL")
-        st.plotly_chart(fig_step, use_container_width=True)
+        st.plotly_chart(fig_step, use_container_width=True, key="test_step_pnl")
 
     # Adaptif katsayı zaman serisi (o ana kadar)
     st.subheader("📈 Adaptif katsayılar (baştan bu adıma kadar)")
@@ -173,13 +173,13 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     cc = st.columns(3)
     cc[0].plotly_chart(
         px.line(rt_hist, x="step", y="eta_t", title="η_t (tx cost katsayısı)"),
-        use_container_width=True)
+        use_container_width=True, key="test_eta_t")
     cc[1].plotly_chart(
         px.line(rt_hist, x="step", y="lambda_t", title="λ_t (DD penalty katsayısı)"),
-        use_container_width=True)
+        use_container_width=True, key="test_lambda_t")
     cc[2].plotly_chart(
         px.line(rt_hist, x="step", y="tau_t", title="τ_t (DD eşiği)"),
-        use_container_width=True)
+        use_container_width=True, key="test_tau_t")
 
     # Oynatma döngüsü — session_state.playing true iken otomatik ilerle
     if st.session_state.playing and idx < max_step:

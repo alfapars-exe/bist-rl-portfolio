@@ -27,7 +27,7 @@ def tab_mdp():
             fig_px.update_layout(height=280, showlegend=False,
                                  margin=dict(t=40, b=20), xaxis_title="",
                                  yaxis_title="NAV (ilk gün = 1.0)")
-            st.plotly_chart(fig_px, use_container_width=True)
+            st.plotly_chart(fig_px, use_container_width=True, key="mdp_px")
 
     with col2:
         st.subheader("MDP Tuple (𝒮, 𝒜, 𝒫, r, γ)")

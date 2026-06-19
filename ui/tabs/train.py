@@ -246,26 +246,26 @@ def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
                     title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
                     markers=True)
     fig_r.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_reward.plotly_chart(fig_r, use_container_width=True)
+    ph_reward.plotly_chart(fig_r, use_container_width=True, key="train_live_reward")
 
     fig_g = px.line(df, x="iter", y="gain",
                     title="Kazanç (nihai NAV − 1.0)",
                     markers=True)
     fig_g.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_gain.plotly_chart(fig_g, use_container_width=True)
+    ph_gain.plotly_chart(fig_g, use_container_width=True, key="train_live_gain")
 
     fig_s = px.bar(df, x="iter", y="success",
                    title="Başarı (EW benchmark'a göre 0/1)")
     fig_s.update_layout(height=260, margin=dict(t=40, b=20),
                         yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
-    ph_success.plotly_chart(fig_s, use_container_width=True)
+    ph_success.plotly_chart(fig_s, use_container_width=True, key="train_live_success")
 
     if "loss" in df.columns:
         fig_l = px.line(df, x="iter", y="loss",
                         title="Ortalama loss (düşüş beklenir)",
                         markers=True)
         fig_l.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_loss.plotly_chart(fig_l, use_container_width=True)
+        ph_loss.plotly_chart(fig_l, use_container_width=True, key="train_live_loss")
 
 
 def _render_train_tl_panel(env, algo, rec, initial_capital,
@@ -319,7 +319,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_tl.update_layout(title="Portföy Değeri (TL)", height=280,
                          margin=dict(t=40, b=30), xaxis_title="Gün",
                          yaxis_title="TL")
-    ph_tl_line.plotly_chart(fig_tl, use_container_width=True)
+    ph_tl_line.plotly_chart(fig_tl, use_container_width=True, key="train_tl_line")
 
     # Adım P&L bar chart (yeşil/kırmızı)
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_pnl_arr]
@@ -327,7 +327,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_bar.update_layout(title="Adım P&L (TL)", height=280,
                           margin=dict(t=40, b=30), xaxis_title="Gün",
                           yaxis_title="TL")
-    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True)
+    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True, key="train_tl_bar")
 
     # Tam adım tablosu
     dates_slice = env.dates[t_start + 1 : t_start + 1 + steps_done]
@@ -375,14 +375,17 @@ def _render_training_curves(curve: list, algo: str):
     c1, c2 = st.columns(2)
     c3, c4 = st.columns(2)
     c1.plotly_chart(px.line(df, x="iter", y="reward", markers=True,
-                            title="Kümülatif Ödül"), use_container_width=True)
+                            title="Kümülatif Ödül"), use_container_width=True,
+                    key="train_curve_reward")
     c2.plotly_chart(px.line(df, x="iter", y="gain", markers=True,
-                            title="Kazanç (NAV − 1)"), use_container_width=True)
+                            title="Kazanç (NAV − 1)"), use_container_width=True,
+                    key="train_curve_gain")
     c3.plotly_chart(px.bar(df, x="iter", y="success", title="Başarı (0/1)"),
-                    use_container_width=True)
+                    use_container_width=True, key="train_curve_success")
     if "loss" in df.columns:
         c4.plotly_chart(px.line(df, x="iter", y="loss", markers=True,
-                                title="Loss"), use_container_width=True)
+                                title="Loss"), use_container_width=True,
+                        key="train_curve_loss")
 
     # --- PDF §9.7 Pedagojik Eğitim Metrikleri (statik görüntüleme) ---
     diag = training_diagnostics(curve)

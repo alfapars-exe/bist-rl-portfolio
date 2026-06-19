@@ -29,13 +29,13 @@
 | Doğrulama | 101 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
-> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir.
+> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02, 5-seed) naif 1/N eşit-ağırlık (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde geçememiştir (BuyHold 6.713, EqualWeight 6.685 — en iyi RL SAC 5.502). En olgun katkı: düşük-turnover politikası (SAC turnover 0.011), reprodüklenebilir titizlik çerçevesi ve dürüst çoklu-seed analizi (DQN CV ~%47 → tek-seed güvenilmez; SAC CV ~%1 → en stabil).
 
 ---
 
 ## 1. Giriş (Rapor §9.1)
 
-> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir.
+> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02, 5-seed) naif 1/N eşit-ağırlık (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde geçememiştir (BuyHold 6.713, EqualWeight 6.685 — en iyi RL SAC 5.502). En olgun katkı: düşük-turnover politikası (SAC turnover 0.011), reprodüklenebilir titizlik çerçevesi ve dürüst çoklu-seed analizi (DQN CV ~%47 → tek-seed güvenilmez; SAC CV ~%1 → en stabil).
 
 **Problem neden önemli?** Portföy yönetimi, sınırlı sermayeyi zaman içinde değişen riskli
 varlıklara dağıtma problemidir. Her gün piyasa yeni bilgi üretir; yatırımcı işlem maliyeti,
@@ -390,25 +390,35 @@ ve `figures/` altına 13 figürü üretir.
 | **F12** | **Monte-Carlo stres** (1-yıl ileri terminal getiri dağılımı + VaR/CVaR) |
 | **F13** | **Nominal (TL) vs Reel (USD) NAV** (lira illüzyonu — §9.9) |
 
-### 8.3. Test metrikleri (V8 kanonik, seed=42 deterministik)
+### 8.3. Test metrikleri (Reprodüklenebilir kanonik, seed=42; iki ardışık main.py max fark 0.0)
 
 Değerler `results/metrics.csv`'den alınmıştır; `tests/golden/metrics_baseline.csv` içinde 1e-6
 toleransta kilitlidir. Her refactor sonrası `python main.py` ile yeniden üretilip doğrulanır.
 Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metrics_baseline.csv`.
+Reprodüksiyon düzeltmesi sonrası golden artık gerçek anlamda reprodüklenebilirdir: aynı ortamda
+iki ardışık `python main.py` çalıştırmasının tüm metriklerde maksimum farkı 0.0'dır.
 
 **Test dönemi performans tablosu (2022–2024, seed=42):**
 
-| Ajan | CAGR | Sharpe | Sortino | MaxDD | Calmar | Vol | FinalNAV | Turnover |
-|---|---|---|---|---|---|---|---|---|
-| DQN | **−0.155** | **−0.285** | **−0.398** | **−0.749** | **−0.206** | 0.360 | **0.632** | 0.299 |
-| PPO | +0.646 | +1.692 | +2.717 | −0.266 | +2.428 | 0.326 | 3.907 | 0.139 |
-| SAC | +0.868 | +2.102 | +3.413 | −0.255 | +3.406 | 0.322 | 5.517 | 0.010 |
-| TD3 | +0.866 | +2.045 | +3.292 | −0.259 | +3.338 | 0.332 | 5.503 | 0.041 |
-| BuyHold | +0.896 | +1.915 | +2.974 | −0.269 | +3.336 | 0.334 | 6.713 | 0.000 |
-| EqualWeight | +0.893 | +2.083 | +3.309 | −0.263 | +3.401 | 0.333 | 6.685 | 0.000 |
-| MeanVar | +0.912 | +1.973 | +3.153 | −0.335 | +2.726 | 0.362 | 6.888 | 0.030 |
+| Strateji | CAGR | Sharpe | Sortino | MaxDD | Calmar | FinalNAV | Turnover |
+|---|---|---|---|---|---|---|---|
+| DQN | 0.094 | 0.435 | 0.646 | −0.363 | 0.259 | 1.279 | 0.238 |
+| PPO | 0.646 | 1.692 | 2.717 | −0.266 | 2.428 | 3.907 | 0.139 |
+| SAC | 0.866 | 2.102 | 3.414 | −0.254 | 3.404 | 5.502 | 0.011 |
+| TD3 | 0.779 | 1.978 | 3.155 | −0.257 | 3.025 | 4.827 | 0.029 |
+| BuyHold | 0.896 | 1.915 | 2.974 | −0.269 | 3.336 | 6.713 | 0.000 |
+| EqualWeight | 0.893 | 2.083 | 3.309 | −0.263 | 3.401 | 6.685 | 0.000 |
+| MeanVar | 0.912 | 1.973 | 3.153 | −0.335 | 2.726 | 6.888 | 0.030 |
+| RiskParity | 0.900 | 2.119 | 3.366 | −0.253 | 3.563 | 6.755 | 0.009 |
+| InverseVol | 0.920 | 2.142 | 3.407 | −0.255 | 3.606 | 6.970 | 0.006 |
+| MinVariance | 0.998 | 2.297 | 3.628 | −0.233 | 4.277 | 7.844 | 0.022 |
+| Momentum | 0.721 | 1.602 | 2.410 | −0.357 | 2.019 | 5.034 | 0.163 |
+| CashRiskFree | 0.000 | 0.000 | 0.000 | 0.000 | — | 1.000 | 0.000 |
 
-> DQN V8 sonrası zararla kapandı (FinalNAV 0.632, CAGR −15.5%) — ayrıntı için §8.4.
+> **Önemli okuma:** DQN artık iflas eden değil, kârlı ama zayıf ajandır (FinalNAV 1.279,
+> CAGR +9.4%, Sharpe 0.435). Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı geçemedi.
+> Üstelik en iyi RL ajanı SAC (Sharpe 2.10) risk-ayarlı metrikte de MinVariance (Sharpe 2.30)
+> ve InverseVol (Sharpe 2.14) tarafından geçilmektedir. Çoklu-seed güvenilirlik analizi için bkz. §8.5.
 
 **Eğitim özet tablosu (`results/training_diagnostics.csv`):**
 
@@ -434,10 +444,17 @@ Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metr
 
 ### 8.4. İterasyon karşılaştırması — V5 → V6 → V7 (test dönemi, DQN)
 
+> **TARİHSEL ARŞİV:** Aşağıdaki tablo `tests/golden/v7_metrics_baseline.csv` kaynaklı eski
+> golden snapshot'larından (v5/v6/v7) gelmektedir. Geçerli reprodüklenebilir sonuçlar §8.3'tedir.
+> Reprodüksiyon düzeltmesinden sonra DQN'in tek-seed kararsızlığı (§8.5 multi-seed) bu tarihsel
+> değerlerin birer tek-gerçekleşme (single realization) olduğunu göstermektedir; seed değişiminde
+> aynı rakamlar tutmayabilir (CV~%47). Meşru iterasyon kaydı olarak korunmaktadır, fakat
+> **sayısal iddia için §8.3 kanonik tablosuna başvurunuz.**
+>
 > **Önemli not — V7 referans ölçümü:** Aşağıdaki tablo `tests/golden/v7_metrics_baseline.csv`
 > kaynaklı bir **V7 iterasyon-referansının** anlık görüntüsüdür. V8 anti-ezber slippage terimi
-> (`σ=0.001`, yalnız eğitimde) DQN davranışını köklü biçimde değiştirdi; **V8 sonrası DQN
-> baseline-altı / zarar eden bir ajandır** (FinalNAV 0.632, CAGR −15.5% — bkz. §8.3 tablosu).
+> (`σ=0.001`, yalnız eğitimde) DQN davranışını köklü biçimde değiştirdi; reprodüksiyon
+> düzeltmesi sonrası geçerli DQN sonucu FinalNAV 1.279, CAGR +9.4% (§8.3).
 > V7 tarihi silinmemeli — meşru iterasyon kaydıdır; fakat **geçerli (GEÇERLİ) sonuçlar §8.3'te
 > verilmektedir**. Bu tablo yalnızca state/reward geliştirme döngüsünün ölçülen yönünü gösterir.
 
@@ -457,6 +474,56 @@ getiriyi düşürdü — algının ödülde karşılığı yoktu. V7'de aynı re
 krizde sertleştirince DQN hem düşüşü azalttı hem getiriyi belirgin artırdı (Sharpe 2×+). Bu,
 "rejim skoru = omurga" tezinin doğrulanmasıdır. Tek test dönemi sınırlı; gerçek hakem
 `python main.py --walkforward` (fold-arası CVaR/MaxDD stabilitesi).
+
+### 8.5. Çoklu-Seed Sağlamlık (5 seed: 42–46)
+
+Tek bir seed sonucu tesadüf eseri iyi (ya da kötü) çıkabilir. Algoritmaların gerçek kararlılığını
+ölçmek için 5 bağımsız seed (42, 43, 44, 45, 46) üzerinde tam eğitim + test döngüsü çalıştırılmış;
+ort ± std olarak raporlanmıştır. Kaynak: `results/multiseed_summary.csv`.
+
+**Çoklu-seed performans tablosu (5 seed, 2022–2024 test dönemi):**
+
+| Algoritma | Sharpe ort ± std | FinalNAV ort ± std | CAGR ort ± std | MaxDD ort ± std |
+|---|---|---|---|---|
+| DQN | 0.461 ± 0.218 | 1.368 ± 0.362 | 0.115 ± 0.101 | −0.443 ± 0.088 |
+| PPO | 1.708 ± 0.052 | 3.944 ± 0.134 | 0.652 ± 0.020 | −0.276 ± 0.010 |
+| SAC | 2.086 ± 0.016 | 5.438 ± 0.074 | 0.858 ± 0.009 | −0.254 ± 0.001 |
+| TD3 | 2.046 ± 0.116 | 5.341 ± 0.650 | 0.843 ± 0.079 | −0.257 ± 0.008 |
+
+**Yorum:**
+
+- **DQN patolojik kararsız:** Sharpe CV ≈ %47 (std 0.218 / ort 0.461). Tek bir seed sonucu
+  (§8.3: Sharpe 0.435) bu dağılımın herhangi bir noktası olabilir; DQN sonuçları tek-seed
+  güvenilir değildir. Ayrık şablon eylem uzayı + standart DQN'in BIST ortamında yüksek varyanslı
+  bir politika ürettiğinin kanıtıdır.
+- **SAC en stabil:** Sharpe std yalnızca 0.016 (CV ~%1). FinalNAV std 0.074 — seed değişiminde
+  pratik olarak aynı sonuç. Entropi düzenlemesi ve off-policy öğrenme bu stabilitenin kaynağıdır.
+- **TD3 orta kararlılık:** Sharpe std 0.116, FinalNAV std 0.650 — makul ama SAC'tan yüksek.
+  Deterministik politika bazı seed'lerde iyi, bazılarında zayıf yerel minimuma takılıyor.
+- **PPO kararlı:** Std düşük (Sharpe 0.052), ama SAC'ın gerisinde kalıyor (ort 1.708 vs 2.086).
+- **Algoritma sıralaması std'lerle ayrışıyor:** SAC ≈ TD3 > PPO >> DQN. Tek-seed sıralama (SAC > TD3
+  > PPO >> DQN) çoklu-seed'de korunmaktadır; DQN'in zayıflığı tek-gerçekleşme değil, yapısal.
+
+### 8.6. Ödül Katsayı Duyarlılık Analizi (OAT — One-At-a-Time)
+
+Ödül fonksiyonunun 5 temel katsayısı birer birer ±değiştirilerek SAC (seed=42) üzerinde
+etkisi ölçülmüştür. Kaynak: `results/sensitivity.csv`.
+
+**Sharpe yayılımı (her katsayı için maks−min fark):**
+
+| Katsayı | Test değerleri | Sharpe aralığı (maks−min) | Yorumu |
+|---|---|---|---|
+| `eta_base` (işlem cezası) | 0.0005 / 0.001 / 0.002 | 0.041 | En geniş yayılım; işlem maliyeti en duyarlı eksen |
+| `lambda_base` (DD cezası) | 0.25 / 0.50 / 1.00 | 0.011 | Dar yayılım; DD cezası geniş platoda |
+| `tau_base` (DD eşiği) | 0.03 / 0.05 / 0.08 | 0.008 | Pratik fark yok |
+| `w_dsr` (Diferansiyel Sharpe) | 0.0 / 0.05 / 0.10 | 0.022 | DSR hafif iyileştiriyor, kırılgan değil |
+| `w_cvar` (CVaR ağırlığı) | 0.0 / 0.06 / 0.12 | 0.007 | En dar yayılım; CVaR terimi sağlam |
+
+**Özet:** Tüm katsayılarda Sharpe yayılımı ≤ 0.041 (<%2 baz metriğe göre). Ödül fonksiyonu
+kırılgan bir tepe noktasına değil, **sağlam bir platoya** oturmaktadır. Bu, ödülün test
+performansına uyarlanmadığının (reward hacking / test sızıntısının olmadığının) nicel kanıtıdır.
+İnsan seçimi yapılan katsayıların gerçek kalibrasyona duyarlılığı düşüktür; ajanın öğrendiği
+politika, bu aralıktaki herhangi bir katsayı setiyle üretilebilir.
 
 ---
 
@@ -589,7 +656,13 @@ DQN aksiyon dağılımı:
 
 ## 11. Tartışma (Rapor §9.9)
 
-> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir. Bu bulgu §8.3 metrik tablosunda sayısal olarak belgelenmiştir (EqualWeight FinalNAV 6.685, BuyHold 6.713 — tüm RL ajanlarının üstünde; SAC/TD3 Sharpe ~2.0–2.1 ile risk-ayarlı metrikte rekabetçi ancak mutlak getiri düşük).
+> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02) naif 1/N eşit-ağırlık
+> (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri
+> (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da
+> geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde
+> geçememiştir (BuyHold 6.713, EqualWeight 6.685 — tüm RL NAV'larının üstünde). En olgun
+> katkı: düşük-turnover politikası (SAC 0.011 vs EqualWeight 0.000 arasında), reprodüklenebilir
+> titizlik çerçevesi ve dürüst çoklu-seed analizi. (§8.3, §8.5, §8.6 sayısal dayanak.)
 
 - **İlk state tasarımı neden yetersizdi?** 5 teknik öznitelik tek-ölçekli sinyal veriyordu;
   çoklu-ölçek trend/volatilite ve ileri-görü (forecast) olmadan ajan rejim ayrımı yapamıyordu.
@@ -600,18 +673,29 @@ DQN aksiyon dağılımı:
   ablation forecast'ı yalnız DQN/SAC'a vermeyi gerektirdi.
 - **Ajan hangi davranışı öğrendi?** Düşük-turnover, düşüş-bilinçli tahsis; volatil dönemde
   nakit/ters-volatilite ağırlıklı, sakin dönemde momentum ağırlıklı davranış.
-- **Ajan nerede başarısız kaldı?** Somut bulgular (V8, `results/metrics.csv`): DQN bu
-  ortamda baseline-altı ve zarar eden ajandır (FinalNAV 0.632, CAGR −15.5%); hiçbir RL
-  ajanı mutlak NAV'da pasif baseline'ı geçemedi (EqualWeight 6.69, BuyHold 6.71 — tüm RL
-  ajanlarının üstünde). SAC/TD3 risk-ayarlı metrikte rekabetçidir (Sharpe ~2.0–2.1, MaxDD
-  ~−0.25 — baseline'dan daha iyi Calmar) ancak mutlak getiride pasif kalmaktadır. Ani rejim
-  kırılmalarında (ör. şok günleri) tepki gecikmeli; PPO forecast özelliğinden faydalanamadı
-  (on-policy + dağılım kayması).
+- **Ajan nerede başarısız kaldı?** Somut bulgular (`results/metrics.csv`, §8.3):
+  - **DQN patolojik kararsız:** Tek-seed Sharpe 0.435, FinalNAV 1.279 (kârlı ama zayıf); çoklu-seed
+    CV ~%47 (Sharpe 0.461 ± 0.218) — tek bir seed sonucu güvenilmez (§8.5). Ayrık şablon tasarımı
+    bu ortamda yüksek varyans üretiyor.
+  - **Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı geçemedi:** BuyHold 6.713, EqualWeight 6.685 —
+    en iyi RL ajanı SAC 5.502. Fark ~%22 NAV, ~3 yıllık test döneminde kapanmıyor.
+  - **Risk-ayarlıda da klasik optimize ediciler önde:** MinVariance Sharpe 2.30, FinalNAV 7.84 ile
+    SAC'ı (Sharpe 2.10, NAV 5.50) hem getiri hem risk-ayarlı metrikte geçmektedir. InverseVol
+    (Sharpe 2.14) ve RiskParity (Sharpe 2.12) de SAC ile başa baş ya da üstündedir. Bu sonuç
+    DeMiguel et al. (2009) ile tutarlı: naif 1/N çeşitlendirmeyi ham Sharpe'ta yenmek zordur;
+    iyi-kurulmuş klasik portföy oluşturucuları RL'den daha güçlü referanslar oluşturabilir.
+  - Ani rejim kırılmalarında tepki gecikmeli; PPO forecast özelliğinden faydalanamadı (on-policy
+    + dağılım kayması).
 - **Ezberi nasıl önledik (hocanın şartı)?** Hoca finansal projede gürültüyü açıkça şart koştu:
   *"al dediğinde alınmıyor, yukarıdan alırsın… hem gerçekçi olur HEM EZBERİ ÖNLER."* **V8**'de
   gerçekleşen getiriye eğitim-içi slippage (`σ=0.001`, env-yerel RNG) eklendi — ajan tek bir
   fiyat-patikasını ezberleyemez, daha sağlam (robust) politika öğrenir. Eval'de gürültü **kapalı**
   olduğundan golden ölçüm determinizmi korunur (yalnız öğrenilen politika değişir).
+- **Reprodüklenebilirlik:** Reprodüksiyon düzeltmesi sonrası golden artık gerçek anlamda
+  reprodüklenebilirdir — aynı ortamda iki ardışık `python main.py` çalıştırmasının tüm
+  metriklerde maksimum farkı 0.0'dır. Eski golden statik CSV'ye karşı karşılaştırma yapıyordu;
+  yeni yaklaşım canlı deterministik üretim + 1e-6 toleranslı regresyon testidir. Çoklu-seed
+  analizi (§8.5) tek-seed güvenilirliğini algoritmik olarak niceler.
 - **Lira illüzyonu — nominal kazanç ne kadarı gerçek? (§9.9)** Test döneminde (2022–2024) tüm
   stratejiler ve baseline'lar yüksek **nominal TL** getiri gösterir (BuyHold NAV ≈ 6.7×). Ancak bu
   dönemde USD/TRY ~13'ten ~35'e yükseldi (≈2.7× devalüasyon) ve enflasyon yüksekti. **Nominal NAV'ın

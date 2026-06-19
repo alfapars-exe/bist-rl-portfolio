@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (parametrik ödül/ceza + tarih seçimi + opt-in terimler)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (akademik revizyon: reprodüklenebilir golden + multi-seed + genişletilmiş baseline)
 
 ---
 
@@ -96,6 +96,21 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   `train_test_split(split)`); UI'da train başlangıç/ayırım/bitiş seçici + sızıntı doğrulama.
   Yeni `odul-ceza-tasarimcisi` ajanı eklendi (16. ajan). **131 test yeşil; golden DEĞİŞMEDİ.**
   `terms` dict'e additive: `gain_bonus`, `ruin_timing_mult`.
+- _(2026-06-19)_ **Akademik revizyon (A+B+C) — REPRODÜKSİYON DÜZELTMESİ (önemli).** Hakem
+  eleştirisi üzerine: (1) Eski V8 golden bu makinede REPRODÜKLENMİYORDU — `main.py` seed=42'de
+  PPO/SAC golden'ı birebir verdi (veri kanonik-eşdeğer) ama DQN patolojik kararsız (0.63/1.28/2.63).
+  Golden **reprodüklenebilir `main.py` çıktısına** yeniden donduruldu (iki ardışık koşu max fark
+  0.0 → GERÇEK reprodüksiyon; eski hali statik-CSV karşılaştırıyordu). Yeni kanonik: DQN 1.28,
+  PPO 3.91, SAC 5.50, TD3 4.83. (2) **Çoklu-seed (5 seed)**: DQN Sharpe 0.46±0.22 (CV~%47,
+  kararsız), SAC 2.09±0.02 (en stabil), TD3 2.05±0.12, PPO 1.71±0.05 → tek-seed yetersizliği
+  nicel kanıt. (3) Genişletilmiş baseline: **MinVariance (Sharpe 2.30 / NAV 7.84) RL'i her
+  metrikte geçiyor**. (4) `scripts/multiseed.py` (kanonik `train.py`'yi DOĞRUDAN çağırır →
+  seed=42 = main.py bit-aynı) + `scripts/reward_sensitivity.py` eklendi. (5) Tier-A doc:
+  Markov→"yaklaşık MDP", §2b Veri Metodolojisi & Survivorship, adalet kriteri, dürüst tez
+  manşeti, V9→Ek B. **Dürüst tez (keskin):** RL (en iyi SAC) naif 1/N ile risk-ayarlıda başa
+  baş ama klasik risk-bazlı optimize edicileri (MinVar) ne Sharpe ne NAV'da geçemez.
+- _(2026-06-19)_ **Veri kurtarma:** Cache budanırsa (`data/prices.parquet`), `results/bist30_prices.csv`
+  (tam 2015-2024) → parquet geri yüklenir (`pd.read_csv → to_parquet`). Golden bu tam veriden üretildi.
 
 ## 6. Bilinen Riskler / Açık Konular
 

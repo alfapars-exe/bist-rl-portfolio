@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 33 kaynak dosya, ~5224 satır.**
+**Toplam: 37 kaynak dosya, ~5785 satır.**
 
 ---
 
@@ -331,6 +331,19 @@ def download_bist(tickers=BIST28, start=None, end=None,
         if px.shape[1] < 10:
             raise RuntimeError("Too few tickers returned")
         px = px[[c for c in tickers if c in px.columns]]
+        # Evren degismezligi: yfinance kismi dondurduyse (bazi ticker'lar eksik /
+        # >%10 NaN -> dropna ile dustu) eksikleri sentetik ile doldurup TAM BIST28'i
+        # garanti et. Aksi halde N degisir -> UI ASSET_NAMES (sabit 29) ile uyumsuzluk
+        # + kayitli ajan state-dim (397) ile uyumsuzluk olur.
+        miss = [c for c in tickers if c not in px.columns]
+        if miss:
+            warnings.warn(
+                f"{len(miss)} ticker yfinance'tan gelmedi; sentetik ile dolduruldu: "
+                f"{miss}", RuntimeWarning, stacklevel=2)
+            synth = _synthetic_bist(miss, start, end).reindex(px.index).ffill().bfill()
+            for c in miss:
+                px[c] = synth[c].to_numpy()
+        px = px[list(tickers)].ffill().bfill()
     except Exception as exc:
         # Sessiz yutma yok: stderr'e gorunur uyari (CI loglari + kullanici).
         warnings.warn(
@@ -610,6 +623,106 @@ class TrainScaler:
 
 ---
 
+## `utils/macro.py`
+
+```python
+"""Makro rejim özellik mühendisliği — v6 (causal, leak-safe, YALIN omurga).
+
+Ham egzojen makro panelini (VIX, S&P, faiz TNX/IRX, USDTRY, altın GC=F) küçük,
+standart bir **rejim-koşullandırma** vektörüne çevirir → RL state'ine eklenir.
+Tüm dönüşümler yalnız-geçmişe bakar (causal). Standardizasyon (`MacroScaler`)
+YALNIZ train penceresinde fit edilir, test'e aynı uygulanır → sızıntı yok
+(`utils.features.TrainScaler` ile birebir desen).
+
+4 yalın öznitelik (kullanıcının "faiz, dolar, altın" üçlüsü + bileşik rejim):
+  - regime      : tanh(vix_rel + 4·(−spx_dd) − 0.10) ∈ (−1,1)  [OMURGA — V7 amplify eder]
+  - slope       : 10Y − 13W faiz farkı (getiri eğrisi eğimi)    [FAİZ]
+  - usd_try_mom : USD/TRY 20g momentum                           [DOLAR]
+  - gold_tl_mom : (altın×USDTRY = gram-altın/TL) 20g momentum    [ALTIN]
+
+Gerekçe: makro-kör RL tahsisçisi tek fiyat-yoluna aşırı uyar, rejimler arası
+başarısız olur. Makro rejimine koşullanmak ajanın *ortamı* öğrenmesini sağlar.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from config import MacroConfig
+
+
+def add_macro_features(macro_raw: pd.DataFrame,
+                       mom_window: int = MacroConfig.mom_window) -> pd.DataFrame:
+    """Ham makro panel (T, seri) -> yalın makro öznitelikleri (T, 4).
+
+    Kolon sırası `config.MacroConfig.features` ile birebir. Eksik kaynak seri
+    nazikçe 0'a düşer (degrade gracefully)."""
+    def col(name: str) -> pd.Series:
+        if name in macro_raw.columns:
+            return macro_raw[name].astype(float)
+        return pd.Series(0.0, index=macro_raw.index)
+
+    vix = col("^VIX")
+    spx = col("^GSPC")
+    tnx = col("^TNX")
+    irx = col("^IRX")
+    usdtry = col("USDTRY=X")
+    gold = col("GC=F")
+
+    feats: dict[str, pd.Series] = {}
+
+    # OMURGA: bileşik causal rejim skoru ∈ (−1,1) — sakin < 0 < kriz.
+    vix_rel = (vix / vix.rolling(252, min_periods=20).median() - 1.0).fillna(0.0)
+    spx_dd  = (spx / spx.rolling(252, min_periods=20).max() - 1.0).fillna(0.0)  # <=0
+    feats["regime"] = np.tanh(1.0 * vix_rel + 4.0 * (-spx_dd) - 0.10)
+
+    # FAİZ: getiri eğrisi eğimi (10Y − 13W); resesyon/risk proxy.
+    feats["slope"] = (tnx - irx).fillna(0.0)
+
+    # DOLAR: USD/TRY momentum (TL zayıflaması).
+    feats["usd_try_mom"] = usdtry.pct_change(mom_window).fillna(0.0)
+
+    # ALTIN: gram-altın/TL ≈ altın(USD/oz)×USDTRY momentum (oran → sabit düşer).
+    gold_tl = gold * usdtry
+    feats["gold_tl_mom"] = gold_tl.pct_change(mom_window).fillna(0.0)
+
+    df = pd.DataFrame(feats, index=macro_raw.index)
+    cols = [c for c in MacroConfig.features if c in df.columns]
+    return df[cols].replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+
+class MacroScaler:
+    """Makro öznitelik matrisi için train-only z-score (tek DataFrame).
+
+    `utils.features.TrainScaler` ile aynı sözleşme; tek matris üzerinde çalışır.
+    'regime' zaten ∈(−1,1) olsa da tutarlılık için o da z-skorlanır (state için);
+    ödül amplifikasyonu HAM regime'i ayrıca kullanır (bkz. train.prepare_data)."""
+
+    def __init__(self, clip: float = 8.0):
+        self.mean: pd.Series | None = None
+        self.std: pd.Series | None = None
+        self.clip = clip
+        self.fitted = False
+
+    def fit(self, df: pd.DataFrame) -> "MacroScaler":
+        self.mean = df.mean(axis=0)
+        self.std = df.std(axis=0).replace(0, 1.0)
+        self.fitted = True
+        return self
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.fitted:
+            raise RuntimeError("MacroScaler.fit() önce çağrılmalı")
+        z = (df - self.mean) / self.std
+        return z.clip(lower=-self.clip, upper=self.clip).fillna(0.0)
+
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self.fit(df).transform(df)
+
+```
+
+---
+
 ## `utils/metrics.py`
 
 ```python
@@ -830,6 +943,332 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
         rets=np.array(rets),
         weights=np.array(w_hist),
     )
+
+
+# =====================================================================
+# Ek akademik baseline'lar — hepsi DETERMINISTIK (RNG YOK), long-only,
+# tam-yatirim (sum(w)=1). PARS sibling strategies.py'den odunc alindi ve
+# kod/ API'sine ({"nav", "rets", "weights"} numpy) uyarlandi. Ortak
+# simulasyon cekirdegi _rolling_backtest: yuvarlanan pencere + periyodik
+# rebalans, ilk lookback gunu esit-agirlik isinma (warm-up).
+# =====================================================================
+def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
+                      rebalance: int) -> dict:
+    """Determinist yuvarlanan-pencere backtest cekirdegi.
+
+    weight_fn(hist_returns:(L,N), w_prev:(N,)) -> w_new:(N,) dondurur.
+    Donen agirliklar long-only normalize edilir (clip>=0, toplam=1).
+    mean_variance ile ayni stilde tx-cost UYGULANMAZ — net edge karsilastirmasi
+    Turnover kolonu uzerinden yapilir (golden tutarliligi). Hicbir np.random
+    cagrisi yok -> golden RNG sirasi etkilenmez."""
+    r = prices.pct_change().fillna(0.0).values
+    T, N = r.shape
+    navs = [1.0]; rets = []; w_hist = []
+    w = np.ones(N) / N
+    for t in range(T):
+        if t >= lookback and (t - lookback) % rebalance == 0:
+            hist = r[t - lookback: t]
+            w_new = np.asarray(weight_fn(hist, w), dtype=float)
+            w_new = np.clip(w_new, 0.0, None)
+            s = w_new.sum()
+            w = w_new / s if s > 1e-12 else np.ones(N) / N
+        port_r = float((w * r[t]).sum())
+        rets.append(port_r)
+        navs.append(navs[-1] * (1 + port_r))
+        w_hist.append(w.copy())
+    return dict(nav=np.array(navs[1:]), rets=np.array(rets),
+                weights=np.array(w_hist))
+
+
+def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
+                       rebalance: int = 20) -> dict:
+    """Ters-volatilite (1/sigma) agirligi — yuvarlanan vol uzerinden.
+
+    Mantik: w_i ∝ 1/sigma_i (sigma_i = pencere getiri std'i), normalize edilir.
+    Riske gore dengeleme'nin (risk parity) kovaryanssiz, naif halidir: yalniz
+    kosegen (varyans) bilgisi kullanilir, korelasyon yok sayilir. Dusuk-vol
+    hisseye daha cok agirlik -> portfoy vol'unu duzler. 'Volatility tilt'
+    olarak bilinen iyi-belgelenmis defensif bir anomalidir (Asness ve dig.)."""
+    def f(hist, w):
+        iv = 1.0 / (hist.std(axis=0) + 1e-9)
+        return iv / iv.sum()
+    return _rolling_backtest(prices, f, lookback, rebalance)
+
+
+def risk_parity(prices: pd.DataFrame, lookback: int = 120,
+                rebalance: int = 20, n_iter: int = 100) -> dict:
+    """Esit risk katkisi (ERC / risk parity) — iteratif sabit-nokta.
+
+    Hedef: her varligin TOPLAM portfoy riskine katkisi esit olsun:
+        RC_i = w_i (Sigma w)_i ,  hedef RC_i = sigma_p^2 / N  (tum i icin esit).
+    Cozum, marjinal risk katkisi MRC = Sigma w ile sabit-nokta iterasyonu:
+        w_i <- 1 / MRC_i ,  ardindan normalize (Spinu/Maillard tarzi). Yakinsayinca
+    w_i * MRC_i sabittir -> esit risk katkisi. Inverse-vol'un aksine korelasyonu
+    (tam Sigma) hesaba katar; konsantrasyonu cesitlendirip kuyruk riskini azaltir.
+    Tamamen determinist (sabit baslangic w=1/N, np.random yok)."""
+    def f(hist, w):
+        cov = np.cov(hist.T) + 1e-6 * np.eye(hist.shape[1])
+        n = cov.shape[0]
+        wv = np.ones(n) / n
+        for _ in range(n_iter):
+            mrc = cov @ wv
+            wv = 1.0 / np.maximum(mrc, 1e-8)
+            wv /= wv.sum()
+        return wv
+    return _rolling_backtest(prices, f, lookback, rebalance)
+
+
+def min_variance(prices: pd.DataFrame, lookback: int = 120,
+                 rebalance: int = 20, max_weight: float = 0.4) -> dict:
+    """Saf minimum-varyans portfoyu — getiri tahmini KULLANMAZ.
+
+    Cozulen problem:  min_w  w' Sigma w   s.t.  sum(w)=1, 0<=w_i<=max_weight.
+    mean_variance'tan farki: beklenen getiri (mu) terimi YOK -> yalniz risk
+    minimize edilir. Ortalama getiri tahmini en gurultulu girdidir (mu'nun
+    ornekleme hatasi devasadir); onu atip yalniz kovaryansa guvenmek genelde
+    daha kararli, dusuk-vol portfoy verir (DeMiguel ve dig. bulgusu: min-var
+    cogu zaman tahmini-getiri optimizasyonunu out-of-sample yener). SLSQP
+    determinist baslar (w0=1/N), RNG yok."""
+    from scipy.optimize import minimize as _min
+    def f(hist, w):
+        n = hist.shape[1]
+        cov = np.cov(hist.T) + 1e-5 * np.eye(n)
+        res = _min(lambda x: x @ cov @ x, np.ones(n) / n,
+                   bounds=[(0, max_weight)] * n,
+                   constraints=({"type": "eq", "fun": lambda x: x.sum() - 1}))
+        return res.x
+    return _rolling_backtest(prices, f, lookback, rebalance)
+
+
+def momentum(prices: pd.DataFrame, lookback: int = 60, rebalance: int = 20,
+             top_k: int = 5) -> dict:
+    """Kesitsel momentum — pencere getirisi en yuksek top_k hisseye esit agirlik.
+
+    Mantik: lookback penceresinde kumulatif getiri  cum_i = prod(1+r) - 1
+    hesaplanir; en yuksek top_k hisse secilip esit (1/top_k) agirlik verilir.
+    Klasik 'kazananlari al' (Jegadeesh & Titman 1993) etkisi: gecmis galipler
+    kisa-orta vadede ortalama ustu getirmeye egilimlidir. lookback vade
+    penceresine baglanir (kisa=5, orta=20, uzun=60 gun); secim determinist
+    (np.argsort kararli) -> RNG yok."""
+    k = max(1, int(top_k))
+    def f(hist, w):
+        n = hist.shape[1]
+        cum = (1.0 + hist).prod(axis=0) - 1.0
+        idx = np.argsort(cum)[-k:]          # en yuksek k (kararli siralama)
+        out = np.zeros(n)
+        out[idx] = 1.0 / len(idx)
+        return out
+    return _rolling_backtest(prices, f, lookback, rebalance)
+
+
+def cash_riskfree(prices: pd.DataFrame, daily_rf: float = 0.0) -> dict:
+    """Nakit / risk-free benchmark — tum sermaye nakitte, sabit gunluk getiri.
+
+    En muhafazakar referans: piyasaya HIC maruz kalmadan elde edilen getiri.
+    daily_rf=0 -> NAV duz 1.0 (sermaye korunumu, sifir risk). Pozitif daily_rf
+    ile basit bir mevduat/repo getirisi modellenir (NAV=(1+rf)^t). Risk
+    varliklarina agirlik 0 oldugundan weights tamamen sifirdir (Turnover=0).
+    'RL piyasaya girmeyi hak ediyor mu?' sorusunun tabanini olusturur: bir ajan
+    bu duz cizgiyi risk-ayarli olarak gecemiyorsa piyasa riskini almak bosunadir.
+    Tamamen determinist (kapali-form, np.random yok)."""
+    T, N = prices.shape
+    rets = np.full(T, float(daily_rf))
+    nav = np.cumprod(1.0 + rets)
+    weights = np.zeros((T, N))
+    return dict(nav=nav, rets=rets, weights=weights)
+
+```
+
+---
+
+## `utils/deflated_sharpe.py`
+
+```python
+"""Deflated / Probabilistic Sharpe Ratio + CSCV Backtest-Overfitting Olasılığı (PBO).
+
+Kaynaklar: Bailey & López de Prado (2014) "The Deflated Sharpe Ratio" (SSRN 2460551);
+Bailey, Borwein, López de Prado & Zhu (2017) "The Probability of Backtest Overfitting"
+(SSRN 2326253). Sharpe girdileri GÖZLEM-BAŞINA (ör. günlük).
+
+PARS referans ağacından (`Reinforcement Learning Final/generalization/deflated_sharpe.py`)
+kanonik BIST ağacına port edildi. scipy.stats.norm zaten projede bir bağımlılık
+(env/reward.py) → eski `np.math` fallback'ları kaldırıldı (numpy 2.0-güvenli).
+
+GÖZLEMSEL / golden-güvenli: yalnız getiri dizileri üzerinde saf istatistik —
+eğitim/değerlendirme/ödül sayısal yolunu DEĞİŞTİRMEZ (golden-master 1e-6 korunur).
+"""
+from __future__ import annotations
+
+from itertools import combinations
+from math import e
+
+import numpy as np
+from scipy.stats import norm
+
+EULER_MASCHERONI = 0.5772156649015329
+
+
+def probabilistic_sharpe_ratio(sr: float, n_obs: int, skew: float = 0.0,
+                               kurt: float = 3.0, sr_benchmark: float = 0.0) -> float:
+    """PSR: tahmin hatası + çarpıklık/basıklık altında P(gerçek SR > benchmark).
+
+    sr ve sr_benchmark GÖZLEM-BAŞINA Sharpe oranlarıdır.
+    """
+    if n_obs < 2:
+        return 0.5
+    denom = np.sqrt(max(1e-12, 1.0 - skew * sr + (kurt - 1.0) / 4.0 * sr * sr))
+    z = (sr - sr_benchmark) * np.sqrt(n_obs - 1.0) / denom
+    return float(norm.cdf(z))
+
+
+def expected_max_sharpe(sr_variance: float, n_trials: int) -> float:
+    """n_trials bağımsız deneme altında H0'da beklenen MAKSİMUM (gözlem-başı) Sharpe.
+
+    E[max SR] ≈ sqrt(Var_SR) · [ (1−γ)·Z⁻¹(1−1/N) + γ·Z⁻¹(1−1/(N·e)) ].
+    """
+    n_trials = max(int(n_trials), 1)
+    if n_trials == 1 or sr_variance <= 0:
+        return 0.0
+    g = EULER_MASCHERONI
+    z1 = norm.ppf(1.0 - 1.0 / n_trials)
+    z2 = norm.ppf(1.0 - 1.0 / (n_trials * e))
+    return float(np.sqrt(sr_variance) * ((1 - g) * z1 + g * z2))
+
+
+def deflated_sharpe_ratio(sr: float, n_obs: int, n_trials: int, sr_variance: float,
+                          skew: float = 0.0, kurt: float = 3.0) -> float:
+    """DSR = beklenen-maksimum-Sharpe benchmark'ına karşı değerlendirilen PSR.
+
+    DSR > 0.95 → gözlenen Sharpe'ın çoklu-deneme (multiple-testing) tesadüfü olması
+    olası değil. Tüm Sharpe büyüklükleri gözlem-başınadır.
+    """
+    sr_star = expected_max_sharpe(sr_variance, n_trials)
+    return probabilistic_sharpe_ratio(sr, n_obs, skew, kurt, sr_benchmark=sr_star)
+
+
+def cscv_pbo(perf_matrix: np.ndarray, n_splits: int = 10) -> dict:
+    """Kombinatoryal-Simetrik Çapraz-Doğrulama ile Backtest-Overfitting Olasılığı.
+
+    perf_matrix: (T_gözlem, N_config) her aday config için periyot-başı getiri.
+    Zaman ``n_splits`` bloğa bölünür; her dengeli train/test bölüşümünde IS-en-iyi
+    config seçilir ve OOS sırası → logit kaydedilir. PBO = IS-en-iyi config'in
+    OOS-medyan-altı olduğu bölüşüm oranı. {pbo, n_combos, mean_logit} döner.
+    """
+    R = np.asarray(perf_matrix, dtype=float)
+    T, N = R.shape
+    if N < 2 or T < n_splits * 2:
+        return {"pbo": float("nan"), "n_combos": 0, "mean_logit": float("nan")}
+    S = n_splits if n_splits % 2 == 0 else n_splits - 1
+    blocks = np.array_split(np.arange(T), S)
+    logits = []
+    for train_idx in combinations(range(S), S // 2):
+        tr = np.concatenate([blocks[i] for i in train_idx])
+        te = np.concatenate([blocks[i] for i in range(S) if i not in train_idx])
+        is_sr = R[tr].mean(0) / (R[tr].std(0) + 1e-12)
+        oos_sr = R[te].mean(0) / (R[te].std(0) + 1e-12)
+        n_star = int(np.argmax(is_sr))
+        order = np.argsort(oos_sr)                      # 1=en kötü .. N=en iyi OOS
+        rank = int(np.nonzero(order == n_star)[0][0]) + 1
+        w = min(max(rank / (N + 1), 1e-6), 1 - 1e-6)
+        logits.append(np.log(w / (1 - w)))
+    logits = np.asarray(logits)
+    return {"pbo": float((logits <= 0).mean()), "n_combos": int(len(logits)),
+            "mean_logit": float(logits.mean())}
+
+```
+
+---
+
+## `utils/stress_mc.py`
+
+```python
+"""Monte-Carlo stres — şişman-kuyruklu parametrik + durağan blok bootstrap.
+
+İleri çok-varlık getiri patikalarını iki simülatörle üretip portföy ağırlıklarıyla
+terminal-getiri dağılımına ve kuyruk riskine (VaR/CVaR) taşır:
+  * Student-t parametrik — çok-değişkenli t (tarihsel ortalama/kovaryans), ağır kuyruk;
+  * durağan blok bootstrap — ardışık tarihsel blokları yeniden örnekler; dağılım
+    varsayımı olmadan otokorelasyon/volatilite kümelenmesini KORUR (Politis & Romano 1994).
+
+PARS referans ağacından (`Reinforcement Learning Final/stress/montecarlo.py`) kanonik
+BIST ağacına port edildi. Env-yerel `np.random.default_rng(seed)` → global RNG'ye dokunmaz.
+GÖZLEMSEL / golden-güvenli: mevcut backtest çıktıları üzerinde post-hoc stres analizi.
+"""
+from __future__ import annotations
+
+from typing import Dict
+
+import numpy as np
+
+
+def _assets_weights(weights, n_assets):
+    """Ağırlık vektörü n+1 (nakit dahil) ise nakit elemanını düşürür → (n,)."""
+    w = np.asarray(weights, dtype=float).reshape(-1)
+    if w.shape[0] == n_assets + 1:
+        w = w[:n_assets]
+    return w
+
+
+def summarize_mc(terminal_returns: np.ndarray, var_alpha: float = 0.05,
+                 es_alpha: float = 0.025) -> Dict[str, float]:
+    """Terminal getiri dağılımının özet istatistikleri + kuyruk riski (VaR/CVaR)."""
+    tr = np.asarray(terminal_returns, dtype=float)
+    q_var = np.quantile(tr, var_alpha)
+    q_es = np.quantile(tr, es_alpha)
+    tail = tr[tr <= q_es]
+    return {
+        "mean": float(tr.mean()), "median": float(np.median(tr)),
+        "p05": float(np.quantile(tr, 0.05)), "p95": float(np.quantile(tr, 0.95)),
+        "VaR": float(max(0.0, -q_var)),
+        "CVaR": float(max(0.0, -(tail.mean() if tail.size else q_es))),
+        "worst": float(tr.min()), "best": float(tr.max()),
+        "prob_loss": float((tr < 0).mean()),
+        "prob_loss_20pct": float((tr < -0.20).mean()),
+    }
+
+
+def mc_student_t(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 252,
+                 paths: int = 5000, dof: float = 5.0, seed: int = 42) -> dict:
+    """Çok-değişkenli Student-t MC (tarihsel ortalama/kovaryans, ağır kuyruk)."""
+    R = np.asarray(asset_returns, dtype=float)
+    n = R.shape[1]
+    w = _assets_weights(weights, n)
+    rng = np.random.default_rng(seed)
+    mu = R.mean(0)
+    cov = np.cov(R.T) + 1e-8 * np.eye(n)
+    L = np.linalg.cholesky(cov)
+    scale = np.sqrt((dof - 2) / dof) if dof > 2 else 1.0
+    terminal = np.empty(paths)
+    for p in range(paths):
+        z = rng.standard_normal((horizon, n))
+        g = rng.chisquare(dof, size=(horizon, 1)) / dof
+        t = z / np.sqrt(g)                               # standart çok-değişkenli-t yenilik
+        daily = mu + (t * scale) @ L.T
+        port = daily @ w
+        terminal[p] = np.prod(1 + port) - 1
+    return {"terminal": terminal, "summary": summarize_mc(terminal)}
+
+
+def mc_block_bootstrap(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 252,
+                       paths: int = 5000, block: int = 20, seed: int = 42) -> dict:
+    """Tarihsel getirilerin durağan blok bootstrap'ı → terminal dağılım."""
+    R = np.asarray(asset_returns, dtype=float)
+    T, n = R.shape
+    w = _assets_weights(weights, n)
+    rng = np.random.default_rng(seed)
+    pblock = 1.0 / block
+    terminal = np.empty(paths)
+    for p in range(paths):
+        idx = np.empty(horizon, dtype=int)
+        i = rng.integers(0, T)
+        for h in range(horizon):
+            if h > 0 and rng.random() < pblock:
+                i = rng.integers(0, T)                   # yeni blok başlat
+            idx[h] = i
+            i = (i + 1) % T
+        port = R[idx] @ w
+        terminal[p] = np.prod(1 + port) - 1
+    return {"terminal": terminal, "summary": summarize_mc(terminal)}
 
 ```
 
@@ -2414,6 +2853,138 @@ class SACAgent(BaseAgent):
 
 ---
 
+## `agents/td3.py`
+
+```python
+"""Twin Delayed DDPG (Fujimoto et al., 2018) — sürekli, deterministik politika.
+
+Derste işlendi (RL_12) ve hoca sürekli-eylem problemleri için **TD3'ü açıkça
+tavsiye etti**. DDPG üzerine üç hile: (1) twin critics + min-Q hedefi (overestimation
+azaltma), (2) gecikmeli politika güncellemesi, (3) hedef-politika yumuşatma.
+Env, ham aksiyon vektörünü softmax ile N+1 simpleksine projeler → aktörün tanh
+çıktı aralığı uygundur. agents.common (mlp, ReplayBuffer, seeding) yeniden kullanılır.
+
+Arayüz SAC ile birebir (act/act_eval/remember/train_step) → core.trainer'ın
+off-policy generator'ı (train_td3) aynı adım-bazlı döngüyü kullanır.
+"""
+from __future__ import annotations
+
+from typing import Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from .base import BaseAgent
+from .common import ReplayBuffer, get_device, mlp, set_seed
+
+
+class Actor(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden: Tuple[int, int] = (256, 128)):
+        super().__init__()
+        self.net = mlp([state_dim, hidden[0], hidden[1], action_dim], nn.ReLU)
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.net(s))
+
+
+class Critic(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden: Tuple[int, int] = (256, 128)):
+        super().__init__()
+        self.net = mlp([state_dim + action_dim, hidden[0], hidden[1], 1], nn.ReLU)
+
+    def forward(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        return self.net(torch.cat([s, a], dim=-1)).squeeze(-1)
+
+
+class TD3Agent(BaseAgent):
+    def __init__(self, state_dim: int, action_dim: int, hidden: Tuple[int, int] = (256, 128),
+                 lr_pi: float = 3e-4, lr_q: float = 3e-4, gamma: float = 0.99,
+                 tau: float = 0.005, policy_noise: float = 0.2, noise_clip: float = 0.5,
+                 policy_delay: int = 2, expl_noise: float = 0.1,
+                 buffer_size: int = 50_000, batch_size: int = 128,
+                 seed: int = 42, device: str | None = None):
+        set_seed(seed)
+        self.device = get_device(device)
+        self.state_dim = state_dim; self.action_dim = action_dim
+        self.gamma = float(gamma); self.tau = float(tau)
+        self.policy_noise = float(policy_noise); self.noise_clip = float(noise_clip)
+        self.policy_delay = int(policy_delay); self.expl_noise = float(expl_noise)
+        self.batch_size = int(batch_size)
+
+        self.actor = Actor(state_dim, action_dim, hidden).to(self.device)
+        self.actor_t = Actor(state_dim, action_dim, hidden).to(self.device)
+        self.q1 = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.q2 = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.q1_t = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.q2_t = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.actor_t.load_state_dict(self.actor.state_dict())
+        self.q1_t.load_state_dict(self.q1.state_dict())
+        self.q2_t.load_state_dict(self.q2.state_dict())
+
+        self.opt_pi = torch.optim.Adam(self.actor.parameters(), lr=lr_pi, weight_decay=0.0)
+        self.opt_q1 = torch.optim.Adam(self.q1.parameters(), lr=lr_q, weight_decay=0.0)
+        self.opt_q2 = torch.optim.Adam(self.q2.parameters(), lr=lr_q, weight_decay=0.0)
+        self.buffer = ReplayBuffer(buffer_size)
+        self._it = 0
+
+    def _soft(self, src: nn.Module, dst: nn.Module):
+        with torch.no_grad():
+            for ps, pd in zip(src.parameters(), dst.parameters()):
+                pd.data.mul_(1 - self.tau).add_(self.tau * ps.data)
+
+    def act(self, s: np.ndarray, explore: bool = True) -> np.ndarray:
+        s_t = torch.as_tensor(s, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            a = self.actor(s_t).cpu().numpy()[0]
+        if explore:
+            a = a + np.random.normal(0, self.expl_noise, size=a.shape)
+        return a.astype(np.float32)
+
+    def act_eval(self, s: np.ndarray) -> np.ndarray:
+        """Eval: deterministik aktör (keşif gürültüsü yok)."""
+        return self.act(s, explore=False)
+
+    def remember(self, s, a, r, s2, d):
+        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d)
+
+    def train_step(self) -> float | None:
+        if len(self.buffer) < self.batch_size:
+            return None
+        self._it += 1
+        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s = torch.as_tensor(s, dtype=torch.float32, device=self.device)
+        a = torch.as_tensor(a, dtype=torch.float32, device=self.device)
+        r = torch.as_tensor(r, dtype=torch.float32, device=self.device)
+        s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
+        d = torch.as_tensor(d, dtype=torch.float32, device=self.device)
+
+        with torch.no_grad():
+            noise = (torch.randn_like(a) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
+            a2 = (self.actor_t(s2) + noise).clamp(-1, 1)               # hedef-politika yumuşatma
+            q_min = torch.min(self.q1_t(s2, a2), self.q2_t(s2, a2))    # twin min-Q hedefi
+            target = r + (1 - d) * self.gamma * q_min
+
+        for q, opt in [(self.q1, self.opt_q1), (self.q2, self.opt_q2)]:
+            loss = F.mse_loss(q(s, a), target)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(q.parameters(), 5.0); opt.step()
+
+        pi_loss_val = None
+        if self._it % self.policy_delay == 0:                          # gecikmeli politika güncelle
+            pi_loss = -self.q1(s, self.actor(s)).mean()
+            self.opt_pi.zero_grad(); pi_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0); self.opt_pi.step()
+            self._soft(self.actor, self.actor_t)
+            self._soft(self.q1, self.q1_t); self._soft(self.q2, self.q2_t)
+            pi_loss_val = float(pi_loss.item())
+        return pi_loss_val
+
+```
+
+---
+
 ## `core/features.py`
 
 ```python
@@ -2483,6 +3054,7 @@ def _build_dqn(state_dim: int, action_dim: int, hp: dict, seed: int) -> DQNAgent
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", DQNConfig.hidden)),
         lr=hp.get("lr", DQNConfig.lr),
+        gamma=hp.get("gamma", DQNConfig.gamma),
         eps_decay=hp.get("eps_decay", DQNConfig.eps_decay),
         batch_size=hp.get("batch_size", DQNConfig.batch_size),
         target_update=hp.get("target_update", DQNConfig.target_update),
@@ -2494,6 +3066,7 @@ def _build_ppo(state_dim: int, action_dim: int, hp: dict, seed: int) -> PPOAgent
     return PPOAgent(
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", PPOConfig.hidden)),
+        gamma=hp.get("gamma", PPOConfig.gamma),
         lr_p=hp.get("lr_p", PPOConfig.lr_p), lr_v=hp.get("lr_v", PPOConfig.lr_v),
         clip=hp.get("clip", PPOConfig.clip), ent_coef=hp.get("ent_coef", PPOConfig.ent_coef),
         batch_size=hp.get("batch_size", PPOConfig.batch_size),
@@ -2506,6 +3079,7 @@ def _build_sac(state_dim: int, action_dim: int, hp: dict, seed: int) -> SACAgent
     return SACAgent(
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", SACConfig.hidden)),
+        gamma=hp.get("gamma", SACConfig.gamma),
         lr_pi=hp.get("lr_pi", SACConfig.lr_pi), lr_q=hp.get("lr_q", SACConfig.lr_q),
         alpha=hp.get("alpha", SACConfig.alpha), tau=hp.get("tau", SACConfig.tau),
         batch_size=hp.get("batch_size", SACConfig.batch_size), seed=seed,
@@ -4144,7 +4718,14 @@ from ui.state import ASSET_NAMES
 
 
 def _weights_pie(weights: np.ndarray, title: str = "Portföy Ağırlıkları"):
-    df = pd.DataFrame({"asset": ASSET_NAMES, "weight": weights})
+    # Güvenlik ağı: evren beklenen 28+nakit'ten farklıysa (ör. yfinance kısmi veri
+    # döndürdü) etiketleri ağırlık uzunluğuna hizala — UI çökmemeli (ASSET_NAMES sabit 29).
+    w = list(np.asarray(weights).ravel())
+    names = list(ASSET_NAMES)
+    if len(names) != len(w):
+        names = names[:max(0, len(w) - 1)] + ["CASH"]
+        names = (names + [f"A{i}" for i in range(len(names), len(w))])[:len(w)]
+    df = pd.DataFrame({"asset": names, "weight": w})
     df = df[df["weight"] > 0.005]  # çok küçük dilimleri gizle
     fig = px.pie(df, names="asset", values="weight", title=title, hole=0.35)
     fig.update_traces(textposition="inside", textinfo="percent+label")
@@ -4555,6 +5136,14 @@ def sidebar_controls():
     st.sidebar.divider()
     st.sidebar.subheader(f"🎛 Hiperparametreler ({algo})")
     hp = {}
+    # γ (discount): vade preset default'u; override edilirse hp üzerinden TÜM ajanlara uygulanır.
+    hp["gamma"] = st.sidebar.number_input(
+        "γ (discount / iskonto)", value=float(preset["gamma"]),
+        min_value=0.90, max_value=0.999, step=0.005, format="%.3f",
+        key=f"gamma_{st.session_state.horizon}",
+        help="İskonto faktörü. Vade preset default verir (Kısa 0.95 / Orta 0.99 / Uzun 0.995); "
+             "burada değiştirilebilir — DQN/PPO/SAC/TD3'ün hepsine uygulanır.",
+    )
     if algo == "DQN":
         st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",

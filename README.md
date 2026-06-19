@@ -19,7 +19,7 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
 
-> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir. Ayrıntılı metrikler ve dürüst sınırlar: `DOKUMANTASYON.md §8.3` ve `§11`.
+> **Ana bulgu (dürüst tez):** RL (en iyi SAC, Sharpe 2.09 ± 0.02, 5-seed) naif 1/N eşit-ağırlık (Sharpe 2.08) ile risk-ayarlıda başa baş gelirken iyi-kurulmuş klasik optimize edicileri (MinVariance Sharpe 2.30 / FinalNAV 7.84; InverseVol Sharpe 2.14) ne Sharpe ne NAV'da geçememektedir. Hiçbir RL ajanı mutlak NAV'da pasif baseline'ı istikrarlı biçimde geçememiştir (BuyHold 6.713, EqualWeight 6.685 — en iyi RL SAC 5.502). En olgun katkı: düşük-turnover politikası (SAC turnover 0.011), reprodüklenebilir titizlik çerçevesi ve dürüst çoklu-seed analizi (DQN CV ~%47 → tek-seed güvenilmez; SAC CV ~%1 → en stabil). Ayrıntılı metrikler: `DOKUMANTASYON.md §8.3`, §8.5 (çoklu-seed), §8.6 (duyarlılık), `§11`.
 
 > **Veri sınırlılıkları:** Evren bugünkü BIST 30 bileşenlerinden seçilmiştir — dönem içinde endeksten çıkan hisseler dahil edilmemiştir (survivorship bias riski). Fiyatlar yfinance `auto_adjust=True` ile temettü/split düzeltmeli kapanış fiyatlarıdır. Bid-ask spread, fiyat limiti ve likidite kısıtları modellenmemiştir. Ayrıntılar: `DOKUMANTASYON.md §2b`.
 

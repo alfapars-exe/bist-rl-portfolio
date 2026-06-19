@@ -111,6 +111,14 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   baş ama klasik risk-bazlı optimize edicileri (MinVar) ne Sharpe ne NAV'da geçemez.
 - _(2026-06-19)_ **Veri kurtarma:** Cache budanırsa (`data/prices.parquet`), `results/bist30_prices.csv`
   (tam 2015-2024) → parquet geri yüklenir (`pd.read_csv → to_parquet`). Golden bu tam veriden üretildi.
+- _(2026-06-19)_ **Tier-C ek analizler (forecast eval + cost realism).** (1) `scripts/forecast_eval.py`:
+  CNN-LSTM tahmincisi gerçek BIST'te öngörü gücü GÖSTERMİYOR (yön %47.8<%50, corr~0.003); düşük
+  RMSE shrink-to-zero'dan (forecast≈zero baseline). Çıkarım: forecast feature bir düzenlileştirici
+  giriş, öngörü kanalı değil (V4 ablation kazancı muhtemelen regularization; forecast-kapalı A/B
+  önerilir). (2) `scripts/cost_sensitivity.py`: BIST maliyet modeli (komisyon 10-20bps + BSMV %5 +
+  spread); **η (5-15bps tek-yön) GERÇEKÇİ**, kalibrasyon değişmez. SAC turnover 0.011 → maliyet-bağışık
+  (drag@50bps %1.35); DQN çöker (Sharpe 0.42→−0.46), PPO/Momentum bozulur → SAC'ın düşük-turnover'ı
+  gerçek net-edge. İkisi golden-güvenli (yeni script, RNG sırası değişmez). 159 test yeşil.
 
 ## 6. Bilinen Riskler / Açık Konular
 

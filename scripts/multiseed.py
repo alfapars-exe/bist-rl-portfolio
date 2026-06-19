@@ -5,18 +5,30 @@ CAGR/Sharpe'in seed'e ne kadar duyarli oldugunu gostermez. Bu script her algorit
 N farkli seed ile bagimsiz egitir, test setinde degerlendirir ve metrikleri
 ortalama±std olarak toplar (hakem: "tek seed yetersiz").
 
-KANONIK AKISI TAKLIT EDER (yeni pipeline ICAT ETMEZ):
-  train.run() ile birebir ayni cagri zinciri —
-    np.random.seed(S) -> prepare_data() -> [DQN, PPO, SAC, TD3] sirayla
-    her biri build_env/build_agent(seed=S) -> core.trainer.train -> core.rollout.evaluate
-    -> utils.metrics.summary.
-  Tek fark: SEED sabiti yerine dis dongunun seed'i (S) her asamaya zerk edilir.
-  Bu sayede S=42 satiri, kanonik tek-seed cikti (results/metrics.csv /
-  tests/golden/metrics_baseline.csv) ile AYNI olmalidir (determinizm cross-check).
+KANONIK AKISI BIREBIR TEKRARLAR (yeni pipeline ICAT ETMEZ):
+  train.run()'in tek-seed yolu DOGRUDAN cagrilir — yeniden-implemente edilmez:
+    np.random.seed(S) -> prepare_data() -> train_dqn -> train_ppo -> train_sac
+    -> train_td3 -> evaluate(...) -> utils.metrics.summary.
+  train.py'deki train_dqn/ppo/sac/td3 ve evaluate fonksiyonlari OLDUGU GIBI
+  cagrilir; tek fark: kanonik SEED=42 sabiti yerine, dis dongunun seed'i (S)
+  train modulunun SEED global'ine gecici olarak zerk edilir (_seed_scope).
+  train_* ve prepare_data RNG'yi (build_env seed, build_agent seed, forecast
+  set_seed) runtime'da train.SEED'ten okudugundan, S=42 satiri kanonik tek-seed
+  cikti (results/metrics.csv / tests/golden/metrics_baseline.csv) ile BIT-AYNI olur.
 
-RNG IZOLASYONU: her seed kendi set_seed(S)'iyle baslar; ajan ctor'lari da
-build_agent(seed=S) ile set_seed(S) cagirir (agirlik init S'e baglidir). Seed'ler
-arasi durum sizmaz — her (algo, seed) bagimsiz bir cekilis.
+NEDEN train_* DOGRUDAN CAGRILIR (onceki _train_one'in kusuru):
+  Onceki surum build_env'i `random_start=False` ile cagiriyordu; oysa kanonik
+  train_dqn/ppo/sac/td3 `random_start=EnvConfig.random_start` (=True) gecer.
+  random_start=True (rastgele baslangic penceresi + fiyat-gurultusu/slippage)
+  egitim dagilimini tamamen degistirir; RNG'ye en duyarli ajan olan DQN bu yuzden
+  S=42'de bile kanonik 1.28 yerine 2.63 uretiyordu. train_* fonksiyonunu dogrudan
+  cagirmak bu tur sessiz cagri-sirasi/parametre sapmalarini yapisal olarak onler.
+
+RNG IZOLASYONU: her seed kendi np.random.seed(S)'iyle baslar (train.run gibi);
+ajan ctor'lari da set_seed(S) cagirir (agirlik init S'e baglidir). Seed'ler arasi
+durum sizmaz — her (algo, seed) bagimsiz bir cekilis. DQN'in seed'ler arasi
+yuksek std'si GERCEK bir bulgudur (RNG-duyarliligi); ayni seed+ayni sira ise
+bit-ozdestir (determinizm).
 
 Cikti (results/ — gitignore'lu, yerel artefakt):
   - multiseed_runs.csv     : her (algo, seed) bir satir (ham metrikler)
@@ -24,11 +36,12 @@ Cikti (results/ — gitignore'lu, yerel artefakt):
 
 Kullanim (Windows / PowerShell):
   .venv\\Scripts\\python.exe scripts\\multiseed.py --seeds 42 43 44 45 46
-  .venv\\Scripts\\python.exe scripts\\multiseed.py --seeds 42 43 --algos DQN   # smoke
+  .venv\\Scripts\\python.exe scripts\\multiseed.py --seeds 42 --algos DQN   # smoke
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import time
@@ -41,16 +54,10 @@ sys.path.insert(0, str(BASE))
 import numpy as np
 import pandas as pd
 
-from config import SEED, TrainConfig
-from core.factory import build_agent, build_env
-from core.rollout import evaluate as rollout_evaluate
-from core.trainer import train as train_loop
+# train.py'nin KANONIK yolunu DOGRUDAN yeniden kullan (taklit degil, ayni
+# fonksiyonlar): prepare_data + train_dqn/ppo/sac/td3 + evaluate.
+import train as canonical
 from utils.metrics import summary
-from utils.torch_utils import set_seed
-
-# train.py'nin KANONIK veri hazirligini birebir yeniden kullan (taklit degil,
-# dogrudan ayni fonksiyon) — prepare_data() train-only scaler + (ops.) makro/forecast.
-from train import prepare_data, DataBundle
 
 RES = BASE / "results"
 RES.mkdir(exist_ok=True)
@@ -62,95 +69,75 @@ ALL_ALGOS = ["DQN", "PPO", "SAC", "TD3"]
 METRIC_KEYS = ["CAGR", "Sharpe", "Sortino", "MaxDD", "Calmar",
                "Volatility", "FinalNAV", "Turnover"]
 
-
-# ---------------------------------------------------------------- tek (algo,seed)
-def _train_one(algo: str, bundle: DataBundle, seed: int,
-               horizon: str = "medium", adaptive: bool = True):
-    """Tek bir algoritmayi tek bir seed ile egitir (train.py:train_* ile ayni
-    build_env/build_agent/train_loop zinciri; SEED yerine seed=S zerk edilir).
-
-    max_steps / n_iters / episode_len degerleri train.py'deki tek-seed
-    varsayilanlarla BIREBIR aynidir (TrainConfig tek-kaynak)."""
-    if algo == "DQN":
-        env = build_env("DQN", bundle.px_tr, bundle.feats_tr, horizon=horizon,
-                        adaptive=adaptive, max_steps=252, random_start=False, seed=seed,
-                        macro=bundle.macro_tr, regime=bundle.regime_tr)
-        agent = build_agent("DQN", env.state_dim, env.n_discrete, seed=seed)
-        for _ in train_loop(agent, env, n_iters=TrainConfig.dqn_episodes):
-            pass
-        return agent
-
-    if algo == "PPO":
-        env = build_env("PPO", bundle.px_tr, bundle.feats_tr, horizon=horizon,
-                        adaptive=adaptive, max_steps=10_000, random_start=False, seed=seed,
-                        macro=bundle.macro_tr, regime=bundle.regime_tr)
-        agent = build_agent("PPO", env.state_dim, env.action_dim, seed=seed)
-        for _ in train_loop(agent, env, n_iters=TrainConfig.ppo_updates,
-                            rollout_len=TrainConfig.ppo_rollout_len):
-            pass
-        return agent
-
-    if algo == "SAC":
-        env = build_env("SAC", bundle.px_tr, bundle.feats_tr, horizon=horizon,
-                        adaptive=adaptive, max_steps=TrainConfig.sac_episode_len,
-                        random_start=False, seed=seed,
-                        macro=bundle.macro_tr, regime=bundle.regime_tr)
-        agent = build_agent("SAC", env.state_dim, env.action_dim, seed=seed)
-        for _ in train_loop(agent, env, n_iters=TrainConfig.sac_episodes):
-            pass
-        return agent
-
-    if algo == "TD3":
-        env = build_env("TD3", bundle.px_tr, bundle.feats_tr, horizon=horizon,
-                        adaptive=adaptive, max_steps=TrainConfig.td3_episode_len,
-                        random_start=False, seed=seed,
-                        macro=bundle.macro_tr, regime=bundle.regime_tr)
-        agent = build_agent("TD3", env.state_dim, env.action_dim, seed=seed)
-        for _ in train_loop(agent, env, n_iters=TrainConfig.td3_episodes):
-            pass
-        return agent
-
-    raise ValueError(f"Bilinmeyen algoritma: {algo!r}")
+# Kanonik train_* fonksiyonlari (train.run()'daki sira: DQN -> PPO -> SAC -> TD3).
+# build_agent/build_env/train_loop cagri zinciri ICLERINDE; multiseed bunlari
+# YENIDEN-IMPLEMENTE ETMEZ, oldugu gibi cagirir (cagri-sirasi sapmasi imkansiz).
+_TRAINERS = {
+    "DQN": canonical.train_dqn,
+    "PPO": canonical.train_ppo,
+    "SAC": canonical.train_sac,
+    "TD3": canonical.train_td3,
+}
 
 
-def _evaluate_one(algo: str, bundle: DataBundle, agent,
-                  horizon: str = "medium", adaptive: bool = True) -> dict:
-    """train.py:evaluate ile birebir: test ortaminda rollout + summary metrikleri."""
-    env = build_env(algo, bundle.px_te, bundle.feats_te, horizon=horizon,
-                    adaptive=adaptive, max_steps=10_000,
-                    macro=bundle.macro_te, regime=bundle.regime_te)
-    bt = rollout_evaluate(agent, env)
-    return summary(bt["nav"], bt["rets"], bt["weights"])
+@contextlib.contextmanager
+def _seed_scope(seed: int):
+    """train modulunun SEED global'ini gecici olarak `seed` yap.
+
+    train.prepare_data ve train.train_dqn/ppo/sac/td3 RNG tohumunu (build_env
+    seed=, build_agent seed=, forecast set_seed(SEED)) runtime'da `train.SEED`'ten
+    okur. Bu kapsamda SEED=seed olunca, kanonik akis tipki SEED=seed ile
+    main.py calismis gibi davranir. seed=42 -> kanonik tek-seed ile bit-ayni.
+    """
+    old = canonical.SEED
+    canonical.SEED = seed
+    try:
+        yield
+    finally:
+        canonical.SEED = old
 
 
 # ---------------------------------------------------------------- koreografi
 def run(seeds: list[int], algos: list[str]) -> pd.DataFrame:
-    """Her seed icin (kanonik sira: veri -> DQN, PPO, SAC, TD3) egit + test et.
+    """Her seed icin kanonik train.run() yolunu BIREBIR tekrarla.
 
-    DONGU SIRASI (KANONIK ESLESME): dis dongu seed, ic dongu algo — tipki
-    train.run()'in tek seed'de DQN->PPO->SAC->TD3 sirasi gibi. Her seed icin
-    np.random.seed(S) + set_seed(S) once cagrilir (train.run np.random.seed(SEED)
-    yapardi; set_seed ek torch determinizmi icin — ajan ctor'u zaten set_seed(S)
-    cagirdigindan S=42 RNG akisi degismez)."""
+    Dis dongu seed, ic dongu algo — train.run()'in tek-seed'de
+    np.random.seed(SEED) -> prepare_data() -> DQN -> PPO -> SAC -> TD3 -> evaluate
+    sirasiyla AYNIDIR. Tek fark: SEED sabiti yerine S (_seed_scope ile zerk).
+
+    NOT: --algos bir alt-kume olsa bile, kanonik RNG akisini bozmamak icin
+    EGITIM her zaman tam DQN->PPO->SAC->TD3 sirasinda yurutulur; yalniz istenen
+    algolar degerlendirilip raporlanir. (Aksi halde atlanan bir ajanin RNG
+    tuketimi sonraki ajanlarin cekilisini kaydirir -> kanonik esitlik bozulur.)
+    """
     rows = []
     for s in seeds:
-        # Seed izolasyonu — her cekilis kendi global RNG durumuyla baslar.
-        np.random.seed(s)
-        set_seed(s)
-        t_seed = time.time()
-        print("=" * 64)
-        print(f"[SEED {s}] veri hazirlaniyor...")
-        bundle = prepare_data()
-        for algo in algos:
-            t0 = time.time()
-            agent = _train_one(algo, bundle, seed=s)
-            m = _evaluate_one(algo, bundle, agent)
-            row = {"algo": algo, "seed": s, **{k: m[k] for k in METRIC_KEYS}}
-            rows.append(row)
-            print(f"[SEED {s}] {algo:<3}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
-                  f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}  "
-                  f"({time.time() - t0:.1f}s)")
-        print(f"[SEED {s}] tamam ({time.time() - t_seed:.1f}s)")
+        with _seed_scope(s):
+            # train.run() ile birebir: once global numpy RNG'yi tohumla.
+            np.random.seed(canonical.SEED)
+            t_seed = time.time()
+            print("=" * 64)
+            print(f"[SEED {s}] veri hazirlaniyor (random_start={'AC' if True else ''})...")
+            bundle = canonical.prepare_data()
+
+            # Tam kanonik sira (DQN -> PPO -> SAC -> TD3); ajanlari sakla.
+            agents: dict = {}
+            for algo in ALL_ALGOS:
+                t0 = time.time()
+                agent, _curve = _TRAINERS[algo](bundle)
+                agents[algo] = agent
+                print(f"[SEED {s}] {algo:<3} egitildi ({time.time() - t0:.1f}s)")
+
+            # Degerlendirme + raporlama (yalniz istenen algolar icin satir uret).
+            for algo in algos:
+                bt = canonical.evaluate(bundle, agents[algo], algo)
+                m = summary(bt["nav"], bt["rets"], bt["weights"])
+                row = {"algo": algo, "seed": s, **{k: m[k] for k in METRIC_KEYS}}
+                rows.append(row)
+                print(f"[SEED {s}] {algo:<3}  CAGR={m['CAGR']:+.2%}  "
+                      f"Sharpe={m['Sharpe']:+.2f}  MaxDD={m['MaxDD']:+.2%}  "
+                      f"Final={m['FinalNAV']:.3f}")
+            print(f"[SEED {s}] tamam ({time.time() - t_seed:.1f}s)")
 
     runs = pd.DataFrame(rows, columns=["algo", "seed", *METRIC_KEYS])
     return runs

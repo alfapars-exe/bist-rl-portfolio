@@ -29,9 +29,13 @@
 | Doğrulama | 101 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
+> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir.
+
 ---
 
 ## 1. Giriş (Rapor §9.1)
+
+> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir.
 
 **Problem neden önemli?** Portföy yönetimi, sınırlı sermayeyi zaman içinde değişen riskli
 varlıklara dağıtma problemidir. Her gün piyasa yeni bilgi üretir; yatırımcı işlem maliyeti,
@@ -69,6 +73,45 @@ portföy-RL referansı olmasıdır.
 | **Değişkenlik** | Eğitimde her episode farklı tarih penceresinden başlar (çeşitlilik → genelleme). Piyasa getirileri stokastiktir; vade preset'i (kısa/orta/uzun) rebalans frekansını ve ödül katsayılarını değiştirir |
 | **Başarı ölçütü** | Episode sonunda ajan NAV'ı eşit-ağırlık benchmark NAV'ını geçtiyse "başarılı" (`success_vs_benchmark`); test döneminde Sharpe/Sortino/CAGR baseline üstü |
 | **Başarısızlık durumu** | NAV iflas eşiğinin (varsayılan 0.01) altına düşerse episode "iflas" ile biter ve büyük ceza uygulanır |
+
+---
+
+## 2b. Veri Metodolojisi ve Sınırlılıklar
+
+Bu bölüm, deneysel sonuçların yorumlanması için kritik olan veri tasarımı kararlarını ve açık sınırlılıkları belgeler.
+
+### Evren seçimi ve survivorship bias
+
+Evren, bugünkü BIST 30 bileşenlerinden KOZAA.IS ve KOZAL.IS çıkarılarak oluşturulmuştur (28 hisse). Bu seçim yönteminde **survivorship bias** riski mevcuttur: 2015–2024 döneminde BIST 30 endeksinden çıkan, askıya alınan veya delist olan hisseler evrene dahil edilmemiştir. Gerçek bir portföy yöneticisi bu hisselere de maruz kalırdı; bunların dışarıda bırakılması tarihsel performans tahminini iyimser yönde çarpıtabilir. Bu, açık ve dürüst bir metodolojik sınırlılıktır.
+
+KOZAA.IS ve KOZAL.IS'in hariç tutulma gerekçesi: `data.py` satır 17'deki yorum `"KOZAA.IS ve KOZAL.IS prompt gereği hariç tutuldu (28 hisse)"` olarak belgelenmiştir — bu iki ticker proje şartı (sınav ödevi tanımı) gereği kapsam dışıdır.
+
+### Fiyat verisi ve düzeltmeler
+
+- **Kaynak:** yfinance kütüphanesi (`data.py:87–90`), `auto_adjust=True` parametresiyle indirilir. Bu parametre temettü ve hisse bölünmesi (stock split) etkisini geriye dönük olarak ayarlı kapanış fiyatlarına yansıtır; ham fiyat yerine **düzeltilmiş kapanış** kullanılır.
+- **Cache:** İlk başarılı indirmede `data/prices.parquet` olarak kaydedilir (pyarrow). Sonraki çalıştırmalar cache'ten okur; `use_cache=False` ile zorla yeniden indirilir.
+- **Sentetik GBM fallback:** yfinance erişilemez olduğunda (`data.py:113–121`) BIST istatistiklerine kalibre edilmiş çok değişkenli GBM (Geometric Brownian Motion) üretilir. Sentetik veri cache'e **yazılmaz** (cache zehirlenmesi önlemi, `data.py:125–130`). Sentetik veriden elde edilen sonuçlar yalnızca demo amaçlıdır; gerçek BIST fiyatı değildir.
+
+### Eksik veri işleme
+
+- **Sütun düşürme:** `dropna(thresh=int(0.9 * len(px)))` — bir hissenin toplam veri noktalarının %90'ından fazlası eksikse o hisse düşürülür (`data.py:95`).
+- **Doldurma:** `ffill().bfill()` — kalan eksik değerler önce ileri, sonra geri doldurulur.
+- **Kısmi indirme koruması:** yfinance bazı ticker'ları getirememişse (`data.py:104–111`) eksik hisseler sentetik GBM ile tamamlanır; böylece evren boyutu (N=28) ve state vektörü boyutu (397) sabit kalır. Bu durum `RuntimeWarning` ile kullanıcıya bildirilir.
+
+### İşlem yapılabilirlik basitleştirmeleri (açık sınırlılıklar)
+
+Modelde aşağıdaki gerçek piyasa etkileri **modellenmemiştir**:
+
+| Basitleştirme | Gerçek piyasadaki karşılığı | Etkisi |
+|---|---|---|
+| Bid-ask spread | Alış/satış fiyatı farkı | Gerçek işlem maliyeti η·‖Δw‖₁'den yüksek olabilir |
+| Likidite kısıtı | Büyük emirlerin fiyatı hareket ettirmesi (market impact) | Küçük portföylerde ihmal edilebilir, büyük fonlarda kritik |
+| Fiyat limitleri (devre kesici) | BIST günlük %10 tavan/taban | Kriz günlerinde gerçekleştirilemez emirler |
+| BSMV / damga vergisi | İşlem başına %0.2 BSMV | Yüksek turnover'da ek maliyet |
+| Lot kısıtı | Minimum işlem birimi (lot=1 hisse) | Küçük portföylerde tahsis hassasiyeti kaybolur |
+| Slippage (V8) | Eğitimde Gauss gürültüsü σ=0.001 eklendi (`EnvConfig.price_noise_std`) | Kısmi: anti-ezber amaçlı, gerçek likidite modeli değil |
+
+Test dönemi yalnızca 2022–2024 (≈3 yıl, tek kesim) kullanılmıştır. Farklı piyasa rejimleri (2008, 2013 BIST çöküşü, pandemi) test setine dahil değildir; walk-forward (3 kat) bu sınırlamayı kısmen giderir ancak tam olarak çözmez.
 
 ---
 
@@ -146,8 +189,8 @@ sₜ = [ z-skorlu teknik öznitelikler (F × 28) ‖ makro rejim (4) ‖ mevcut 
 | Soru (PDF §5.1) | Cevap |
 |---|---|
 | Ajan hangi bilgileri gözlüyor? | Teknik göstergeler (momentum/trend/volatilite/RSI/MACD/Bollinger), bir-adım getiri tahmini, mevcut ağırlıklar |
-| Markov özelliğini sağlıyor mu? | Evet — işlem maliyeti `‖wₜ−w_{t−1}‖₁`'e bağlı olduğundan **mevcut ağırlık state'e dahildir**; geçmiş, kayan-pencere göstergelerle özetlenir |
-| Eksik bilgi var mı? | Ham fiyat tarihçesi yerine özetlenmiş göstergeler kullanılır; **V6'dan önce makro rejim eksikti** (faiz/dolar/altın) → eklendi |
+| Markov özelliğini sağlıyor mu? | **Finansal piyasa tam gözlemlenebilir bir Markov ortamı DEĞİLDİR.** Problem, geçmiş teknik göstergeler + portföy ağırlıklarıyla **yaklaşık bir MDP** (partially observable market process approximated as an MDP) olarak kurulmuştur. İşlem maliyeti `‖wₜ−w_{t−1}‖₁`'e bağlı olduğundan **mevcut ağırlığın state'e dahil edilmesi zorunludur**; geçmiş fiyat tarihçesi kayan-pencere göstergelerle özetlenerek Markov yaklaşımı güçlendirilir. Gizli makro/likidite dinamikleri, piyasa mikroyapısı ve sürü davranışı gibi gözlemlenemeyen etkenler state'te temsil edilmemiştir; bu bir açık sınırlılıktır. |
+| Eksik bilgi var mı? | Ham fiyat tarihçesi yerine özetlenmiş göstergeler kullanılır; **V6'dan önce makro rejim eksikti** (faiz/dolar/altın) → eklendi. Gizli piyasa durumu (likidite, kurumsal akım, jeopolitik risk) modellenmemiştir. |
 | Durum vektörü kaç boyutlu? | 397 (DQN/SAC) / 369 (PPO) — makro blok dahil |
 | Görsel girdi var mı? | Hayır — durum sayısal öznitelik vektörüdür |
 
@@ -219,45 +262,7 @@ ile çalışma-zamanında ortama enjekte eder.
 | `regime_beta` | `RewardConfig.regime_beta` | 1.0 | Kriz amplifikasyon gücü β |
 | `cvar_amp` | `RewardConfig.cvar_amp` | 1.0 | Rejim amplifikasyon üsteli a |
 
-#### V9 — Opt-in deneysel terimler (varsayılan KAPALI, golden korunur)
-
-İki ek terim `RewardConfig`'te varsayılan olarak `0.0` (kapalı) tanımlanmıştır.
-`w_*` alanları sıfır iken hesaplama sonuca sıfır katkı yapar — kanonik ödül
-bit-aynı kalır ve `tests/golden/` ≤1e-6 toleransı korunur. Yeni RNG çağrısı
-yoktur; yalnız mevcut `nav`, `step_count` ve `max_steps` değerleri kullanılır.
-
-**Kazanç-çarpanı ödülü** — NAV belirlenen `gain_floor` eşiğini aştığında doğrusal
-bonus; isteğe bağlı hız faktörü erken büyümeyi kayırır (nav=2·w_gain @ gain_floor=1;
-nav=3 → 2·w_gain):
-
-```
-step_frac  = step_count / max_steps                          # 0 → 1
-gain_bonus = w_gain · max(0, nav − gain_floor)
-             · (1 + w_gain_speed · (1 − step_frac))
-```
-
-| Parametre | `RewardConfig` alanı | Varsayılan | Davranışsal etki |
-|-----------|----------------------|-----------|-----------------|
-| `w_gain` | `RewardConfig.w_gain` | 0.0 | Kazanç büyüklük ölçeği (0 → kapalı) |
-| `gain_floor` | `RewardConfig.gain_floor` | 1.0 | NAV eşiği; üstü ödüllenir |
-| `w_gain_speed` | `RewardConfig.w_gain_speed` | 0.0 | Erken-kazanç hız faktörü (0 → hızdan bağımsız) |
-
-**İflas-timing cezası** — erken iflas daha sert cezalandırılır; `w_ruin_timing=0`
-durumunda düz `bankruptcy_penalty` değeri korunur:
-
-```
-ruin_timing_mult = 1 + w_ruin_timing · (1 − step_frac)
-ruin_pen         = bankruptcy_penalty · ruin_timing_mult   (bankrupt ise, yoksa 0)
-```
-
-| Parametre | `RewardConfig` alanı | Varsayılan | Davranışsal etki |
-|-----------|----------------------|-----------|-----------------|
-| `w_ruin_timing` | `RewardConfig.w_ruin_timing` | 0.0 | Erken-iflas ceza ölçeği (0 → düz ceza) |
-
-> Kaynak: `env/reward.py` `RewardEngine.compute()` (satır 157–223) ve
-> `config.py` `RewardConfig` (satır 152–166). Opt-in terimler `terms` sözlüğüne
-> `gain_bonus` ve `ruin_timing_mult` anahtarlarıyla eklenmektedir (UI panelleri
-> ve `test_env` bu anahtarları okur).
+> **V9 — Opt-in deneysel terimler:** Kanonik ödül formülüne dahil olmayan iki ek terim (`gain_bonus`, `ruin_timing`) `RewardConfig`'te varsayılan `0.0` (kapalı) ile tanımlanmıştır; golden ≤1e-6 toleransı korunur. Ayrıntılar için bkz. **Ek B: Deneysel (Opt-in) Ödül Terimleri**.
 
 ### 5.5. Bölüm Sonlandırma Koşulları
 
@@ -324,6 +329,7 @@ Ortak: `SEED=42`, CPU-PyTorch, train-only z-score, `random_start` eğitim çeşi
 - **DQN standart DQN:** Uygulama standart DQN'dir (Double DQN değil); hedef ağ max-Q ile
   hesaplanır, bu da overestimation bias içerebilir. DDQN'in buradaki etkisi deneysel olarak
   test edilmemiştir.
+- **Algoritma karşılaştırmasında adalet kriteri (dürüst sınır):** Bu çalışmadaki algoritma karşılaştırması **eşit env-step veya eşit wall-clock bazında değildir**. Her algoritma kendi mimarisine ve yakınsama profiline göre ayarlanmıştır: DQN 12 episode, PPO 24 güncelleme (rollout=400 adım/güncelleme), SAC/TD3 8 episode × 600 adım (`config.py TrainConfig`). Aynı sayıda çevre adımıyla karşılaştırma yapılmadığından algoritmalar arasındaki performans farkları hem öğrenme verimliliğini hem de bütçe asimetrisini yansıtıyor olabilir. Eşit-bütçe (equal env-step budget) karşılaştırması gelecek iş olarak belirtilir.
 
 ---
 
@@ -583,6 +589,8 @@ DQN aksiyon dağılımı:
 
 ## 11. Tartışma (Rapor §9.9)
 
+> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir. Bu bulgu §8.3 metrik tablosunda sayısal olarak belgelenmiştir (EqualWeight FinalNAV 6.685, BuyHold 6.713 — tüm RL ajanlarının üstünde; SAC/TD3 Sharpe ~2.0–2.1 ile risk-ayarlı metrikte rekabetçi ancak mutlak getiri düşük).
+
 - **İlk state tasarımı neden yetersizdi?** 5 teknik öznitelik tek-ölçekli sinyal veriyordu;
   çoklu-ölçek trend/volatilite ve ileri-görü (forecast) olmadan ajan rejim ayrımı yapamıyordu.
 - **İlk reward tasarımı neden yetersizdi?** Sabit η/λ/τ, volatil rejimde ya aşırı ya yetersiz
@@ -678,3 +686,40 @@ pytest -m "not slow"            # hızlı yerel döngü (UI smoke hariç)
 | Arayüz | `app.py`, `ui/` |
 | Figürler | `plots.py` → `figures/` |
 | Testler | `tests/` |
+
+---
+
+## Ek B: Deneysel (Opt-in) Ödül Terimleri (V9)
+
+Bu ek, ana ödül formülüne dahil olmayan iki deneysel terimi belgeler. Her iki terim de `RewardConfig`'te varsayılan `0.0` (kapalı) ile tanımlanmıştır; `w_*` alanları sıfır iken hesaplama sonuca sıfır katkı yapar, kanonik ödül bit-aynı kalır ve `tests/golden/` ≤1e-6 toleransı korunur. Yeni RNG çağrısı yoktur; yalnız mevcut `nav`, `step_count` ve `max_steps` değerleri kullanılır.
+
+Kaynak: `env/reward.py` `RewardEngine.compute()` (satır 157–223) ve `config.py` `RewardConfig` (satır 152–166). Opt-in terimler `terms` sözlüğüne `gain_bonus` ve `ruin_timing_mult` anahtarlarıyla eklenmektedir (UI panelleri ve `test_env` bu anahtarları okur).
+
+### B.1. Kazanç-çarpanı ödülü (`gain_bonus`)
+
+NAV belirlenen `gain_floor` eşiğini aştığında doğrusal bonus; isteğe bağlı hız faktörü erken büyümeyi kayırır (nav=2 → w_gain @ gain_floor=1; nav=3 → 2·w_gain):
+
+```
+step_frac  = step_count / max_steps                          # 0 → 1
+gain_bonus = w_gain · max(0, nav − gain_floor)
+             · (1 + w_gain_speed · (1 − step_frac))
+```
+
+| Parametre | `RewardConfig` alanı | Varsayılan | Davranışsal etki |
+|-----------|----------------------|-----------|-----------------|
+| `w_gain` | `RewardConfig.w_gain` | 0.0 | Kazanç büyüklük ölçeği (0 → kapalı) |
+| `gain_floor` | `RewardConfig.gain_floor` | 1.0 | NAV eşiği; üstü ödüllenir |
+| `w_gain_speed` | `RewardConfig.w_gain_speed` | 0.0 | Erken-kazanç hız faktörü (0 → hızdan bağımsız) |
+
+### B.2. İflas-timing cezası (`ruin_timing`)
+
+Erken iflas daha sert cezalandırılır; `w_ruin_timing=0` durumunda düz `bankruptcy_penalty` değeri korunur:
+
+```
+ruin_timing_mult = 1 + w_ruin_timing · (1 − step_frac)
+ruin_pen         = bankruptcy_penalty · ruin_timing_mult   (bankrupt ise, yoksa 0)
+```
+
+| Parametre | `RewardConfig` alanı | Varsayılan | Davranışsal etki |
+|-----------|----------------------|-----------|-----------------|
+| `w_ruin_timing` | `RewardConfig.w_ruin_timing` | 0.0 | Erken-iflas ceza ölçeği (0 → düz ceza) |

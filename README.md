@@ -19,6 +19,10 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
 
+> **Ana bulgu (dürüst tez):** Derin RL, BIST portföy tahsisinde risk-ayarlı profili (Sharpe/Sortino/MaxDD) iyileştirebilen ancak bu deney tasarımında pasif benchmark'ları (EqualWeight/BuyHold) mutlak getiride (FinalNAV) istikrarlı biçimde GEÇEMEYEN bir yaklaşım olarak gözlemlenmiştir. Ayrıntılı metrikler ve dürüst sınırlar: `DOKUMANTASYON.md §8.3` ve `§11`.
+
+> **Veri sınırlılıkları:** Evren bugünkü BIST 30 bileşenlerinden seçilmiştir — dönem içinde endeksten çıkan hisseler dahil edilmemiştir (survivorship bias riski). Fiyatlar yfinance `auto_adjust=True` ile temettü/split düzeltmeli kapanış fiyatlarıdır. Bid-ask spread, fiyat limiti ve likidite kısıtları modellenmemiştir. Ayrıntılar: `DOKUMANTASYON.md §2b`.
+
 ## v2 Değişiklikleri (RL-in-finance literatürüyle hizalı)
 
 | Değişiklik | Gerekçe / kaynak |

@@ -17,7 +17,14 @@ from ui.state import ASSET_NAMES
 
 
 def _weights_pie(weights: np.ndarray, title: str = "Portföy Ağırlıkları"):
-    df = pd.DataFrame({"asset": ASSET_NAMES, "weight": weights})
+    # Güvenlik ağı: evren beklenen 28+nakit'ten farklıysa (ör. yfinance kısmi veri
+    # döndürdü) etiketleri ağırlık uzunluğuna hizala — UI çökmemeli (ASSET_NAMES sabit 29).
+    w = list(np.asarray(weights).ravel())
+    names = list(ASSET_NAMES)
+    if len(names) != len(w):
+        names = names[:max(0, len(w) - 1)] + ["CASH"]
+        names = (names + [f"A{i}" for i in range(len(names), len(w))])[:len(w)]
+    df = pd.DataFrame({"asset": names, "weight": w})
     df = df[df["weight"] > 0.005]  # çok küçük dilimleri gizle
     fig = px.pie(df, names="asset", values="weight", title=title, hole=0.35)
     fig.update_traces(textposition="inside", textinfo="percent+label")

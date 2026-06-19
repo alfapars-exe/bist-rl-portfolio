@@ -97,6 +97,19 @@ def download_bist(tickers=BIST28, start=None, end=None,
         if px.shape[1] < 10:
             raise RuntimeError("Too few tickers returned")
         px = px[[c for c in tickers if c in px.columns]]
+        # Evren degismezligi: yfinance kismi dondurduyse (bazi ticker'lar eksik /
+        # >%10 NaN -> dropna ile dustu) eksikleri sentetik ile doldurup TAM BIST28'i
+        # garanti et. Aksi halde N degisir -> UI ASSET_NAMES (sabit 29) ile uyumsuzluk
+        # + kayitli ajan state-dim (397) ile uyumsuzluk olur.
+        miss = [c for c in tickers if c not in px.columns]
+        if miss:
+            warnings.warn(
+                f"{len(miss)} ticker yfinance'tan gelmedi; sentetik ile dolduruldu: "
+                f"{miss}", RuntimeWarning, stacklevel=2)
+            synth = _synthetic_bist(miss, start, end).reindex(px.index).ffill().bfill()
+            for c in miss:
+                px[c] = synth[c].to_numpy()
+        px = px[list(tickers)].ffill().bfill()
     except Exception as exc:
         # Sessiz yutma yok: stderr'e gorunur uyari (CI loglari + kullanici).
         warnings.warn(

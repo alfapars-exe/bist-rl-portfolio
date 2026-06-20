@@ -213,9 +213,10 @@ def sidebar_controls():
         min_value=0.0, max_value=0.01,
         value=float(st.session_state.price_noise_std),
         step=0.0005, format="%.4f",
-        help="Her episode train hisse getirilerine eklenen minik gürültü (virgül sonrası "
-             "basamaklara etki eder). Eğitim-YALNIZ; eval'de hep KAPALI. Her episode farklı "
-             "realizasyon → ezberi önler. 0 = kapalı.",
+        help="σ = gürültünün STANDART SAPMASI (ölçek) — eklenen SABİT sayı DEĞİL. Her train "
+             "ADIMINDA her hisseye N(0, σ)'dan ÇEKİLEN AYRI bir rastgele sayı eklenir "
+             "(rng.normal, env-yerel); ardışık adımlar ve her episode farklı realizasyon → "
+             "ezberi önler. Eğitim-YALNIZ; eval'de hep KAPALI. 0 = kapalı.",
     )
 
     st.sidebar.divider()

@@ -132,7 +132,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         render_now = (len(curve) == 1) or (len(curve) % RENDER_EVERY == 0)
         if render_now:
             _render_live_curves(pd.DataFrame(curve),
-                                ph_reward, ph_gain, ph_success, ph_loss)
+                                ph_reward, ph_gain, ph_success, ph_loss, seq=d["iter"])
 
         # --- Throughput metrikleri ---
         iter_end_elapsed = time.time() - t0
@@ -159,7 +159,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
                 ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
                 ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
                 ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-                ph_bankrupt=ph_bankrupt,
+                ph_bankrupt=ph_bankrupt, seq=d["iter"],
             )
 
         status.info(f"Episode {cur_ep}/{n_episodes} · NAV={rec['nav']:.3f} · "
@@ -240,38 +240,44 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         )
 
 
-def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
-    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri)."""
+def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss, seq=0):
+    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri).
+
+    seq: render sirasi (iter no). Streamlit 1.5x st.empty() slot'una DONGU icinde
+    tekrar cizimde ELEMAN ID'sini her seferinde yeniden kaydeder; sabit key ->
+    StreamlitDuplicateElementKey. Render-basina BENZERSIZ key (seq) -> her cizim
+    benzersiz; empty() slot yine yalniz son grafigi gosterir (yerinde gunceller).
+    """
     fig_r = px.line(df, x="iter", y="reward",
                     title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
                     markers=True)
     fig_r.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_reward.plotly_chart(fig_r, use_container_width=True, key="train_live_reward")
+    ph_reward.plotly_chart(fig_r, use_container_width=True, key=f"train_live_reward_{seq}")
 
     fig_g = px.line(df, x="iter", y="gain",
                     title="Kazanç (nihai NAV − 1.0)",
                     markers=True)
     fig_g.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_gain.plotly_chart(fig_g, use_container_width=True, key="train_live_gain")
+    ph_gain.plotly_chart(fig_g, use_container_width=True, key=f"train_live_gain_{seq}")
 
     fig_s = px.bar(df, x="iter", y="success",
                    title="Başarı (EW benchmark'a göre 0/1)")
     fig_s.update_layout(height=260, margin=dict(t=40, b=20),
                         yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
-    ph_success.plotly_chart(fig_s, use_container_width=True, key="train_live_success")
+    ph_success.plotly_chart(fig_s, use_container_width=True, key=f"train_live_success_{seq}")
 
     if "loss" in df.columns:
         fig_l = px.line(df, x="iter", y="loss",
                         title="Ortalama loss (düşüş beklenir)",
                         markers=True)
         fig_l.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_loss.plotly_chart(fig_l, use_container_width=True, key="train_live_loss")
+        ph_loss.plotly_chart(fig_l, use_container_width=True, key=f"train_live_loss_{seq}")
 
 
 def _render_train_tl_panel(env, algo, rec, initial_capital,
                             ph_tl_start, ph_tl_end, ph_tl_net, ph_tl_min, ph_tl_max, ph_tl_dd,
                             ph_tl_line, ph_tl_bar, ph_tl_table, ph_tl_port,
-                            ph_bankrupt=None):
+                            ph_bankrupt=None, seq=0):
     """Son episod/iter için TL türevlerini hesapla ve placeholder'ları güncelle."""
     nav_hist = list(env.nav_history)
     weight_hist = list(env.weight_history)
@@ -319,7 +325,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_tl.update_layout(title="Portföy Değeri (TL)", height=280,
                          margin=dict(t=40, b=30), xaxis_title="Gün",
                          yaxis_title="TL")
-    ph_tl_line.plotly_chart(fig_tl, use_container_width=True, key="train_tl_line")
+    ph_tl_line.plotly_chart(fig_tl, use_container_width=True, key=f"train_tl_line_{seq}")
 
     # Adım P&L bar chart (yeşil/kırmızı)
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_pnl_arr]
@@ -327,7 +333,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_bar.update_layout(title="Adım P&L (TL)", height=280,
                           margin=dict(t=40, b=30), xaxis_title="Gün",
                           yaxis_title="TL")
-    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True, key="train_tl_bar")
+    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True, key=f"train_tl_bar_{seq}")
 
     # Tam adım tablosu
     dates_slice = env.dates[t_start + 1 : t_start + 1 + steps_done]
@@ -346,13 +352,15 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
         action_names=action_names, action_indices=action_indices,
         reward_terms_list=rt_hist, initial_capital=initial_capital,
     )
-    ph_tl_table.dataframe(df_rows, hide_index=True, use_container_width=True, height=500)
+    ph_tl_table.dataframe(df_rows, hide_index=True, use_container_width=True, height=500,
+                          key=f"train_tl_table_{seq}")
 
     # Episod sonu portföy panosu (w_prev = sondan bir önceki adım)
     last = snaps[-1]
     w_prev = weight_hist[-2] if len(weight_hist) >= 2 else None
     df_port = build_portfolio_table(BIST28, last, include_cash=True, w_prev=w_prev)
-    ph_tl_port.dataframe(df_port, hide_index=True, use_container_width=True)
+    ph_tl_port.dataframe(df_port, hide_index=True, use_container_width=True,
+                         key=f"train_tl_port_{seq}")
 
     # İflas olduysa eğitim panelinin altında uyarı göster
     last_rt = rt_hist[-1] if rt_hist else {}

@@ -181,9 +181,12 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     elapsed = time.time() - t0
     stop_slot.empty()
     progress_bar.progress(1.0, text=f"Tamamlandı — {len(curve)} episode")
-    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir)
+    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir).
+    # seq="final": dongu-ici render'larin (seq=iter no) HICBIRIYLE cakismaz -> ayni
+    # st.empty() slot'una son kez yazar, benzersiz key (StreamlitDuplicateElementKey yok).
     if curve:
-        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss)
+        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss,
+                            seq="final")
     if last_rec is not None:
         _render_train_tl_panel(
             env=last_rec["env"], algo=algo, rec=last_rec, initial_capital=initial_capital,
@@ -191,7 +194,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
             ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
             ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
             ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-            ph_bankrupt=ph_bankrupt,
+            ph_bankrupt=ph_bankrupt, seq="final",
         )
     if stopped_early:
         status.warning(f"{algo} eğitimi {len(curve)}. iter sonunda durduruldu "

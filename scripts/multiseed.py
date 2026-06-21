@@ -117,7 +117,7 @@ def run(seeds: list[int], algos: list[str]) -> pd.DataFrame:
             np.random.seed(canonical.SEED)
             t_seed = time.time()
             print("=" * 64)
-            print(f"[SEED {s}] veri hazirlaniyor (random_start={'AC' if True else ''})...")
+            print(f"[SEED {s}] veri hazirlaniyor (random_start=AC)...")
             bundle = canonical.prepare_data()
 
             # Tam kanonik sira (DQN -> PPO -> SAC -> TD3); ajanlari sakla.

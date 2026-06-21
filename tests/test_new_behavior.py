@@ -237,7 +237,7 @@ class TestCashRiskFreeBaseline:
         from utils.metrics import summary
         d = cash_riskfree(prices)
         m = summary(d["nav"], d["rets"], d["weights"])
-        assert m["Turnover"] == 0.0
+        assert abs(m["Turnover"]) < 1e-12
 
     def test_cash_riskfree_nan_metrics(self, prices):
         """Sifir vol -> Sharpe/Sortino/Calmar NaN (NaN-guard).

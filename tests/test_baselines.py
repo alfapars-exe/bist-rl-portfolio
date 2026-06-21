@@ -116,7 +116,7 @@ def test_cash_riskfree_flat(prices):
     np.testing.assert_allclose(d["rets"], 0.0, atol=1e-12)
     np.testing.assert_allclose(d["weights"], 0.0, atol=1e-12)
     m = summary(d["nav"], d["rets"], d["weights"])
-    assert m["Turnover"] == 0.0
+    assert abs(m["Turnover"]) < 1e-12
     assert abs(m["Volatility"]) < 1e-9
 
 

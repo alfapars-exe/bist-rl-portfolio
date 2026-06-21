@@ -85,7 +85,7 @@ class TestGoldenSafety:
             nav=2.5, peak=2.5,
             step_count=10, max_steps=100,
         )
-        assert out.terms["gain_bonus"] == 0.0, (
+        assert abs(out.terms["gain_bonus"]) < 1e-12, (
             f"w_gain=0 iken gain_bonus 0 olmali; bulundu: {out.terms['gain_bonus']}")
 
     def test_ruin_timing_mult_one_when_w_ruin_zero(self):
@@ -122,7 +122,7 @@ class TestGoldenSafety:
             nav=0.8, peak=1.0,   # nav < gain_floor
             step_count=5, max_steps=100,
         )
-        assert out.terms["gain_bonus"] == 0.0, (
+        assert abs(out.terms["gain_bonus"]) < 1e-12, (
             f"nav <= gain_floor iken gain_bonus 0 olmali; "
             f"bulundu: {out.terms['gain_bonus']}")
 
@@ -135,7 +135,7 @@ class TestGoldenSafety:
                       nav=1.2, peak=1.3, step_count=10, max_steps=100)
         out = engine_off.compute(**kwargs)
         # gain_bonus=0 + ruin_timing_mult=1 kesinlikle
-        assert out.terms["gain_bonus"] == 0.0
+        assert abs(out.terms["gain_bonus"]) < 1e-12
         assert abs(out.terms["ruin_timing_mult"] - 1.0) < 1e-12
 
 
@@ -180,7 +180,7 @@ class TestNewTermsActive:
             assert bonuses[i + 1] >= bonuses[i], (
                 f"Gain bonus monoton artmali: {bonuses}")
         # nav=1.0 -> floor esiginde -> 0
-        assert bonuses[0] == 0.0
+        assert abs(bonuses[0]) < 1e-12
 
     def test_ruin_timing_mult_greater_than_one_early(self):
         """w_ruin_timing=1.0 + erken adim -> ruin_timing_mult > 1 (erken iflas daha sert)."""

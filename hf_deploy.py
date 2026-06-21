@@ -42,7 +42,14 @@ print("Kod/dokuman yuklendi.")
 # ag erisimi olmadigindan download_bist/download_macro SENTETIK GBM'e duser -> NaN) icin
 # fiyat + makro cache'ini ve egitilmis modelleri ACIKCA yukle (gitignore bypass).
 import glob as _glob  # noqa: E402
-_must = ["data/prices.parquet", "data/macro_raw.parquet"] + sorted(_glob.glob("models/*.pt"))
+import pandas as _pd  # noqa: E402
+# Makro CSV yoksa parquet'ten uret (deploy kendine yeter).
+if not os.path.exists("results/macro_raw.csv") and os.path.exists("data/macro_raw.parquet"):
+    _pd.read_parquet("data/macro_raw.parquet").to_csv("results/macro_raw.csv")
+    print("  (results/macro_raw.csv parquet'ten uretildi)")
+# GERCEK veri CSV'leri (results/*.csv gitignore'da -> upload_folder ATLAR). data.py
+# fallback'i bunlari okur (parquet Space'te reddedildigi icin CSV kullaniliyor).
+_must = ["results/bist30_prices.csv", "results/macro_raw.csv"] + sorted(_glob.glob("models/*.pt"))
 for _f in _must:
     if os.path.exists(_f):
         api.upload_file(path_or_fileobj=_f, path_in_repo=_f, repo_id=REPO_ID,
@@ -50,7 +57,7 @@ for _f in _must:
         print(f"  + {_f}")
     else:
         print(f"  ! ATLANDI (yok): {_f}")
-print("Gercek veri (prices+macro) + modeller yuklendi (gitignore bypass).")
+print("Gercek veri CSV (prices+macro) + modeller yuklendi.")
 
 # 2) Space README (Docker metadata)
 README = """---

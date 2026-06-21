@@ -111,6 +111,22 @@ def download_bist(tickers=BIST28, start=None, end=None,
                 px[c] = synth[c].to_numpy()
         px = px[list(tickers)].ffill().bfill()
     except Exception as exc:
+        # SENTETIGE DUSMEDEN ONCE: kanonik results/bist30_prices.csv (tam 2015-2024 GERCEK
+        # BIST verisi). Bu dosya .gitignore'da DEGIL -> HF Space'e yuklenir (data/*.parquet
+        # cache'i gitignore-aware upload nedeniyle Space'e GIDEMEZ). Ag/cache yoksa bunu kullan.
+        csv_fb = RESULTS_DIR / "bist30_prices.csv"
+        if use_cache and csv_fb.exists():
+            try:
+                pxc = pd.read_csv(csv_fb, index_col=0, parse_dates=True)
+                if set(tickers).issubset(set(pxc.columns)):
+                    pxc = pxc[list(tickers)]
+                    pxc = pxc.loc[(pxc.index >= pd.Timestamp(start)) &
+                                  (pxc.index <= pd.Timestamp(end))].ffill().bfill()
+                    if len(pxc) > 100:
+                        print("[INFO] yfinance yok; results/bist30_prices.csv (GERCEK BIST) kullanildi")
+                        return pxc
+            except Exception as exc_csv:
+                print(f"[WARN] bist30_prices.csv okunamadi ({exc_csv!r})")
         # Sessiz yutma yok: stderr'e gorunur uyari (CI loglari + kullanici).
         warnings.warn(
             f"yfinance basarisiz ({exc!r}); SENTETIK GBM verisi uretiliyor — "
@@ -211,6 +227,21 @@ def download_macro(series=tuple(MacroConfig.series), start=None, end=None,
         if mc.shape[1] < 3:
             raise RuntimeError("Too few macro series returned")
     except Exception as exc:
+        # SENTETIGE DUSMEDEN ONCE: results/macro_raw.csv (gercek makro; gitignore'da DEGIL
+        # -> HF Space'te bulunur). Ag/cache yoksa bunu kullan.
+        csv_fb = RESULTS_DIR / "macro_raw.csv"
+        if use_cache and csv_fb.exists():
+            try:
+                mcc = pd.read_csv(csv_fb, index_col=0, parse_dates=True)
+                have = [s for s in series if s in mcc.columns]
+                if len(have) >= 3:
+                    mcc = mcc[have].loc[(mcc.index >= pd.Timestamp(start)) &
+                                        (mcc.index <= pd.Timestamp(end))].ffill().bfill()
+                    if len(mcc) > 100:
+                        print("[INFO] yfinance yok; results/macro_raw.csv (GERCEK makro) kullanildi")
+                        return mcc
+            except Exception as exc_csv:
+                print(f"[WARN] macro_raw.csv okunamadi ({exc_csv!r})")
         warnings.warn(
             f"yfinance makro basarisiz ({exc!r}); SENTETIK makro uretiliyor — "
             "gercek piyasa verisi DEGIL!", RuntimeWarning, stacklevel=2)

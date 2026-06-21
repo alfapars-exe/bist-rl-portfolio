@@ -35,7 +35,22 @@ api.upload_folder(
                      "Dockerfile", ".github/*", "*.code-workspace", "*.lnk",
                      "hf_deploy.py"],
 )
-print("Kod/veri/model yuklendi.")
+print("Kod/dokuman yuklendi.")
+
+# KRITIK: .gitignore data/*.parquet + models/ -> upload_folder (huggingface_hub 1.20+
+# .gitignore-aware) bunlari ATLAR. Demo'nun GERCEK BIST verisiyle calismasi (yoksa HF'de
+# ag erisimi olmadigindan download_bist/download_macro SENTETIK GBM'e duser -> NaN) icin
+# fiyat + makro cache'ini ve egitilmis modelleri ACIKCA yukle (gitignore bypass).
+import glob as _glob  # noqa: E402
+_must = ["data/prices.parquet", "data/macro_raw.parquet"] + sorted(_glob.glob("models/*.pt"))
+for _f in _must:
+    if os.path.exists(_f):
+        api.upload_file(path_or_fileobj=_f, path_in_repo=_f, repo_id=REPO_ID,
+                        repo_type="space", commit_message=f"Upload {_f} (gitignore bypass)")
+        print(f"  + {_f}")
+    else:
+        print(f"  ! ATLANDI (yok): {_f}")
+print("Gercek veri (prices+macro) + modeller yuklendi (gitignore bypass).")
 
 # 2) Space README (Docker metadata)
 README = """---

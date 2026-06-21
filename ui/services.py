@@ -83,6 +83,13 @@ def _load_data():
 
     with st.spinner("Veri indiriliyor / cache okunuyor ..."):
         prices = download_bist(start=data_start, end=data_end)
+    # Sentetik-veri görünürlüğü: ağ + cache yoksa download_bist SENTETİK GBM'e düşer
+    # (px.attrs["synthetic"]=True). Bu durumda sonuçlar GERÇEK DEĞİLDİR ve NaN/anlamsız
+    # değerler çıkabilir → kullanıcıya AÇIK uyarı (sessiz NaN yerine).
+    if prices.attrs.get("synthetic"):
+        st.error("⚠️ GERÇEK BIST verisi yüklenemedi (ağ erişimi + cache yok) → SENTETİK GBM "
+                 "verisi kullanılıyor. Sonuçlar gerçek DEĞİLDİR; NaN/anlamsız değerler "
+                 "görülebilir. (Bu ortamda `data/prices.parquet` eksik — deploy ile yüklenmeli.)")
     feats_all_raw = add_features(prices)
     px_tr, px_te = train_test_split(prices, split=data_split)
     if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)

@@ -39,6 +39,7 @@ def _init_state():
         "n_episodes": 12,                          # parametrik episode sayısı (UI)
         "price_noise_std": EnvConfig.price_noise_std,  # fiyat gürültüsü σ (UI kontrolü)
         "episode_clean": True,   # 1. iterasyon orijinal veri (anti-ezber); UI default açık
+        "train_rebalance": None,  # rebalans frekansı override (None -> vade preset'i; golden-güvenli)
         # Tarih aralığı — DataConfig tek kaynak
         "data_start": _dc.start,
         "data_split": _dc.train_end,

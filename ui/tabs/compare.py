@@ -65,7 +65,7 @@ def tab_compare():
         return
 
     met_df = pd.DataFrame(rows).T.round(4)
-    st.dataframe(met_df, use_container_width=True)
+    st.dataframe(met_df, width='stretch')
     st.download_button("metrics.csv olarak indir",
                        data=met_df.to_csv().encode("utf-8"),
                        file_name="metrics.csv", mime="text/csv")
@@ -79,7 +79,7 @@ def tab_compare():
         fig.add_trace(go.Scatter(x=nav_df.index, y=nav_df[c], name=c, mode="lines"))
     fig.update_layout(title="Test dönemi NAV (başlangıç = 1.0)",
                       height=440, yaxis_title="NAV", xaxis_title="Tarih")
-    st.plotly_chart(fig, use_container_width=True, key="compare_nav")
+    st.plotly_chart(fig, width='stretch', key="compare_nav")
 
     # Ağırlık heatmap (seçilebilir)
     st.subheader("🔥 Ağırlık Isı Haritası")
@@ -106,7 +106,7 @@ def tab_compare():
         fig_hm.update_yaxes(ticktext=ASSET_NAMES,
                             tickvals=list(range(len(ASSET_NAMES))))
         fig_hm.update_layout(height=520, title=f"{chosen[0]} ağırlıkları")
-        st.plotly_chart(fig_hm, use_container_width=True, key="compare_heatmap")
+        st.plotly_chart(fig_hm, width='stretch', key="compare_heatmap")
 
         # DQN → aksiyon dağılımı
         if chosen[0] == "DQN":
@@ -117,7 +117,7 @@ def tab_compare():
             fig_a = px.bar(action_counts, title="DQN — aksiyon dağılımı (gün sayısı)")
             fig_a.update_layout(height=320, showlegend=False,
                                 yaxis_title="Gün sayısı", xaxis_title="Şablon")
-            st.plotly_chart(fig_a, use_container_width=True, key="compare_dqn_actions")
+            st.plotly_chart(fig_a, width='stretch', key="compare_dqn_actions")
 
         # Adaptif katsayılar — zaman serisi
         st.subheader("📐 Seçili ajanın adaptif katsayıları (test dönemi)")
@@ -125,8 +125,8 @@ def tab_compare():
         rt_df["date"] = [t["date"] for t in tr]
         sub = st.columns(3)
         sub[0].plotly_chart(px.line(rt_df, x="date", y="eta_t", title="η_t"),
-                            use_container_width=True, key="compare_eta_t")
+                            width='stretch', key="compare_eta_t")
         sub[1].plotly_chart(px.line(rt_df, x="date", y="lambda_t", title="λ_t"),
-                            use_container_width=True, key="compare_lambda_t")
+                            width='stretch', key="compare_lambda_t")
         sub[2].plotly_chart(px.line(rt_df, x="date", y="tau_t", title="τ_t"),
-                            use_container_width=True, key="compare_tau_t")
+                            width='stretch', key="compare_tau_t")

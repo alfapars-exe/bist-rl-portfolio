@@ -39,7 +39,7 @@ def _sidebar_reward_editor(preset: dict):
         st.caption("Ödül = log-getiri − η·turnover − λ·max(0, DD−τ) − iflas cezası")
 
         if st.button("↺ Preset'e dön (tüm override'ları sıfırla)",
-                     key="reset_reward_cfg", use_container_width=True):
+                     key="reset_reward_cfg", width='stretch'):
             st.session_state.reward_cfg = {}
             st.rerun()
 
@@ -338,6 +338,23 @@ def sidebar_controls():
         ),
     )
 
+    # Parametrik rebalans frekansı — vade preset'ini override eder (default = preset).
+    # _make_env → build_env → env.rebalance_freq'e bağlanır; CLI/golden preset kullanır (golden-güvenli).
+    _default_reb = int(preset["rebalance"])
+    _reb_max = max(2, int(_max_d))
+    _cur_reb = int(st.session_state.get("train_rebalance") or _default_reb)
+    _cur_reb = max(1, min(_reb_max, _cur_reb))
+    st.session_state.train_rebalance = st.sidebar.number_input(
+        "Rebalans frekansı (gün)",
+        min_value=1, max_value=_reb_max,
+        value=_cur_reb, step=1,
+        help=(
+            f"Kaç günde bir ağırlıklar yeniden ayarlanır (al-sat). Preset ({st.session_state.horizon}): {_default_reb} gün. "
+            "1 = her gün; arada günlerde önceki ağırlık tutulur. "
+            "Eğitim & test envlerine uygulanır; CLI/golden preset'i kullanır."
+        ),
+    )
+
     # ------------------------------------------------------------------
     # N12: Nakit yıllık faiz oranı
     # ------------------------------------------------------------------
@@ -442,7 +459,7 @@ def sidebar_controls():
         )
         if st.sidebar.button(
             "Veriyi Yükle / İndir",
-            use_container_width=True,
+            width='stretch',
             disabled=not _date_valid_outer,
         ):
             _load_data()
@@ -452,7 +469,7 @@ def sidebar_controls():
     else:
         st.sidebar.success(f"Veri yüklü: {st.session_state.prices.shape[0]} gün × "
                            f"{st.session_state.prices.shape[1]} hisse")
-        if st.sidebar.button("Veriyi yeniden yükle", use_container_width=True):
+        if st.sidebar.button("Veriyi yeniden yükle", width='stretch'):
             for k in ["data_loaded", "prices", "px_tr", "px_te",
                       "feats_tr", "feats_te", "scaler",
                       "trained_agents", "test_traces", "baselines"]:
@@ -534,7 +551,7 @@ def sidebar_controls():
                  "diğer karakterler _ ile değiştirilir. Boş bırakılırsa "
                  f"'{_default_name}' kullanılır.",
         )
-        if st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
+        if st.sidebar.button("💾 Eğitilmiş modeli kaydet", width='stretch'):
             p = save_trained_agent(
                 algo, st.session_state.horizon, st.session_state.adaptive,
                 name=_model_name,
@@ -581,7 +598,7 @@ def sidebar_controls():
             f"Dosya: `{_sel_model['path'].split('/')[-1].split(chr(92))[-1]}`"
         )
 
-        if st.sidebar.button("📂 Seçili modeli yükle", use_container_width=True):
+        if st.sidebar.button("📂 Seçili modeli yükle", width='stretch'):
             result = load_saved_agent_from_path(_sel_model["path"])
             if result:
                 _lkey, _lmeta = result

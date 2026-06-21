@@ -82,17 +82,17 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     with left:
         st.subheader("📊 Durum vektöründen top-8 öznitelik (z-score)")
         df_state = _state_top_features(snap["state"], top_k=8)
-        st.dataframe(df_state, hide_index=True, use_container_width=True, height=310)
+        st.dataframe(df_state, hide_index=True, width='stretch', height=310)
 
         if snap["q_values"] is not None:
             st.plotly_chart(_q_bar(snap["q_values"], snap["action_idx"]),
-                            use_container_width=True, key="test_q_bar")
+                            width='stretch', key="test_q_bar")
 
     with right:
         st.plotly_chart(_weights_pie(snap["weights_after"]),
-                        use_container_width=True, key="test_weights_pie")
+                        width='stretch', key="test_weights_pie")
         st.plotly_chart(_reward_bar(snap["reward_terms"]),
-                        use_container_width=True, key="test_reward_bar")
+                        width='stretch', key="test_reward_bar")
 
     # --- İflas uyarısı (eğer bu adım bankrupt ise) ---
     if snap["reward_terms"].get("bankrupt"):
@@ -112,7 +112,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         st.caption("Durum: **YENİ** = bu adımda alındı · **TUTULUYOR** = pozisyon devam ediyor · "
                    "**ÇIKIŞ** = bu adımda satıldı")
         df_port = build_portfolio_table(BIST28, tl_now, include_cash=True, w_prev=w_prev)
-        st.dataframe(df_port, hide_index=True, use_container_width=True, height=360)
+        st.dataframe(df_port, hide_index=True, width='stretch', height=360)
     with tl_right:
         st.subheader("🧾 Bu adımın işlem logu")
         df_trade = build_trade_log(BIST28, tl_now, threshold_tl=1.0)
@@ -120,7 +120,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
             rebal = env_rebalance_hint(horizon)
             st.info(f"Bu adımda işlem yok (rebalans her {rebal} günde bir).")
         else:
-            st.dataframe(df_trade, hide_index=True, use_container_width=True, height=280)
+            st.dataframe(df_trade, hide_index=True, width='stretch', height=280)
         commission_tl = float(tl_now["commission_tl"])
         st.caption(f"Bu adımda komisyon: **{commission_tl:,.2f} ₺** "
                    f"(tx_cost oranı × portföy TL)")
@@ -141,7 +141,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         hc[2].metric("Toplam SATIŞ TL", f"{total_sells:,.0f} ₺")
         # En yeni işlemler üstte
         st.dataframe(df_hist.iloc[::-1].reset_index(drop=True),
-                     hide_index=True, use_container_width=True, height=320)
+                     hide_index=True, width='stretch', height=320)
 
     # --- Kümülatif/Step PnL grafikleri (başlangıçtan bu adıma) ---
     st.subheader("📈 TL Kazanç Zaman Serisi (başlangıçtan bu adıma)")
@@ -157,14 +157,14 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         fig_cum.update_layout(title="Kümülatif Kâr/Zarar (TL)", height=300,
                               margin=dict(t=40, b=30), xaxis_title="Adım",
                               yaxis_title="TL")
-        st.plotly_chart(fig_cum, use_container_width=True, key="test_cum_pnl")
+        st.plotly_chart(fig_cum, width='stretch', key="test_cum_pnl")
     with pnl_right:
         colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_arr]
         fig_step = go.Figure(go.Bar(x=steps_idx, y=step_arr, marker_color=colors))
         fig_step.update_layout(title="Adım P&L (TL)", height=300,
                                margin=dict(t=40, b=30), xaxis_title="Adım",
                                yaxis_title="TL")
-        st.plotly_chart(fig_step, use_container_width=True, key="test_step_pnl")
+        st.plotly_chart(fig_step, width='stretch', key="test_step_pnl")
 
     # Adaptif katsayı zaman serisi (o ana kadar)
     st.subheader("📈 Adaptif katsayılar (baştan bu adıma kadar)")
@@ -173,13 +173,13 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     cc = st.columns(3)
     cc[0].plotly_chart(
         px.line(rt_hist, x="step", y="eta_t", title="η_t (tx cost katsayısı)"),
-        use_container_width=True, key="test_eta_t")
+        width='stretch', key="test_eta_t")
     cc[1].plotly_chart(
         px.line(rt_hist, x="step", y="lambda_t", title="λ_t (DD penalty katsayısı)"),
-        use_container_width=True, key="test_lambda_t")
+        width='stretch', key="test_lambda_t")
     cc[2].plotly_chart(
         px.line(rt_hist, x="step", y="tau_t", title="τ_t (DD eşiği)"),
-        use_container_width=True, key="test_tau_t")
+        width='stretch', key="test_tau_t")
 
     # Oynatma döngüsü — session_state.playing true iken otomatik ilerle
     if st.session_state.playing and idx < max_step:

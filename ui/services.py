@@ -223,6 +223,9 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     # Episode-clean (kullanici istegi: 1. iterasyon ORIJINAL veri, 2+ farkli noise'lu).
     # Yalniz egitimde + UI toggle (default True) acikken. Eval'de noise zaten kapali -> etkisiz.
     ep_clean = bool(is_train and st.session_state.get("episode_clean", True))
+    # Rebalans frekansı override (sidebar): None -> preset (golden-güvenli). Train+eval'e
+    # AYNI değer uygulanır (model hangi frekansla eğitildiyse onunla test edilsin).
+    rebalance_freq = st.session_state.get("train_rebalance")
     # N12: nakit faiz — önce parametre, sonra session_state, sonra env default (None).
     if cash_daily_rate is None:
         cash_daily_rate = st.session_state.get("cash_daily_rate", None)
@@ -234,6 +237,7 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
         episode_clean=ep_clean,                    # 1. iterasyon orijinal (anti-ezber)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
         cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
+        rebalance_freq=rebalance_freq,             # sidebar override (None -> preset)
     )
 
 

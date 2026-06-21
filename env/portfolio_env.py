@@ -89,6 +89,7 @@ class PortfolioEnv:
                  price_noise_std: float = EnvConfig.price_noise_std,
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  episode_clean: bool = False,
+                 rebalance_freq: int | None = None,
                  cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
@@ -111,7 +112,8 @@ class PortfolioEnv:
 
         self.horizon = horizon
         preset = HORIZON_PRESETS[horizon]
-        self.rebalance_freq = preset["rebalance"]
+        # rebalance_freq: None -> preset (CLI/golden bit-ayni); UI override -> max(1, int).
+        self.rebalance_freq = preset["rebalance"] if rebalance_freq is None else max(1, int(rebalance_freq))
         self.mom_window     = preset["mom_window"]
         self.minvol_window  = preset["minvol_window"]
         self.gamma          = preset["gamma"]

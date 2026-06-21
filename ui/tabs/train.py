@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -61,6 +62,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     if not (run or resume):
         if already:
             _render_training_curves(st.session_state.trained_agents[key][1], algo)
+            _render_episode_browser(key, algo, float(st.session_state.initial_capital))
         return
 
     # --- CANLI EĞİTİM (sınırsız) ---
@@ -117,6 +119,9 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     progress_bar = st.progress(0.0, text=f"Episode 0 / {n_episodes}")
 
     last_rec = None
+    # Per-episode telemetri (episode seçici için): her episode'un TL izini sakla (UI-only).
+    ep_snaps: list = []
+    ep_shared: dict = {"prices": None, "dates": None}
     for rec in gen:
         iter_start_elapsed = time.time() - t0
         trained_agent = rec["agent"]
@@ -127,6 +132,25 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         curve.append(d)
         # Her iter sonunda session'a yaz → kullanıcı durdurursa veya refresh etse bile son hali kalır
         st.session_state.trained_agents[key] = (trained_agent, list(curve))
+
+        # Per-episode snapshot — selectbox ile sonradan incelemek için (UI-only, golden-etkisiz).
+        if ep_shared["prices"] is None:
+            ep_shared["prices"] = env.prices
+            ep_shared["dates"] = env.dates
+        ep_snaps.append({
+            "iter": int(d["iter"]),
+            "reward": float(rec["reward"]), "nav": float(rec["nav"]),
+            "gain": float(rec.get("gain", rec["nav"] - 1.0)),
+            "loss": float(rec.get("loss", 0.0)),
+            "success": int(rec.get("success", 0)),
+            "nav_history": list(env.nav_history),
+            "weight_history": [np.asarray(w, dtype=np.float32) for w in env.weight_history],
+            "reward_terms_history": [dict(rt) for rt in env.reward_terms_history],
+            "t": int(env.t), "step_count": int(env.step_count),
+            "actions": list(rec.get("actions") or []),
+        })
+        st.session_state.setdefault("episode_snaps", {})[key] = ep_snaps
+        st.session_state.setdefault("episode_shared", {})[key] = ep_shared
 
         # Agir serilestirme (4 egri + TL paneli) yalniz her RENDER_EVERY iterde
         render_now = (len(curve) == 1) or (len(curve) % RENDER_EVERY == 0)
@@ -141,7 +165,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         rate = (len(recent) / sum(recent)) if sum(recent) > 0 else 0.0
         avg = sum(iter_times) / len(iter_times)
         cur_ep = iter_offset + rec["iter"] + 1
-        ph_iter.metric("Iter", cur_ep)
+        ph_iter.metric("Episode", f"{cur_ep} / {n_episodes}")
         ph_rate.metric("Iter/sn", f"{rate:.2f}")
         ph_avg.metric("Ort. iter süresi", f"{avg:.2f}s")
         mm = int(iter_end_elapsed // 60); ss = int(iter_end_elapsed % 60)
@@ -242,6 +266,9 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
             help="reward_terms_history'den: adım başı ortalama tx_cost",
         )
 
+    # Episode seçici — eğitilen her episode'un detayını (TL izi/grafik/değerler) incele.
+    _render_episode_browser(key, algo, initial_capital)
+
 
 def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss, seq=0):
     """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri).
@@ -255,26 +282,26 @@ def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss, seq=0):
                     title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
                     markers=True)
     fig_r.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_reward.plotly_chart(fig_r, use_container_width=True, key=f"train_live_reward_{seq}")
+    ph_reward.plotly_chart(fig_r, width='stretch', key=f"train_live_reward_{seq}")
 
     fig_g = px.line(df, x="iter", y="gain",
                     title="Kazanç (nihai NAV − 1.0)",
                     markers=True)
     fig_g.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_gain.plotly_chart(fig_g, use_container_width=True, key=f"train_live_gain_{seq}")
+    ph_gain.plotly_chart(fig_g, width='stretch', key=f"train_live_gain_{seq}")
 
     fig_s = px.bar(df, x="iter", y="success",
                    title="Başarı (EW benchmark'a göre 0/1)")
     fig_s.update_layout(height=260, margin=dict(t=40, b=20),
                         yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
-    ph_success.plotly_chart(fig_s, use_container_width=True, key=f"train_live_success_{seq}")
+    ph_success.plotly_chart(fig_s, width='stretch', key=f"train_live_success_{seq}")
 
     if "loss" in df.columns:
         fig_l = px.line(df, x="iter", y="loss",
                         title="Ortalama loss (düşüş beklenir)",
                         markers=True)
         fig_l.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_loss.plotly_chart(fig_l, use_container_width=True, key=f"train_live_loss_{seq}")
+        ph_loss.plotly_chart(fig_l, width='stretch', key=f"train_live_loss_{seq}")
 
 
 def _render_train_tl_panel(env, algo, rec, initial_capital,
@@ -328,7 +355,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_tl.update_layout(title="Portföy Değeri (TL)", height=280,
                          margin=dict(t=40, b=30), xaxis_title="Gün",
                          yaxis_title="TL")
-    ph_tl_line.plotly_chart(fig_tl, use_container_width=True, key=f"train_tl_line_{seq}")
+    ph_tl_line.plotly_chart(fig_tl, width='stretch', key=f"train_tl_line_{seq}")
 
     # Adım P&L bar chart (yeşil/kırmızı)
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_pnl_arr]
@@ -336,7 +363,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_bar.update_layout(title="Adım P&L (TL)", height=280,
                           margin=dict(t=40, b=30), xaxis_title="Gün",
                           yaxis_title="TL")
-    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True, key=f"train_tl_bar_{seq}")
+    ph_tl_bar.plotly_chart(fig_bar, width='stretch', key=f"train_tl_bar_{seq}")
 
     # Tam adım tablosu
     dates_slice = env.dates[t_start + 1 : t_start + 1 + steps_done]
@@ -355,14 +382,14 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
         action_names=action_names, action_indices=action_indices,
         reward_terms_list=rt_hist, initial_capital=initial_capital,
     )
-    ph_tl_table.dataframe(df_rows, hide_index=True, use_container_width=True, height=500,
+    ph_tl_table.dataframe(df_rows, hide_index=True, width='stretch', height=500,
                           key=f"train_tl_table_{seq}")
 
     # Episod sonu portföy panosu (w_prev = sondan bir önceki adım)
     last = snaps[-1]
     w_prev = weight_hist[-2] if len(weight_hist) >= 2 else None
     df_port = build_portfolio_table(BIST28, last, include_cash=True, w_prev=w_prev)
-    ph_tl_port.dataframe(df_port, hide_index=True, use_container_width=True,
+    ph_tl_port.dataframe(df_port, hide_index=True, width='stretch',
                          key=f"train_tl_port_{seq}")
 
     # İflas olduysa eğitim panelinin altında uyarı göster
@@ -386,16 +413,16 @@ def _render_training_curves(curve: list, algo: str):
     c1, c2 = st.columns(2)
     c3, c4 = st.columns(2)
     c1.plotly_chart(px.line(df, x="iter", y="reward", markers=True,
-                            title="Kümülatif Ödül"), use_container_width=True,
+                            title="Kümülatif Ödül"), width='stretch',
                     key="train_curve_reward")
     c2.plotly_chart(px.line(df, x="iter", y="gain", markers=True,
-                            title="Kazanç (NAV − 1)"), use_container_width=True,
+                            title="Kazanç (NAV − 1)"), width='stretch',
                     key="train_curve_gain")
     c3.plotly_chart(px.bar(df, x="iter", y="success", title="Başarı (0/1)"),
-                    use_container_width=True, key="train_curve_success")
+                    width='stretch', key="train_curve_success")
     if "loss" in df.columns:
         c4.plotly_chart(px.line(df, x="iter", y="loss", markers=True,
-                                title="Loss"), use_container_width=True,
+                                title="Loss"), width='stretch',
                         key="train_curve_loss")
 
     # --- PDF §9.7 Pedagojik Eğitim Metrikleri (statik görüntüleme) ---
@@ -433,4 +460,59 @@ def _render_training_curves(curve: list, algo: str):
         "Ort. İşlem Maliyeti",
         f"{diag.get('mean_tx_cost', 0.0):.5f}",
         help="reward_terms_history'den: adım başı ortalama tx_cost (yeniden eğitimde mevcut)",
+    )
+
+
+def _render_episode_browser(key, algo, initial_capital):
+    """Saklanan her episode'un TL grafiklerini + değerlerini selectbox ile gösterir.
+
+    Eğitim sırasında `episode_snaps[key]`'e yazılan her episode'un telemetrisi
+    (nav/weight/reward_terms history + t/step_count + actions) buradan replay edilir.
+    `_render_train_tl_panel` env attribute'larını okuduğundan, snapshot bir
+    SimpleNamespace (sahte env) olarak ona geçirilir. UI-only — golden etkisiz.
+    """
+    if key is None:
+        return
+    snaps = st.session_state.get("episode_snaps", {}).get(key)
+    shared = st.session_state.get("episode_shared", {}).get(key)
+    if not snaps or not shared or shared.get("prices") is None:
+        return
+    st.markdown("---")
+    st.markdown("### 🔎 Episode incele (her iterasyonun detayı)")
+    n = len(snaps)
+
+    def _label(i):
+        s = snaps[i]
+        return f"Episode {s['iter'] + 1} / {n}  ·  ödül {s['reward']:.2f} · NAV {s['nav']:.3f}"
+
+    sel = st.selectbox("Hangi episode?", list(range(n)), index=n - 1,
+                       format_func=_label, key=f"ep_browse_sel_{key}")
+    s = snaps[sel]
+    c = st.columns(4)
+    c[0].metric("Episode", f"{s['iter'] + 1} / {n}")
+    c[1].metric("Kümülatif Ödül (Σr)", f"{s['reward']:.3f}")
+    c[2].metric("Kazanç (NAV−1)", f"{s['gain']:+.3f}")
+    c[3].metric("Başarı (EW)", "✅" if s["success"] else "—")
+
+    # Canlı TL panelle aynı placeholder yapısı (6 metrik + 2 grafik + tablo + porto)
+    mcols = st.columns(6)
+    pm = [mcols[i].empty() for i in range(6)]
+    ccols = st.columns(2)
+    ph_line, ph_bar = ccols[0].empty(), ccols[1].empty()
+    ph_table, ph_port, ph_bank = st.empty(), st.empty(), st.empty()
+
+    fake_env = SimpleNamespace(
+        nav_history=s["nav_history"], weight_history=s["weight_history"],
+        reward_terms_history=s["reward_terms_history"],
+        prices=shared["prices"], dates=shared["dates"],
+        t=s["t"], step_count=s["step_count"],
+    )
+    fake_rec = {"actions": s["actions"]}
+    _render_train_tl_panel(
+        env=fake_env, algo=algo, rec=fake_rec, initial_capital=initial_capital,
+        ph_tl_start=pm[0], ph_tl_end=pm[1], ph_tl_net=pm[2],
+        ph_tl_min=pm[3], ph_tl_max=pm[4], ph_tl_dd=pm[5],
+        ph_tl_line=ph_line, ph_tl_bar=ph_bar,
+        ph_tl_table=ph_table, ph_tl_port=ph_port, ph_bankrupt=ph_bank,
+        seq=f"browse_{key}_{sel}",
     )

@@ -27,7 +27,7 @@ def tab_mdp():
             fig_px.update_layout(height=280, showlegend=False,
                                  margin=dict(t=40, b=20), xaxis_title="",
                                  yaxis_title="NAV (ilk gün = 1.0)")
-            st.plotly_chart(fig_px, use_container_width=True, key="mdp_px")
+            st.plotly_chart(fig_px, width='stretch', key="mdp_px")
 
     with col2:
         st.subheader("MDP Tuple (𝒮, 𝒜, 𝒫, r, γ)")
@@ -40,13 +40,13 @@ def tab_mdp():
             ("γ İndirgeme", "0.95 / 0.99 / 0.995 (vadeye göre)"),
             ("Sonlandırma", "veri sonu VEYA NAV<0.01 (iflas) VEYA 252 adım"),
         ], columns=["Bileşen", "Tanım"])
-        st.dataframe(mdp, hide_index=True, use_container_width=True)
+        st.dataframe(mdp, hide_index=True, width='stretch')
 
     st.divider()
     st.subheader("⏳ Vade Preset'leri & Adaptif Ödül")
     c1, c2 = st.columns([1.1, 1])
     with c1:
-        st.dataframe(_horizon_preset_table(), hide_index=True, use_container_width=True)
+        st.dataframe(_horizon_preset_table(), hide_index=True, width='stretch')
     with c2:
         st.markdown("""
 **Adaptif şekillendirici** (`AdaptiveRewardShaper`):

@@ -68,8 +68,15 @@ Terim tablosu (terim · formül · ağırlık · default · davranışsal etki) 
 golden etkisi (kapalı=yeşil) + UI'da hangi kontrolün açılacağı. Bir tasarım önerisi
 sunarken davranışsal trade-off'u (ödül hacking, miyopi, risk iştahı) tartış.
 
-## Sınırlar (yapma)
-- Algoritma içi öğrenme matematiği (loss, GAE, twin-Q) → `rl-arastirma-muhendisi`.
-- Mandat/ister değerlendirmesi → `fon-yoneticisi`; işlem-maliyeti regülasyonu →
-  `finansal-regulasyon-uzmani`; istatistiksel sağlamlık → `kantitatif-strateji-uzmani`.
+## Sınır Sözleşmesi (OWNS / DEĞİL / DEVRET)
+- **SAHİP (OWNS):** `env/reward.py` terim envanteri, formülleri, **büyüklükleri (magnitüd)**,
+  göreli denge ve yeni **opt-in** shaping terimleri; `RewardConfig` ödül-tarafı default'ları
+  (`w_dsr`, `w_cvar`, `bankruptcy_penalty`, η/λ/τ base) ve `terms` dict anahtarları. Bir terimin
+  *var olup olmayacağına, hangi mevcut sinyalleri kullanacağına ve ne kadar büyük olacağına* sen karar verirsin.
+- **SAHİP DEĞİL:** ödülün **algoritma-içi kullanımı** (GAE/return/TD hedefi, value-loss, ödül/avantaj
+  normalizasyonu, reward/return clipping, γ öğrenme etkisi) → `rl-arastirma-muhendisi`; η'nın **gerçek
+  BIST maliyetiyle kalibrasyonu** → `finansal-regulasyon-uzmani` (verdiği sayıyı sen terime yerleştirirsin);
+  stratejinin **istatistiksel geçerliliği** → `kantitatif-strateji-uzmani`; mandat/ister → `fon-yoneticisi`.
+- **DEVRET:** bir terim öğrenme dinamiğini bozuyorsa (loss patlaması/miyopi) → `rl-arastirma-muhendisi`.
+- **Litmus:** *`RewardEngine.compute()` NE döndürür → sen; `agents/*.py` onu gradyana NASIL çevirir → rl-arastirma.*
 - Default-on terim ekleyip golden'ı sessizce kırma; izinsiz re-baseline.

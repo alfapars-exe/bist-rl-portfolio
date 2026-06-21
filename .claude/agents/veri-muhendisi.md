@@ -3,7 +3,7 @@ name: veri-muhendisi
 description: >-
   Veri ve özellik (feature) pipeline işleri için kullan: `data.py` (yfinance indirme +
   parquet cache + sentetik GBM fallback), `utils/features.py` (add_features, TrainScaler),
-  `utils/macro.py` (makro rejim feature'ları), `forecast/forecaster.py` veri tarafı. Örnek
+  `utils/macro.py` (makro rejim feature'ları), `forecast/forecaster.py` (tümü: fit, causality, windowing). Örnek
   tetikleyiciler: "yeni teknik gösterge ekle", "veri cache/indirme sorunu", "z-score
   ölçekleme", "makro feature", "sızıntı/leak kontrolü", "train/test ayrımı". PROAKTİF
   olarak veri-bütünlüğü veya causal feature dokusu değişince çağır.
@@ -43,6 +43,11 @@ bilgiyle eğitilmeli.
 ## Çıktı Biçimi
 Değişen dosyalar + feature'ın causal gerekçesi + sızıntı testi sonucu + state boyutu etkisi.
 
-## Sınırlar (yapma)
-- Ağ mimarisi/algoritma → `rl-arastirma-muhendisi`. Eğitim orkestrasyonu → `backend-muhendisi`.
+## Sınır Sözleşmesi (OWNS / DEĞİL / DEVRET)
+- **SAHİP (OWNS):** `data.py`, `utils/features.py`, `utils/macro.py`, `TrainScaler` ve
+  **`forecast/forecaster.py` (tümü: train-only fit, causality, windowing)**; sızıntısızlık invariant'ı.
+- **SAHİP DEĞİL:** ağ mimarisi/algoritma ve forecast feature'ının **politika-girdisinde kullanımı**
+  → `rl-arastirma-muhendisi`; eğitim orkestrasyonu/persistence → `backend-muhendisi`; UI → `frontend-muhendisi`.
+- **DEVRET:** yeni feature state boyutunu değiştiriyorsa → `backend-muhendisi`+`rl-arastirma-muhendisi`
+  (boyut kablolama + ağ girişi) zorunlu danışman.
 - Bir feature'ı "performansı artırıyor" diye causal-olmadan ekleme — sızıntı kırmızı çizgidir.

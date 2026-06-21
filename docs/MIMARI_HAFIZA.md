@@ -6,7 +6,44 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-21 (adım granülerliği + coarse env cap + episode-clean opt-in; 227 test; commit 12d62c3)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-22 (ajan sistemi yeniden-yapı: roster 16→17, blackboard v2, +9 drift-guard; **golden DEĞİŞMEDİ** — yalnız .md/docs/tests)
+
+---
+
+## 0. Blackboard Sözleşmesi (oryantasyon — ÖNCE BURAYI OKU)
+
+> Bu dosya tek **paylaşılan-durum** kaynağıdır (blackboard). Alt-ajanlar durumsuzdur; kod-dokunan
+> her ajan (`rl-arastirma-muhendisi`, `odul-ceza-tasarimcisi`, `backend-muhendisi`, `frontend-muhendisi`,
+> `veri-muhendisi`, `test-muhendisi`) çalışmadan ÖNCE §2 (veri akışı/MDP) + §3 (invariant'lar) + §4
+> (sözleşmeler) bölümlerini okur. Maddi bir değişiklik SONRASI ana oturum `mimari-hafiza-koruyucusu`'nu
+> çağırır (yaz-sonra). Kod ⟂ doc çelişirse **KOD kazanır** (grep ile teyit, doc'u düzelt).
+
+**Bölüm indeksi:** §1 Paket · §2 Veri Akışı · §3 İnvariant'lar · §4 Sözleşmeler · §5 Karar Günlüğü · §6 Riskler · §7 Drift Guard.
+
+### MDP Sözleşmesi (özet — sayılar `config.py`'den türetilir, elle yazma)
+- **STATE_DIM**: 397 (DQN/SAC/TD3) / 369 (PPO; forecast hariç) = 28 hisse × (12 feature [+1 forecast]) + 29 ağırlık + 4 makro.
+- **ACTION**: 29-boyut softmax simpleks (PPO/SAC/TD3) / 6 şablon (DQN, ayrık).
+- **REWARD**: `log(1+w·r_net) − η_t·‖Δw‖₁ − λ_t·max(0,DD−τ_t) − bankruptcy_penalty [+ w_dsr·DSR] [+ w_cvar·CVaR] [+ opt-in gain/ruin]`.
+
+<!-- derived:config — guard: tests/test_config_single_source.py — ELLE DÜZENLEME (config.py'den türetilir) -->
+seed = 42
+n_features = 12
+state_dim_dqn = 397
+state_dim_ppo = 369
+cash_annual_rate = 0.40
+bankruptcy_penalty = 10.0
+w_dsr = 0.05
+w_cvar = 0.06
+<!-- /derived:config -->
+
+### Yaz-sonra tetikleri (ana oturum → `mimari-hafiza-koruyucusu`)
+STATE_DIM/action/feature · reward terim/preset · contract anahtarı · golden re-baseline · yeni ajan/dosya ·
+yeni invariant/risk değişti → bu dosyayı güncelle (+ §5 Karar Günlüğü satırı: tarih + karar + gerekçe + "golden: değişti/değişmedi").
+
+## 7. Drift Guard Defteri (guard testleri)
+- `tests/test_agent_roster.py` — ajan tanımı tutarlılığı (name↔dosya adı, README↔frontmatter model, CLAUDE.md routing kapsamı, en-az-ayrıcalık, örtüşme cross-ref).
+- `tests/test_config_single_source.py` — yukarıdaki `derived:config` blok ⟂ `config.py`; STATE_DIM doc ⟂ config-hesabı.
+- `tests/test_golden_regression.py` — davranış kilidi (≤1e-6, RNG sırası).
 
 ---
 
@@ -181,6 +218,19 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   `not episode_clean or _episode_idx>=1` koşulunda eklenir → ilk episode orijinal/temiz,
   2+ gürültülü. CLI/golden bu flag'i kullanmaz → V11 bit-aynı. UI `_make_env(train)`
   `episode_clean=True` açar. Ödül opt-in deseniyle aynı felsefe.
+
+- _(2026-06-22)_ **Ajan sistemi kapsamlı yeniden-yapı (kontrol / roster / veri düzlemi).**
+  (a) **Kontrol**: `CLAUDE.md` deterministik yönlendirme cascade'i (yol-sahipliği + C1–C4 tie-breaker),
+  öncelik kafesi (P0 invariant > P1 rubrik > P2 RL > P3 istatistik > P4 finans > P5 UI; `test-muhendisi`
+  SERT-DUR, `proje-rubrik-bekcisi` DANIŞMAN-VETO), R1–R9 refleks yaşam döngüsü; orkestratör dağıtım-planı şeması.
+  (b) **Roster 16→17**: yeni `dagitim-tekrarlanabilirlik-uzmani` (HF Space deploy/repro; "Space GERÇEK veriyle
+  çalışır, sentetik-GBM NaN'e DÜŞMEZ" invariant'ı). Reward dikişi (`env/reward.py`→ödül-ceza; `agents/*.py`→rl),
+  forecaster ikili-sahip çözümü (`forecast/forecaster.py`→veri; politika-girdisi→rl), finans 4-lens keskinleştirme
+  (birleştirme REDDEDİLDİ), script sahipliği (analitik→kantitatif, çalıştırma→backend); her ajana OWNS/DEĞİL/DEVRET.
+  (c) **Veri düzlemi**: bu dosya §0 blackboard + §7 guard defteri + `derived:config` bloğuna kavuştu. Yeni guard:
+  `tests/test_agent_roster.py` (5) + `tests/test_config_single_source.py` (4) = 9 assertion, hepsi yeşil.
+  **Golden DEĞİŞMEDİ** — yalnız `.md`/`docs`/`tests` (runtime/RNG'ye dokunulmadı). Tetik: ekteki ChatGPT "framework"
+  analizinin (kategori hatası + MARL halüsinasyonu) reddi → platform-doğru, akademik-kapsam-disiplinli yeniden-yapı.
 
 ## 6. Bilinen Riskler / Açık Konular
 

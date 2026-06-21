@@ -38,6 +38,7 @@ def _init_state():
         "reward_cfg": {},  # kullanıcı ayarları; boş ise env preset'leri kullanır
         "n_episodes": 12,                          # parametrik episode sayısı (UI)
         "price_noise_std": EnvConfig.price_noise_std,  # fiyat gürültüsü σ (UI kontrolü)
+        "episode_clean": True,   # 1. iterasyon orijinal veri (anti-ezber); UI default açık
         # Tarih aralığı — DataConfig tek kaynak
         "data_start": _dc.start,
         "data_split": _dc.train_end,
@@ -55,6 +56,9 @@ def _init_state():
         "reward_gain_floor": 1.0,
         "reward_w_gain_speed": 0.0,
         "reward_w_ruin_timing": 0.0,
+        # Adım granülerliği — "daily" no-op (golden-güvenli)
+        "granularity": "daily",
+        "granularity_n_points": None,   # resample sonrası satır sayısı (uyarı için)
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)

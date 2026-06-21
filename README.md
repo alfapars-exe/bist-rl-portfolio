@@ -18,7 +18,9 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Nakit faizi (V10)**: Nakit varlık risksiz faiz kazanır (`cash_annual_rate=0.40`, günlük bileşik); ajan fırsat maliyetini içselleştirir
 - **Adil karşılaştırma (V11)**: Re-base hizalama + maliyetli baseline + nakit %40 faiz + 8 metodoloji düzeltmesi — RL ve baseline aynı koşullarda değerlendirilir
 - **Vade Preset'leri**: Kısa (1–30 gün) / Orta (30–90 gün) / Uzun (90–360 gün) — (η, λ, τ, γ, rebalans frekansı, train_max_steps) değişir; UI'dan aralık içinde slider ile seçilir
-- **Model listesi**: Kaydedilmiş modeller `{algo}_{horizon}_{adaptive}.pt` şemasıyla selectbox'ta listelenir; yeniden eğitmeden Test sekmesine geçilebilir
+- **Model kaydet/yükle (isim + tarih)**: Eğitilen ajan kullanıcı-verilen ada ve kayıt zamanıyla (`saved_at` ISO) diske yazılır; `list_saved_models()` ile listelenir; sidebar selectbox'tan seçilip yeniden eğitmeden Test sekmesine geçilebilir (`core/persistence.py`)
+- **Adım granülerliği (Gün/Ay/Yıl)**: Sidebar selectbox ile günlük/aylık/yıllık adım seçilir. Feature'lar her zaman günlük hesaplanır (`add_features` değişmez); `data.resample_to_granularity` ile resample edilir. Günlük = V11 bit-aynı (golden-güvenli)
+- **Episode-clean (1. iterasyon orijinal veri)**: Sidebar checkbox (UI'da varsayılan açık). Açıkken 1. episode gürültüsüz orijinal fiyatlar, 2.–N. her biri farklı `N(0,σ)` realizasyonu. CLI/golden'da default kapalı → V11 bit-aynı
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
 

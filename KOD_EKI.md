@@ -251,6 +251,22 @@ class MacroConfig:
     features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
     mom_window: int = 20      # momentum/degisim penceresi (gun)
 
+
+# ---------------------------------------------------------------------
+# Adim granülerliği — UI/CLI'dan secilebilir; feature'lar HER ZAMAN gunluk
+# hesaplanir (add_features degismez), sonra resample_to_granularity() ile
+# istenen frekansi indirgenir. "daily" -> no-op (golden-guvenli).
+# ---------------------------------------------------------------------
+GRANULARITY_OPTIONS: tuple = ("daily", "monthly", "yearly")
+
+# Her granülerlik icin minimum nokta uyari esigi (resample sonrasi).
+# n_points < esik ise downstream kod uyari verebilir.
+GRANULARITY_MIN_POINTS: dict = {
+    "daily":   252,   # 1 tam yil is gunu
+    "monthly":  20,   # ~20 ay (~1.7 yil)
+    "yearly":    5,   # 5 yil
+}
+
 ```
 
 ---
@@ -522,6 +538,41 @@ def train_test_split(df: pd.DataFrame, split=None):
     if split is None:
         split = DataConfig().train_end
     return df[df.index < split], df[df.index >= split]
+
+
+def resample_to_granularity(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
+    """Fiyat/feature/makro DataFrame'ini istenen adım granülerliğine indirger.
+
+    Parametreler
+    ------------
+    df : pd.DataFrame
+        DatetimeIndex'li DataFrame (fiyat, feature veya makro).
+    granularity : str
+        "daily"   -> df'i AYNEN döndür (NO-OP; golden-güvenli, RNG sırası korunur).
+        "monthly" -> aylık ortalama (pandas ME kuralı).
+        "yearly"  -> yıllık ortalama (pandas YE kuralı).
+
+    Dönüş
+    ------
+    pd.DataFrame
+        DatetimeIndex korunur. "daily" dışında .ffill().bfill() uygulanır
+        (boş dönem NaN'larına karşı güvenlik).
+
+    Not: feature'lar her zaman günlük hesaplanır (add_features DEĞİŞMEZ).
+    Bu fonksiyon yalnızca downstream adımda (env/UI) granülerliği indirger.
+    """
+    if granularity == "daily":
+        return df
+    rule_map = {"monthly": "ME", "yearly": "YE"}
+    rule = rule_map.get(granularity)
+    if rule is None:
+        raise ValueError(
+            f"Geçersiz granularity={granularity!r}; "
+            f"geçerli seçenekler: {('daily', 'monthly', 'yearly')}"
+        )
+    resampled = df.resample(rule).mean()
+    resampled = resampled.ffill().bfill()
+    return resampled
 
 
 if __name__ == "__main__":
@@ -3235,6 +3286,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               reward_overrides: dict | None = None,
               price_noise_std: float | None = None,
               cash_daily_rate: float | None = None,
+              episode_clean: bool = False,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
@@ -3243,6 +3295,10 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
 
     cash_daily_rate: None -> env ctor kendi config'inden turetir (EnvConfig.cash_daily_rate).
     UI/CLI parametrik gunluk nakit faiz oranini dogrudan gecebilir.
+
+    episode_clean: OPT-IN — True ise 1. episode (idx=0) gurultusuz orijinal fiyatlar,
+    idx>=1 her seferinde farkli N(0,sigma) realizasyonu. Default False -> CLI/golden
+    V11 davranisi bit-ayni korunur. UI egitimde True gecer (sidebar checkbox).
     """
     cfg = reward_overrides or {}
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
@@ -3262,6 +3318,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
         price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
+        episode_clean=bool(episode_clean),   # OPT-IN: UI training True; CLI/golden False
         # Mevcut 6 odul param'i parametrik akisa acilir — eksik/None anahtar config
         # default'una duser (golden-guvenli; eta_base/bankruptcy_penalty deseni ile ayni).
         w_dsr=float(cfg.get("w_dsr", RewardConfig.w_dsr)),
@@ -3664,6 +3721,8 @@ dokunmaz.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -3701,9 +3760,29 @@ def _modules(agent) -> dict:
             for name, m in vars(agent).items() if isinstance(m, nn.Module)}
 
 
+def named_model_path(name: str, saved_at: str = "") -> Path:
+    """Kullanici-verilen isimle kayit yolu: models/{guvenli_isim}.pt
+
+    Sanitize: harf/rakam/_/- disini _ ile degistir; bos ise 'model_{saved_at}'.
+    saved_at yalnizca fallback icin kullanilir (isim bossa).
+    """
+    safe = re.sub(r"[^\w\-]", "_", name.strip()) if name.strip() else ""
+    if not safe:
+        ts = re.sub(r"[^\w\-]", "_", saved_at) if saved_at else "model"
+        safe = f"model_{ts}"
+    return MODELS_DIR / f"{safe}.pt"
+
+
 def save_agent(agent, algo: str, path, *, horizon: str = "medium",
-               adaptive: bool = True) -> str:
-    """Ajanin ag agirliklarini + meta'yi `path`'e yazar; yolu doner."""
+               adaptive: bool = True, name: str = "",
+               saved_at: str | None = None) -> str:
+    """Ajanin ag agirliklarini + meta'yi `path`'e yazar; yolu doner.
+
+    name: kullanici-verilen model adi (bos olabilir — meta'da saklanir).
+    saved_at: ISO datetime str (sn hassasiyeti); None ise simdi hesaplanir.
+    """
+    if saved_at is None:
+        saved_at = datetime.now().isoformat(timespec="seconds")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
@@ -3713,16 +3792,19 @@ def save_agent(agent, algo: str, path, *, horizon: str = "medium",
         "adaptive": bool(adaptive),
         "state_dim": int(agent.state_dim),
         "action_dim": _action_dim(agent),
+        "name": name,
+        "saved_at": saved_at,
         "modules": _modules(agent),
     }, path)
     return str(path)
 
 
 def load_agent(path):
-    """Kaydedilmis ajani yukler. (agent, meta) doner; meta: algo/horizon/adaptive.
+    """Kaydedilmis ajani yukler. (agent, meta) doner; meta: algo/horizon/adaptive/name/saved_at.
 
     build_agent ile ayni mimaride iskelet kurulur (config default hidden=(256,128)
     egitimdekiyle ayni), sonra state_dict'ler ad'a gore yuklenir.
+    Eski modellerde name/saved_at yoksa bos string doner (geriye-uyumlu).
     """
     # weights_only=True (guvenli unpickler): checkpoint yalniz metadata (str/int/bool)
     # + tensor state_dict'leri icerir; rastgele kod calistirma riski yok (SonarCloud S5042).
@@ -3732,9 +3814,13 @@ def load_agent(path):
         module = getattr(agent, name, None)
         if isinstance(module, nn.Module):
             module.load_state_dict(sd)
-    meta = {"algo": ckpt["algo"],
-            "horizon": ckpt.get("horizon", "medium"),
-            "adaptive": bool(ckpt.get("adaptive", True))}
+    meta = {
+        "algo": ckpt["algo"],
+        "horizon": ckpt.get("horizon", "medium"),
+        "adaptive": bool(ckpt.get("adaptive", True)),
+        "name": ckpt.get("name", ""),
+        "saved_at": ckpt.get("saved_at", ""),
+    }
     return agent, meta
 
 ```

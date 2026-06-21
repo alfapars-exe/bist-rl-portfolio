@@ -224,6 +224,16 @@ verisinde fit edilir.
 3. NAV güncellenir: `NAV ← NAV · (1 + wₜ·r_vec − işlem maliyeti)`
 4. `s_{t+1}` = bir sonraki günün öznitelikleri ⊕ yeni ağırlıklar
 
+**Episode-clean (opt-in, V8 genişlemesi):** `PortfolioEnv(episode_clean=True)` verildiğinde env
+`_episode_idx` sayacını her `reset()` çağrısında artırır. `idx=0` (1. episode) gürültüsüz
+**orijinal** fiyatlarla çalışır; `idx≥1` her seferinde farklı bir `N(0,σ)` gürültü
+realizasyonu üretir — "12 iterasyon = 1 orijinal + 11 farklı noise". Bu davranış yalnızca
+`episode_clean=True` ve `random_start=True` (eğitim modu) birlikte aktifken devreye girer;
+**CLI ve golden testlerde default `False`** olduğundan V11 bit-aynı davranış korunur. Yeni
+RNG çağrısı yalnız opt-in açık + `idx≥1` iken gerçekleşir → sızıntısız ve golden-güvenli.
+UI'da sidebar checkbox "1. iterasyon orijinal veri (anti-ezber)" varsayılan açık; bu değer
+`core.factory.build_env(episode_clean=...)` ile ortama enjekte edilir (`core/factory.py:108`).
+
 ### 5.4. Ödül Fonksiyonu (`env/reward.py → RewardEngine`)
 
 `rₜ = R(sₜ, aₜ, s_{t+1})` aşağıdaki terimlerin toplamıdır (hesap sırası `step()` ile birebir aynı):
@@ -661,7 +671,10 @@ kod/
 ├── main.py               # CLI orkestratör: veri → eğitim → figürler (+ --walkforward)
 ├── train.py              # DataBundle; prepare_data/train_dqn/ppo/sac/evaluate/run
 ├── data.py               # BIST verisi indirme + sentetik GBM fallback + cache + train/test split
+│                         #   · resample_to_granularity(df, granularity) — adım granülerliği
 ├── config.py             # TEK yapılandırma kaynağı (SEED, HORIZON_PRESETS, FEATURES, *Config dataclass)
+│                         #   · GRANULARITY_OPTIONS = ("daily","monthly","yearly")
+│                         #   · GRANULARITY_MIN_POINTS = {"daily":252, "monthly":20, "yearly":5}
 ├── plots.py              # 13 figür (matplotlib, F1–F13)
 ├── scripts/rigor_analysis.py  # DSR/PBO/Monte-Carlo stres/reel-NAV (golden-güvenli)
 ├── utils/deflated_sharpe.py   # Deflated/Probabilistic Sharpe + CSCV-PBO (López de Prado)
@@ -674,10 +687,11 @@ kod/
 │   ├── trainer.py        # generator-tabanlı ortak eğitim döngüsü + _TRAINERS registry dispatch (OCP)
 │   ├── rollout.py        # değerlendirme (evaluate)
 │   ├── walkforward.py    # walk-forward doğrulama
-│   ├── factory.py        # build_agent / build_env (AGENT_BUILDERS registry, OCP+DRY)
+│   ├── factory.py        # build_agent / build_env — episode_clean parametresi dahil (OCP+DRY)
+│   ├── persistence.py    # save_agent(name,saved_at) / load_agent / named_model_path / list kayıt
 │   └── features.py       # select_features (forecast-filtreleme, DRY)
 ├── env/
-│   ├── portfolio_env.py  # PortfolioEnv + DiscretePortfolioEnv (MDP mekaniği)
+│   ├── portfolio_env.py  # PortfolioEnv — episode_clean / _episode_idx dahil (MDP mekaniği)
 │   └── reward.py         # AdaptiveRewardShaper + DifferentialSharpe + RewardEngine (SRP)
 ├── forecast/forecaster.py  # CNN-LSTM bir-adım getiri tahmincisi (train-only fit)
 ├── utils/
@@ -687,7 +701,9 @@ kod/
 │   ├── portfolio_tl.py   # NAV→TL/lot/işlem-logu türetimi (UI katmanı)
 │   └── torch_utils.py    # get_device / set_seed (nötr; DIP)
 ├── ui/                   # Streamlit paketi (SRP)
-│   ├── state.py · services.py · charts.py · sidebar.py
+│   ├── state.py          # episode_clean=True (UI default) dahil session başlangıç değerleri
+│   ├── services.py       # list_saved_models / save_trained_agent / resample_to_granularity akışı
+│   ├── charts.py · sidebar.py   # granülerlik selectbox + episode_clean checkbox
 │   └── tabs/ (mdp · train · test · compare)
 └── tests/                # 101 test + golden-master (1e-6)
 ```
@@ -761,6 +777,35 @@ seçilir; `python main.py` dört ajanı otomatik kaydeder.
 - **Kaydedilmiş model listesi (selectbox):** `models/` altındaki `.pt` dosyaları `{algo}_{horizon}_{adaptive}.pt`
   şemasıyla listelenir; kullanıcı açılır listeden önceden eğitilmiş bir modeli seçip doğrudan
   Test sekmesine geçebilir.
+
+**Yeni UI özellikleri (sonraki commit'ler):**
+
+- **Episode-clean (1. iterasyon orijinal veri):** Sidebar'da "1. iterasyon orijinal veri
+  (anti-ezber)" checkbox'ı (varsayılan **açık**). Açıkken 1. episode gürültüsüz orijinal
+  fiyatlarla, 2.–N. episodeler her biri farklı `N(0,σ)` gürültü realizasyonuyla çalışır.
+  Kapalıyken (CLI/golden modu) tüm episodeler V11 bit-aynı davranışla gürültülü kalır.
+  Kaynak: `ui/sidebar.py:225`, `env/portfolio_env.py:91,190–191,250`,
+  `core/factory.py:108,136`.
+
+- **Adım granülerliği (Gün / Ay / Yıl):** Sidebar'da "Adım granülerliği" selectbox'ı
+  (`config.GRANULARITY_OPTIONS = ("daily", "monthly", "yearly")`). Seçilen granülerlikte
+  pipeline şöyle çalışır: (1) fiyatlar ve feature'lar **her zaman günlük** hesaplanır
+  (`add_features` DEĞİŞMEZ); (2) `data.resample_to_granularity(df, granularity)` ile
+  fiyat + feature + makro istenilen frekansta resample edilir (aylık → pandas `ME` ortalaması,
+  yıllık → `YE` ortalaması, günlük → no-op); (3) `train_test_split` ve `TrainScaler`
+  resample'lanmış veri üzerinde çalışır (sızıntısız). Günlük seçim = V11 bit-aynı
+  (golden-güvenli); aylık/yıllık kısa seriler için env `window`/`lo` parametreleri otomatik
+  uyarlanır (`GRANULARITY_MIN_POINTS` eşik uyarısı). Kaynak: `config.py:249,253`,
+  `data.py:279`, `ui/sidebar.py:260–263`, `ui/services.py:155–156`.
+
+- **Model kaydet/yükle (isim + tarih):** Eğitilen ajan kullanıcı-verilen ada ve kayıt
+  tarihiyle (`saved_at` ISO, saniye hassasiyeti) diske yazılır.
+  `core.persistence.named_model_path(name)` → `models/{güvenli_isim}.pt` yolunu döner;
+  `save_agent(agent, algo, path, name=..., saved_at=...)` meta alanlarını checkpoint'e
+  gömer. `list_saved_models()` (`ui/services.py:54`) `models/*.pt` dosyalarını tarayıp
+  meta okur; sonuçlar sidebar'da `saved_at`'e göre sıralı selectbox'ta görünür. Eski
+  `{algo}_{horizon}_{adaptive}.pt` şeması geriye uyumlu olarak listede kalmaya devam eder.
+  Kaynak: `core/persistence.py:50–100`, `ui/services.py:35–68`, `ui/sidebar.py:517–555`.
 
 ### Arayüz ekran görüntüleri
 

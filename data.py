@@ -276,6 +276,48 @@ def _synthetic_macro(series, start, end) -> pd.DataFrame:
     return df[[s for s in series if s in df.columns]]
 
 
+def resample_to_granularity(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
+    """Fiyat/feature/makro DataFrame'ini istenen adım granülerliğine indirgeer.
+
+    Parametreler
+    ------------
+    df : pd.DataFrame
+        DatetimeIndex'li DataFrame (fiyat, feature veya makro).
+    granularity : str
+        "daily"   -> df'i AYNEN döndür (NO-OP; golden-güvenli, RNG sırası korunur).
+        "monthly" -> aylık ortalama (pandas ME kuralı).
+        "yearly"  -> yıllık ortalama (pandas YE kuralı).
+
+    Dönüş
+    ------
+    pd.DataFrame
+        DatetimeIndex korunur. "daily" dışında .ffill().bfill() uygulanır
+        (boş dönem NaN'larına karşı güvenlik).
+
+    Not: feature'lar her zaman günlük hesaplanır (add_features DEĞİŞMEZ).
+    Bu fonksiyon yalnızca downstream adımda (env/UI) granülerliği indirger.
+    """
+    if granularity == "daily":
+        # NO-OP: aynı nesneyi döndür — golden testleri etkilemez, RNG sırası korunur.
+        return df
+
+    rule_map = {
+        "monthly": "ME",   # month-end
+        "yearly":  "YE",   # year-end
+    }
+    rule = rule_map.get(granularity)
+    if rule is None:
+        raise ValueError(
+            f"Geçersiz granularity={granularity!r}; "
+            f"geçerli seçenekler: {('daily', 'monthly', 'yearly')}"
+        )
+
+    resampled = df.resample(rule).mean()
+    # Boş ay/yıl periyotlarında oluşabilecek NaN'lara karşı güvenlik.
+    resampled = resampled.ffill().bfill()
+    return resampled
+
+
 def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
     """Makroyu BIST işlem takvimine (index) reindex + ffill/bfill (causal)."""
     return macro_raw.reindex(index).ffill().bfill()

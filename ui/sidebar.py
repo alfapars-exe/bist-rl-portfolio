@@ -5,7 +5,9 @@ import datetime
 
 import streamlit as st
 
-from config import SEED, DataConfig, EnvConfig, RewardConfig, cash_daily_rate as _cash_daily_rate
+from config import (SEED, DataConfig, EnvConfig, RewardConfig,
+                    GRANULARITY_OPTIONS, GRANULARITY_MIN_POINTS,
+                    cash_daily_rate as _cash_daily_rate)
 from env.portfolio_env import HORIZON_PRESETS
 from core.persistence import MODELS_DIR, model_path
 from ui.services import (_load_data, list_saved_models, load_saved_agent,
@@ -204,9 +206,9 @@ def sidebar_controls():
         min_value=1, max_value=1000,
         value=int(st.session_state.n_episodes),
         step=1,
-        help="Eğitim tam bu kadar episode/iterasyon koşar; her episode train fiyatlarının "
-             "FARKLI gürültülü realizasyonudur. 'Eğitimi Durdur' erken kesebilir. "
-             "(PPO için birim 'update', diğerleri 'episode'.)",
+        help="Eğitim tam bu kadar episode/iterasyon koşar; '1. iterasyon orijinal' açıksa "
+             "1. iterasyon gürültüsüz ORİJİNAL, 2.–N. iterasyonlar FARKLI gürültülü "
+             "realizasyondur. 'Eğitimi Durdur' erken kesebilir. (PPO için birim 'update'.)",
     )
 
     st.session_state.price_noise_std = st.sidebar.slider(
@@ -218,6 +220,15 @@ def sidebar_controls():
              "ADIMINDA her hisseye N(0, σ)'dan ÇEKİLEN AYRI bir rastgele sayı eklenir "
              "(rng.normal, env-yerel); ardışık adımlar ve her episode farklı realizasyon → "
              "ezberi önler. Eğitim-YALNIZ; eval'de hep KAPALI. 0 = kapalı.",
+    )
+
+    st.session_state.episode_clean = st.sidebar.checkbox(
+        "1. iterasyon orijinal veri (anti-ezber)",
+        value=bool(st.session_state.get("episode_clean", True)),
+        help="Açık (varsayılan): 1. iterasyon gürültüsüz ORİJİNAL fiyatlarla; 2.–N. "
+             "iterasyonlar her biri N(0, σ)'dan FARKLI gürültü realizasyonuyla eğitilir "
+             "(kullanıcı isteği — '1 iterasyon orijinal, kalanı noise'lu'). Kapalı: tüm "
+             "iterasyonlar gürültülü (klasik). σ=0 ise etkisiz.",
     )
 
     st.sidebar.divider()
@@ -238,6 +249,63 @@ def sidebar_controls():
         f"Rebalans: {preset['rebalance']}g · η={preset['eta']} · "
         f"λ={preset['lam']} · τ={preset['tau']} · γ={preset['gamma']}"
     )
+
+    # ------------------------------------------------------------------
+    # Adım granülerliği seçici
+    # ------------------------------------------------------------------
+    _GRAN_LABELS = {"daily": "Gün (Daily)", "monthly": "Ay (Monthly)", "yearly": "Yıl (Yearly)"}
+    _GRAN_REVERSE = {v: k for k, v in _GRAN_LABELS.items()}
+    _cur_gran = st.session_state.get("granularity", "daily")
+    _cur_gran_label = _GRAN_LABELS.get(_cur_gran, "Gün (Daily)")
+    _sel_gran_label = st.sidebar.selectbox(
+        "Adım granülerliği",
+        options=[_GRAN_LABELS[g] for g in GRANULARITY_OPTIONS],
+        index=list(GRANULARITY_OPTIONS).index(_cur_gran),
+        key="ui_granularity",
+        help=(
+            "Veri adım büyüklüğü. **Gün**: ham BIST günlük fiyatlar (varsayılan, "
+            "golden-güvenli). **Ay**: aylık ortalama (~120 nokta/10 yıl). "
+            "**Yıl**: yıllık ortalama (~10 nokta/10 yıl — kaba sonuç). "
+            "Feature'lar her zaman günlük hesaplanır, sonra resample edilir."
+        ),
+    )
+    _new_gran = _GRAN_REVERSE[_sel_gran_label]
+
+    # Granülerlik değişince veriyi geçersiz kıl (kullanıcıya "Veriyi Yükle" uyarısı)
+    if _new_gran != st.session_state.get("granularity", "daily"):
+        st.session_state.granularity = _new_gran
+        if st.session_state.get("data_loaded"):
+            st.session_state.data_loaded = False
+            for k in ["prices", "px_tr", "px_te", "feats_tr", "feats_te", "scaler",
+                      "macro_tr", "macro_te", "regime_tr", "regime_te",
+                      "trained_agents", "test_traces", "baselines"]:
+                st.session_state[k] = (
+                    {} if k in ("trained_agents", "test_traces") else None
+                )
+            st.sidebar.warning(
+                "Granülerlik değişti — veriyi yeniden yükleyin ('Veriyi Yükle / İndir')."
+            )
+    else:
+        st.session_state.granularity = _new_gran
+
+    # Tahmini nokta sayısı + minimum nokta uyarısı
+    _n_pts = st.session_state.get("granularity_n_points")
+    _min_pts = GRANULARITY_MIN_POINTS.get(_new_gran, 0)
+    if _n_pts is not None:
+        _pts_caption = f"Mevcut veri: {_n_pts} {_sel_gran_label.lower()} noktası"
+        if _n_pts < _min_pts:
+            st.sidebar.warning(
+                f"{_pts_caption} — önerilen minimum {_min_pts}. "
+                "Yıllık granülerlikte sonuçlar kaba olabilir."
+            )
+        else:
+            st.sidebar.caption(_pts_caption)
+    else:
+        _approx = {"daily": "~2520", "monthly": "~120", "yearly": "~10"}.get(_new_gran, "?")
+        st.sidebar.caption(
+            f"Tahmini nokta sayısı (2015–2024, 10 yıl): {_approx} — "
+            f"{'yeterli' if _new_gran != 'yearly' else 'az nokta → kaba sonuç'}."
+        )
 
     # ------------------------------------------------------------------
     # N10: Vade gün-aralığı gösterimi + eğitim episode uzunluğu slider

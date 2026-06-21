@@ -13,12 +13,13 @@ import pandas as pd
 import streamlit as st
 
 from agents.base import SupportsQValues
-from config import SEED, ForecastConfig, MacroConfig
+from config import SEED, ForecastConfig, MacroConfig, GRANULARITY_MIN_POINTS
 from core.factory import build_agent, build_env
 from core.persistence import (load_agent, model_path, named_model_path,
                               read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
-from data import align_macro, download_bist, download_macro, train_test_split
+from data import (align_macro, download_bist, download_macro,
+                  resample_to_granularity, train_test_split)
 from env.portfolio_env import ACTION_NAMES
 from ui.state import _agent_key
 from utils.baselines import equal_weight
@@ -103,35 +104,61 @@ def load_saved_agent_from_path(path):
 
 
 def _load_data():
-    """Veri indir + z-score scaler'ı fit et.
+    """Veri indir + granülerliğe resample + z-score scaler'ı fit et.
 
     Tarih aralığı session_state.data_start / data_split / data_end'den okunur
     (sidebar tarih seçici). Scaler/forecaster/MacroScaler YALNIZ px_tr'de fit
     edilir — sızıntı yok.
+
+    Granülerlik akışı (golden-güvenli Approach 1):
+      1. prices_daily  = download_bist(...)           — her zaman GÜNLÜK
+      2. feats_daily   = add_features(prices_daily)   — GÜNLÜK (add_features DEĞİŞMEZ)
+      3. Forecast da prices_daily üzerinde hesaplanır (GÜNLÜK)
+      4. prices / feats_all_raw = resample_to_granularity(...)  — g="daily" → no-op
+      5. train_test_split RESAMPLE'LANMIŞ fiyat üzerinde yapılır
+      6. Scaler RESAMPLE'LANMIŞ feats_tr'de fit edilir (sızıntı korunur)
+      7. Makro: download_macro GÜNLÜK → align (GÜNLÜK prices_daily.index) →
+         add_macro_features (GÜNLÜK) → resample → MacroScaler resample'lı px_tr'de fit
     """
     from config import DataConfig as _DC
     _dc_defaults = _DC()
     data_start = st.session_state.get("data_start", _dc_defaults.start)
     data_split = st.session_state.get("data_split", _dc_defaults.train_end)
     data_end   = st.session_state.get("data_end",   _dc_defaults.end)
+    g = st.session_state.get("granularity", "daily")
 
     with st.spinner("Veri indiriliyor / cache okunuyor ..."):
-        prices = download_bist(start=data_start, end=data_end)
+        prices_daily = download_bist(start=data_start, end=data_end)
     # Sentetik-veri görünürlüğü: ağ + cache yoksa download_bist SENTETİK GBM'e düşer
     # (px.attrs["synthetic"]=True). Bu durumda sonuçlar GERÇEK DEĞİLDİR ve NaN/anlamsız
     # değerler çıkabilir → kullanıcıya AÇIK uyarı (sessiz NaN yerine).
-    if prices.attrs.get("synthetic"):
+    if prices_daily.attrs.get("synthetic"):
         st.error("⚠️ GERÇEK BIST verisi yüklenemedi (ağ erişimi + cache yok) → SENTETİK GBM "
                  "verisi kullanılıyor. Sonuçlar gerçek DEĞİLDİR; NaN/anlamsız değerler "
                  "görülebilir. (Bu ortamda `data/prices.parquet` eksik — deploy ile yüklenmeli.)")
-    feats_all_raw = add_features(prices)
-    px_tr, px_te = train_test_split(prices, split=data_split)
+
+    # --- 1. Feature'lar her zaman GÜNLÜK hesaplanır (add_features DEĞİŞMEZ) ---
+    feats_daily = add_features(prices_daily)
+
+    # --- 2. Forecast feature GÜNLÜK prices_daily üzerinde fit edilir ---
     if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
         from forecast.forecaster import build_forecast_feature
-        feats_all_raw["forecast"] = build_forecast_feature(
-            prices, px_tr, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
+        # Forecast fit için geçici günlük train split kullanılır (sızıntısız)
+        _px_tr_daily, _ = train_test_split(prices_daily, split=data_split)
+        feats_daily["forecast"] = build_forecast_feature(
+            prices_daily, _px_tr_daily,
+            window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
             hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
             lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
+
+    # --- 3. Granülerliğe resample (g="daily" → no-op, golden-güvenli) ---
+    prices = resample_to_granularity(prices_daily, g)
+    feats_all_raw = {k: resample_to_granularity(v, g) for k, v in feats_daily.items()}
+
+    # --- 4. train_test_split RESAMPLE'LANMIŞ fiyat üzerinde ---
+    px_tr, px_te = train_test_split(prices, split=data_split)
+
+    # --- 5. Feats'i train/test olarak böl (RESAMPLE'LANMIŞ index üzerinde) ---
     feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
     feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
@@ -144,14 +171,27 @@ def _load_data():
     st.session_state.feats_te = scaler.transform(feats_te_raw)
     st.session_state.scaler = scaler
 
-    # v6: makro rejim (faiz/dolar/altin) — train-only z-score; ham regime ayri (V7).
-    # MacroScaler da YALNIZ px_tr kısmında fit edilir.
+    # Nokta sayısını kaydet (uyarı için sidebar/tab kullanabilir)
+    st.session_state.granularity_n_points = len(prices)
+    _min_pts = GRANULARITY_MIN_POINTS.get(g, 0)
+    if len(prices) < _min_pts:
+        st.warning(
+            f"Seçilen granülerlik '{g}' ile toplam {len(prices)} nokta mevcut "
+            f"(önerilen minimum: {_min_pts}). Sonuçlar kaba olabilir."
+        )
+
+    # --- 6. Makro: GÜNLÜK indir → GÜNLÜK align → add_macro_features (GÜNLÜK) → resample ---
+    # MacroScaler RESAMPLE'LANMIŞ px_tr'de fit edilir (sızıntı korunur).
     macro_tr = macro_te = regime_tr = regime_te = None
     if MacroConfig.enabled:
-        mfeat = add_macro_features(
-            align_macro(download_macro(start=data_start, end=data_end), prices.index)
+        mfeat_daily = add_macro_features(
+            align_macro(download_macro(start=data_start, end=data_end), prices_daily.index)
         )
-        regime_full = mfeat["regime"]
+        # Makro + regime'i granülerliğe resample et
+        regime_daily = mfeat_daily["regime"].to_frame("regime")
+        mfeat = resample_to_granularity(mfeat_daily, g)
+        regime_full = resample_to_granularity(regime_daily, g)["regime"]
+        # MacroScaler RESAMPLE'LANMIŞ px_tr dilimiyle fit edilir
         macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
         macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
         macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
@@ -180,6 +220,9 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
     # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
     noise_std = (st.session_state.get("price_noise_std") if is_train else None)
+    # Episode-clean (kullanici istegi: 1. iterasyon ORIJINAL veri, 2+ farkli noise'lu).
+    # Yalniz egitimde + UI toggle (default True) acikken. Eval'de noise zaten kapali -> etkisiz.
+    ep_clean = bool(is_train and st.session_state.get("episode_clean", True))
     # N12: nakit faiz — önce parametre, sonra session_state, sonra env default (None).
     if cash_daily_rate is None:
         cash_daily_rate = st.session_state.get("cash_daily_rate", None)
@@ -188,6 +231,7 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
         random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
         price_noise_std=noise_std,                 # UI σ kontrolü (train-only)
+        episode_clean=ep_clean,                    # 1. iterasyon orijinal (anti-ezber)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
         cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
     )

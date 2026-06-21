@@ -239,3 +239,19 @@ class MacroConfig:
     # State'e eklenen 4 yalin oznitelik: rejim omurgasi + faiz/dolar/altin.
     features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
     mom_window: int = 20      # momentum/degisim penceresi (gun)
+
+
+# ---------------------------------------------------------------------
+# Adim granülerliği — UI/CLI'dan secilebilir; feature'lar HER ZAMAN gunluk
+# hesaplanir (add_features degismez), sonra resample_to_granularity() ile
+# istenen frekansi indirgenir. "daily" -> no-op (golden-guvenli).
+# ---------------------------------------------------------------------
+GRANULARITY_OPTIONS: tuple = ("daily", "monthly", "yearly")
+
+# Her granülerlik icin minimum nokta uyari esigi (resample sonrasi).
+# n_points < esik ise downstream kod uyari verebilir.
+GRANULARITY_MIN_POINTS: dict = {
+    "daily":   252,   # 1 tam yil is gunu
+    "monthly":  20,   # ~20 ay (~1.7 yil)
+    "yearly":    5,   # 5 yil
+}

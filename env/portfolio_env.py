@@ -88,6 +88,7 @@ class PortfolioEnv:
                  seed: int | None = None,
                  price_noise_std: float = EnvConfig.price_noise_std,
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
+                 episode_clean: bool = False,
                  cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
@@ -150,7 +151,22 @@ class PortfolioEnv:
         self.N_assets = prices.shape[1]
         self.cash_asset = cash_asset
         self.N = self.N_assets + (1 if cash_asset else 0)
-        self.window = max(window, self.minvol_window)
+        self.n_days = prices.shape[0]
+
+        # --- Kısa-veri adaptasyonu (granülerlik: monthly/yearly) ---
+        # DAILY V11-EXACT: V11'de self.window = max(window, minvol_window) = max(20,60)=60
+        # (DQN min-vol/momentum SABLONLARI minvol_window gecmisi gerektirir; lo=60 olmali,
+        # aksi halde sablon dilimi BOS -> NaN). Bunu KORU; yalniz COARSE veride (n_days kucuk)
+        # pencereleri veriye sigacak sekilde asagi cap'le.
+        # KRITIK (adversarial bulgu): DiscreteEnv sablonlari feat_tensor[t-mom/minvol:t]
+        # kullanir; window cap'lenip mom/minvol cap'lenmezse coarse'da NEGATIF/BOS slice ->
+        # NaN agirlik/NAV. Bu yuzden mom_window/minvol_window'u DA cap'le (window'dan ONCE).
+        _cap = max(1, self.n_days // 3)
+        self.minvol_window = min(self.minvol_window, _cap)   # daily: min(60,851)=60 degismez
+        self.mom_window    = min(self.mom_window, _cap)      # daily: min(20,851)=20 degismez
+        # Günlük (n_days~2554): window=min(max(20,60),851)=60 -> lo=60 V11-AYNI.
+        # Yıllık (~10): minvol=mom=3,window=3; Monthly (~120): minvol=40,mom=20,window=40.
+        self.window = min(max(window, self.minvol_window), _cap)
         self.F = self.feat_tensor.shape[2]
         # v6: makro rejim blogu (z-skorlu (T,M), state'e eklenir) + HAM regime
         # (T,) ∈[-1,1] — V7 odul kriz-amplifikasyonu icin step()'te kullanilir.
@@ -159,9 +175,10 @@ class PortfolioEnv:
         self.M = 0 if self.macro is None else int(self.macro.shape[1])
         self.state_dim = self.F * self.N_assets + self.M + self.N
         self.action_dim = self.N
-        # n_days: toplam zaman adimi (satir). 't' ile yalniz buyuk/kucuk harfle
-        # ayrilan 'T' adi karisikliga yol aciyordu (SonarCloud python:S1845) -> n_days.
-        self.n_days = prices.shape[0]
+        # n_days yukarida atandi (window cap hesabi icin ctor'da erken gerekiyordu).
+        # max_steps V11-EXACT (CAP YOK): coarse veride episode dogal olarak done-at-data-end
+        # ile biter (step t>=n_days-1 -> done; son gecerli _risky_returns t=n_days-2). Cap
+        # eklemek daily eval'i 1 adim kisaltir -> golden kayardi; bu yuzden cap YOK.
         self.max_steps = max_steps
         # v2: env-yerel RNG — global np.random'a bagimli degil (tekrar-uretilebilirlik
         # kurulum sirasindan bagimsiz) + tohumlu rastgele-baslangic destegi.
@@ -172,6 +189,12 @@ class PortfolioEnv:
         self.price_noise_std = float(price_noise_std)
         self._noise_active = (self.price_noise_std > 0.0 and
                               (self.random_start if price_noise_train_only else True))
+        # OPT-IN episode-clean (kullanici istegi: "1. iterasyon orijinal, 2-12 farkli noise").
+        # _episode_idx: ctor'da -1; her reset()'te +1 -> 1. episode idx=0 (TEMIZ/orijinal),
+        # idx>=1 gurultulu. DEFAULT KAPALI -> CLI/golden V11 davranisi (her episode gurultulu)
+        # BIT-AYNI; yalniz UI episode_clean=True gecer. Kapaliyken sayac kullanilmaz -> golden-no-op.
+        self._episode_clean = bool(episode_clean)
+        self._episode_idx = -1
         # v10: nakit (risksiz) gunluk faiz. None -> config EnvConfig.cash_annual_rate'ten
         # bilesik turetilir; UI/CLI gunluk orani dogrudan gecebilir. SABIT skaler -> RNG
         # cagrisi YOK, _risky_returns'te 0.0 yerine bu oran nakit varliga atanir.
@@ -182,7 +205,11 @@ class PortfolioEnv:
         self._reset_state()
 
     def _reset_state(self):
-        lo = max(self.window, 21)
+        # lo = self.window (V11'de minvol_window'u kapsar, >=21). Coarse veride n_days-2'ye
+        # cap'lenir (yearly ~10: lo<=8 -> gecerli; step done-at-data-end ile t+1 sinir guvenli).
+        # Gunluk: self.window=60 -> min(60, 2552)=60 -> V11-AYNI.
+        lo_raw = max(self.window, 21)
+        lo = min(lo_raw, max(1, self.n_days - 2))
         if self.random_start:
             # episode'un max_steps adim + bir sonraki gun erisimi icin yer birak.
             # DIKKAT: rng.integers yalniz hi > lo iken cagrilir (RNG tuketimi /
@@ -208,6 +235,7 @@ class PortfolioEnv:
     def reset(self, seed: int | None = None):
         if seed is not None:
             self.rng = np.random.default_rng(seed)   # env-yerel; global RNG'ye dokunmaz
+        self._episode_idx += 1                        # 1. episode -> idx=0 (temiz); >=1 -> noise
         self._reset_state()
         return self._obs(), {}
 
@@ -223,7 +251,9 @@ class PortfolioEnv:
         p0 = self.prices[self.t]
         p1 = self.prices[self.t + 1]
         r = (p1 - p0) / np.maximum(p0, 1e-9)
-        if self._noise_active:
+        # episode_clean ACIK ise 1. episode (idx=0) gurultusuz orijinal, idx>=1 noise'lu.
+        # KAPALI ise kosul daima True -> V11 davranisi (her episode gurultulu, golden bit-ayni).
+        if self._noise_active and (not self._episode_clean or self._episode_idx >= 1):
             # v8: slippage/fiyat gurultusu (hocanin sarti, anti-ezber) — gerceklesen
             # riskli getiriye kucuk Gauss gurultusu. Env-yerel rng -> global RNG'ye
             # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
@@ -289,8 +319,13 @@ class DiscretePortfolioEnv(PortfolioEnv):
     def _discrete_to_logits(self, a_idx: int) -> np.ndarray:
         mw = self.mom_window
         mvw = self.minvol_window
-        lb_mom  = self.feat_tensor[self.t - mw:  self.t, :, self.feat_names.index("logret")]
-        lb_vol  = self.feat_tensor[self.t - mvw: self.t, :, self.feat_names.index("logret")]
+        # Slice baslangici 0'a clamp (kemer-ve-askı): coarse veride t-mw/t-mvw negatife dusup
+        # BOS slice -> NaN olmasini engeller. Daily: t>=window>=mvw -> t-mvw>=0 -> max(0,.)
+        # ETKISIZ -> golden bit-ayni. (mom/minvol ctor'da da cap'lendi; bu ikinci savunma hatti.)
+        lo_mom = max(0, self.t - mw)
+        lo_vol = max(0, self.t - mvw)
+        lb_mom  = self.feat_tensor[lo_mom: self.t, :, self.feat_names.index("logret")]
+        lb_vol  = self.feat_tensor[lo_vol: self.t, :, self.feat_names.index("logret")]
         mean_r = lb_mom.mean(axis=0)
         vol    = lb_vol.std(axis=0) + 1e-6
         N_risky = self.N - 1 if self.cash_asset else self.N

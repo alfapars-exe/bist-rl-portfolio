@@ -15,7 +15,8 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import SEED, ForecastConfig, MacroConfig
 from core.factory import build_agent, build_env
-from core.persistence import load_agent, model_path, save_agent
+from core.persistence import (load_agent, model_path, named_model_path,
+                              read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
 from data import align_macro, download_bist, download_macro, train_test_split
 from env.portfolio_env import ACTION_NAMES
@@ -26,20 +27,53 @@ from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
 
 # PDF §11: egitilmis modeller diske burada kaydedilir/yuklenir (sunum kaliciligi).
-# N11: MODELS_DIR ve model_path artik core.persistence'da tanimlidi; buradan re-export.
-from core.persistence import MODELS_DIR  # noqa: E402 (import blogunun sonunda)
+# N11: MODELS_DIR ve model_path artik core.persistence'da tanimlidi; _MODELS_DIR olarak yukarda import edildi.
+MODELS_DIR = _MODELS_DIR  # noqa: N816  — dis erisim icin re-export (sidebar import eder)
 
 
-def save_trained_agent(algo: str, horizon: str, adaptive: bool):
+def save_trained_agent(algo: str, horizon: str, adaptive: bool, name: str = ""):
     """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None).
 
-    N11: dosya adi algo_{horizon}_{adaptive}.pt — farkli vade/adaptive birbirini ezmez.
+    N11: isim verilmisse named_model_path(name).pt kullanilir (UI isimli kayit).
+         isim bossa fallback: {algo}_{horizon} ismiyle named_model_path.
+         Geriye-uyumluluk: model_path(algo,horizon,adaptive) CLI/golden yolu KORUNUR —
+         bu fonksiyon yalnizca UI "Kaydet" butonundan cagirilir.
+    name: kullanici-girilen model adi; bos olursa "{algo}_{horizon}" kullanilir.
     """
     entry = st.session_state.trained_agents.get(_agent_key(algo, horizon, adaptive))
     if not entry or entry[0] is None:
         return None
-    path = model_path(algo, horizon, adaptive)
-    return save_agent(entry[0], algo, path, horizon=horizon, adaptive=adaptive)
+    effective_name = name.strip() if name.strip() else f"{algo}_{horizon}"
+    path = named_model_path(effective_name)
+    return save_agent(entry[0], algo, path,
+                      horizon=horizon, adaptive=adaptive,
+                      name=effective_name)
+
+
+def list_saved_models() -> list[dict]:
+    """models/*.pt dosyalarini tarar; her biri icin read_meta ile meta okur.
+
+    Donus: [{path, name, saved_at, algo, horizon, adaptive}, ...]
+    saved_at'e gore yeniden-eskiye sirali. Bozuk/okunamayan dosyalar atlanmaz;
+    meta bos string'lerle doldurulur (read_meta guvenli default doner).
+    """
+    _MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    results = []
+    for pt in _MODELS_DIR.glob("*.pt"):
+        meta = read_meta(pt)
+        # Eger name meta'da bossa dosya adini goster (eski format geriye-uyumlu)
+        display_name = meta["name"] if meta["name"] else pt.stem
+        results.append({
+            "path": str(pt),
+            "name": display_name,
+            "saved_at": meta["saved_at"],
+            "algo": meta["algo"],
+            "horizon": meta["horizon"],
+            "adaptive": meta["adaptive"],
+        })
+    # saved_at'e gore yeniden→eskiye sirala (ISO string karsilastirmasi dogru calisir)
+    results.sort(key=lambda x: x["saved_at"], reverse=True)
+    return results
 
 
 def load_saved_agent(algo: str, horizon: str = "medium", adaptive: bool = True):

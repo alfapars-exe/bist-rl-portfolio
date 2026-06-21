@@ -8,7 +8,8 @@ import streamlit as st
 from config import SEED, DataConfig, EnvConfig, RewardConfig, cash_daily_rate as _cash_daily_rate
 from env.portfolio_env import HORIZON_PRESETS
 from core.persistence import MODELS_DIR, model_path
-from ui.services import _load_data, load_saved_agent, load_saved_agent_from_path, save_trained_agent
+from ui.services import (_load_data, list_saved_models, load_saved_agent,
+                         load_saved_agent_from_path, save_trained_agent)
 from ui.state import _agent_key
 
 _dc = DataConfig()
@@ -446,53 +447,89 @@ def sidebar_controls():
         hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
 
     # 💾 Model kalıcılığı (PDF §11 + N11): eğitilmiş modeli diske kaydet / diskten yükle.
-    # N11: dosya adı algo_{horizon}_{adaptive}.pt — farklı vade/adaptive birbirini ezmez.
+    # İsimli kayıt: kullanıcı ad girer → named_model_path(name).pt olarak kaydedilir.
+    # Geriye-uyumluluk: eski algo_{horizon}_{adaptive}.pt dosyaları listede görünmeye devam eder.
     st.sidebar.divider()
     st.sidebar.subheader("💾 Model (kaydet / yükle)")
 
     cur_key = _agent_key(algo, st.session_state.horizon, st.session_state.adaptive)
     has_trained = (cur_key in st.session_state.trained_agents
                    and st.session_state.trained_agents[cur_key][0] is not None)
-    if has_trained and st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
-        p = save_trained_agent(algo, st.session_state.horizon, st.session_state.adaptive)
-        st.sidebar.success(f"Kaydedildi: {p}")
 
-    # N11: models/*.pt dosyalarını glob'la, selectbox ile göster.
+    if has_trained:
+        _default_name = f"{algo}_{st.session_state.horizon}"
+        _model_name = st.sidebar.text_input(
+            "Model adı (kaydetmek için)",
+            value=_default_name,
+            key="ui_model_name_input",
+            help="Kaydedilecek modelin adı. Harf/rakam/_ ve - kullanılabilir; "
+                 "diğer karakterler _ ile değiştirilir. Boş bırakılırsa "
+                 f"'{_default_name}' kullanılır.",
+        )
+        if st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
+            p = save_trained_agent(
+                algo, st.session_state.horizon, st.session_state.adaptive,
+                name=_model_name,
+            )
+            if p:
+                from core.persistence import read_meta as _rm
+                from pathlib import Path as _P
+                _saved_meta = _rm(_P(p))
+                st.sidebar.success(
+                    f"Kaydedildi: **{_saved_meta['name']}** "
+                    f"({_saved_meta['saved_at']})  \n`{_P(p).name}`"
+                )
+            else:
+                st.sidebar.error("Kaydetme başarısız — önce modeli eğitin.")
+
+    # Kayıtlı model listesi: list_saved_models() meta okur, saved_at'e göre sıralı.
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    _saved_files = sorted(MODELS_DIR.glob("*.pt"))
-    if _saved_files:
+    _saved_models = list_saved_models()
+    if _saved_models:
         st.sidebar.markdown("**Kayıtlı modeller**")
-        # Dosya adından okunabilir etiket üret: "DQN | short | adaptif"
-        def _pt_label(p):
-            stem = p.stem  # ör. "DQN_short_true"
-            parts = stem.split("_", 2)
-            if len(parts) == 3:
-                _algo_s, _hor_s, _adp_s = parts
-                _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(_hor_s, _hor_s)
-                _adp_tr = "adaptif" if _adp_s == "true" else "sabit"
-                return f"{_algo_s} | {_hor_tr} | {_adp_tr}"
-            return stem
 
-        _labels = [_pt_label(f) for f in _saved_files]
+        def _model_label(m: dict) -> str:
+            """"{name} · {saved_at} · {algo}/{horizon}/{adaptive}" formatı."""
+            _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(
+                m["horizon"], m["horizon"]
+            )
+            _adp_tr = "adaptif" if m["adaptive"] else "sabit"
+            _name = m["name"] or "(isimsiz)"
+            _at = m["saved_at"] or "—"
+            _algo_s = m["algo"] or "?"
+            return f"{_name} · {_at} · {_algo_s}/{_hor_tr}/{_adp_tr}"
+
+        _labels = [_model_label(m) for m in _saved_models]
         _selected_label = st.sidebar.selectbox(
             "Model seç",
             options=_labels,
             key="ui_model_selectbox",
-            help="Kayıtlı modeller — dosya adı: algo_vade_adaptive.pt. "
+            help="Kayıtlı modeller — isim · tarih · algo/vade/adaptif. "
                  "Seçip 'Yükle' butonuna bas.",
         )
         _sel_idx = _labels.index(_selected_label) if _selected_label in _labels else 0
-        _sel_path = _saved_files[_sel_idx]
-        st.sidebar.caption(f"Dosya: {_sel_path.name}")
+        _sel_model = _saved_models[_sel_idx]
+        st.sidebar.caption(
+            f"Dosya: `{_sel_model['path'].split('/')[-1].split(chr(92))[-1]}`"
+        )
 
         if st.sidebar.button("📂 Seçili modeli yükle", use_container_width=True):
-            result = load_saved_agent_from_path(_sel_path)
+            result = load_saved_agent_from_path(_sel_model["path"])
             if result:
                 _lkey, _lmeta = result
+                # Yüklenen modelin algo/horizon/adaptive değerlerini session'a al
+                # → mevcut resume (G4 "Devam Et") akışı bu değerleri kullanır.
+                st.session_state.selected_algo = _lmeta["algo"]
+                st.session_state.horizon = _lmeta["horizon"]
+                st.session_state.adaptive = _lmeta["adaptive"]
+                _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(
+                    _lmeta["horizon"], _lmeta["horizon"]
+                )
                 st.sidebar.success(
-                    f"{_lmeta['algo']} ({_lmeta['horizon']} / "
-                    f"{'adaptif' if _lmeta['adaptive'] else 'sabit'}) yüklendi — "
-                    "Test sekmesinde çalıştırılabilir."
+                    f"**{_sel_model['name']}** yüklendi  \n"
+                    f"{_lmeta['algo']} / {_hor_tr} / "
+                    f"{'adaptif' if _lmeta['adaptive'] else 'sabit'}  \n"
+                    "Test sekmesinde çalıştırılabilir; 'Devam Et' ile eğitime devam edilebilir."
                 )
                 st.rerun()
             else:

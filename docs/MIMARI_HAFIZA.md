@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-19 (V11: adil-karşılaştırma + nakit-faizi revizyonu; hakem #1–#8 + 5 yeni ister; 191 test)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-21 (adım granülerliği + coarse env cap + episode-clean opt-in; 227 test; commit 12d62c3)
 
 ---
 
@@ -18,7 +18,7 @@ kod/
 ├── main.py             # CLI orkestratörü: train.run() + plots.run()
 ├── train.py            # CLI eğitim + backtest sürücüsü
 ├── plots.py            # Yayın figürleri (matplotlib)
-├── data.py             # BIST 28 yfinance indirme + parquet cache
+├── data.py             # BIST 28 yfinance indirme + parquet cache; resample_to_granularity()
 ├── config.py           # Merkezi hiperparametreler + HORIZON_PRESETS (TEK KAYNAK)
 ├── agents/             # RL algoritmaları (PyTorch): base, common, dqn, ppo, sac, td3
 ├── env/                # portfolio_env.py (MDP) + reward.py (RewardEngine, AdaptiveRewardShaper, DifferentialSharpe)
@@ -36,25 +36,41 @@ kod/
 
 ```
 data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScaler, train-only fit)
-   →  forecast/forecaster.py ('forecast' feature, train-only)  →  env/portfolio_env.py (MDP state)
+   →  forecast/forecaster.py ('forecast' feature, train-only)
+   →  [UI yolu] data.resample_to_granularity(df, granularity)  ← Gün/Ay/Yıl granülerliği
+   →  env/portfolio_env.py (MDP state; coarse'da window/mom/minvol cap'lenir)
    →  agents/* (DQN/PPO/SAC/TD3)  →  core/trainer.py (generator eğitim)
    →  core/rollout.py (deterministik eval)  →  utils/metrics.py
    →  plots.py (CLI figürler) / ui/* (interaktif)  →  results/ + figures/
 ```
 
+**NOT:** CLI/`main.py` hep günlük veriyle çalışır → granülerlik yalnız UI (`ui/services._load_data`) yolunda etkindir.
+
 ## 3. KIRILMAZ İnvariant'lar (her değişiklikte koru)
 
 1. **Golden-master ≤1e-6** — `tests/golden/metrics_baseline.csv`, `navs_aligned_baseline.csv`.
    Eğitim/eval'de **RNG çağrı sırası** değişmemeli; aksi hâlde golden test kırılır.
+   Kanonik (V11): SAC 2.141/5.595, DQN 0.484/1.348. 227 test yeşil (commit 12d62c3).
 2. **Sızıntısızlık (leak-safety)** — tüm feature'lar causal (yalnız ≤t). `TrainScaler` ve
    `forecaster` **YALNIZ** train kümesinde fit edilir, test'e uygulanır ama orada fit edilmez.
    `tests/test_features.py`, `test_price_noise.py` bunu kilitler.
-3. **Tek-kaynak config** — tüm hiperparametre/preset `config.py` (özellikle `HORIZON_PRESETS`).
-   Sihirli sayıları kodun içine gömme; config'e bağla.
+   Granülerlik sızıntısızlığı: `resample_to_granularity` feature hesabından SONRA çağrılır;
+   resample atomik nokta üretir → train/test sınırı periyot-hizalı, karışma imkânsız.
+3. **Tek-kaynak config** — tüm hiperparametre/preset `config.py` (özellikle `HORIZON_PRESETS`,
+   `GRANULARITY_OPTIONS`, `MIN_POINTS`). Sihirli sayıları kodun içine gömme; config'e bağla.
 4. **Tek komut UI** — `streamlit run app.py` tek başına çalışır.
 5. **CLI ↔ UI ortak çekirdek** — `core/trainer.py` & `core/rollout.py` her ikisini de besler;
    mantık çatallanmamalı.
 6. **Determinizm** — `seed=42`; `torch.manual_seed` + `np.random.seed`; CPU.
+7. **add_features dokunulmazlığı** — granülerlik ne olursa olsun `add_features` HİÇ değişmez;
+   feature'lar her zaman 2554-günlük tam seride hesaplanır → daily V11 bit-aynı, NaN imkânsız.
+8. **Coarse env pencere üçlüsü cap** — `DiscretePortfolioEnv.__init__`'te `window`,
+   `mom_window`, `minvol_window` ÜÇÜ AYNI ANDA `min(preset, max(1, n_days//3))` ile cap'lenir.
+   YALNIZ `window` cap'lenip diğerleri cap'lenmezse `feat_tensor[t-minvol_window:t]` negatif
+   index → boş slice → NaN ağırlık/NAV (DQN + coarse granülerlik). Regresyon:
+   `tests/test_granularity.py::test_discrete_env_coarse_all_actions_nan_free`.
+9. **episode_clean opt-in** — `EnvConfig.episode_clean=False` (default). Değiştirilirse
+   golden ETKİLENMEZ (CLI/main.py bu flag'i kullanmaz); yalnız UI `_make_env(train)` açar.
 
 ## 4. Önemli Sözleşmeler (contracts)
 
@@ -63,6 +79,16 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   sözleşmeye bağımlıdır — anahtar adlarını değiştirme.
 - **`agent.act_eval(state)`** deterministik eylem döndürür (eval/rollout için).
 - **`config.HORIZON_PRESETS`** = {short, medium, long} → (η, λ, τ, γ, rebalans, pencereler).
+- **`data.resample_to_granularity(df, granularity)`** — granularity ∈ {"Gün","Ay","Yıl"};
+  Gün = NO-OP (aynı df), Ay = `resample("ME").mean()`, Yıl = `resample("YE").mean()`.
+  ÇAĞRI SIRASI: `add_features` → `train_test_split` → `resample_to_granularity` (her split ayrı).
+  `config.GRANULARITY_OPTIONS` tek kaynak; `config.MIN_POINTS` alt sınır koruması.
+- **`factory.build_env(..., episode_clean=False)`** — `episode_clean` flag'ini env ctor'a
+  iletir; default False → golden-güvenli. `_episode_idx` sıfırdan başlar; `_risky_returns`
+  gürültüyü `not episode_clean or _episode_idx >= 1` koşuluyla ekler (ilk episode temiz).
+- **`DiscretePortfolioEnv` pencere cap kuralı** — ctor'da `n = len(prices)`;
+  `cap = min(preset, max(1, n//3))`; `self.window = self.mom_window = self.minvol_window = cap`
+  (coarse'da). Daily'de cap > preset olamaz → davranış değişmez.
 
 ## 5. Kararlar Günlüğü (Decision Log)
 
@@ -137,6 +163,24 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   2.151 Sharpe → InverseVol(2.16)/RiskParity(2.14) düzeyinde, EqualWeight(2.09) + risksiz hurdle
   (NAV 2.5x) üstünde; MinVar(2.32) hâlâ önde ama makas kapandı. DQN zayıf (0.484). Altın/dolar
   tradeable YAPILMADI (makro-feature kaldı — kullanıcı kararı).
+
+- _(2026-06-21)_ **Adım granülerliği (Gün/Ay/Yıl) — UI-only resample (Approach 1).**
+  `add_features` hiç değişmez (2554-günlük tam seri); ardından `data.resample_to_granularity`
+  seçilen granülerliğe resample eder (Ay=`ME`, Yıl=`YE`, Gün=NO-OP). Neden Approach 1: daily
+  V11 bit-aynı (golden korunur) + NaN imkânsız + resample atomik nokta → sızıntısız split.
+  Yalnız UI yolu (`ui/services._load_data`); CLI/golden etkilenmez. `config.GRANULARITY_OPTIONS`
+  / `MIN_POINTS` tek kaynak.
+- _(2026-06-21)_ **Coarse env pencere üçlüsü cap — adversarial gotcha yakalandı.**
+  Ay (~120) / Yıl (~10) granülerlikte `window`, `mom_window`, `minvol_window` ÜÇÜ DE
+  `min(preset, max(1, n//3))` ile cap'lenir. YALNIZ `window` cap'lenirse `feat_tensor
+  [t-minvol_window:t]` negatif index → boş slice → NaN ağırlık/NAV (DQN + ay/yıl +
+  medium/long). Daily'de cap etkisiz (window=20, minvol=60, mom=20; cap=851). Regresyon:
+  `tests/test_granularity.py::test_discrete_env_coarse_all_actions_nan_free`.
+- _(2026-06-21)_ **episode_clean opt-in (golden-güvenli deseni).**
+  `EnvConfig.episode_clean=False` default; `_episode_idx` reset'te artar; gürültü
+  `not episode_clean or _episode_idx>=1` koşulunda eklenir → ilk episode orijinal/temiz,
+  2+ gürültülü. CLI/golden bu flag'i kullanmaz → V11 bit-aynı. UI `_make_env(train)`
+  `episode_clean=True` açar. Ödül opt-in deseniyle aynı felsefe.
 
 ## 6. Bilinen Riskler / Açık Konular
 

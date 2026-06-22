@@ -107,6 +107,9 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               cash_daily_rate: float | None = None,
               episode_clean: bool = False,
               rebalance_freq: int | None = None,
+              gamma: float | None = None,
+              mom_window: int | None = None,
+              minvol_window: int | None = None,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
@@ -136,6 +139,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
         episode_clean=bool(episode_clean),   # OPT-IN: UI training True (1. iter orijinal); CLI/golden False
         rebalance_freq=rebalance_freq,        # OPT-IN: None -> preset (CLI/golden); UI override eder
+        gamma=gamma, mom_window=mom_window, minvol_window=minvol_window,  # v12: acik override (None->preset)
         # Mevcut 6 odul param'i parametrik akisa acilir — eksik/None anahtar config
         # default'una duser (golden-guvenli; eta_base/bankruptcy_penalty deseni ile ayni).
         w_dsr=float(cfg.get("w_dsr", RewardConfig.w_dsr)),

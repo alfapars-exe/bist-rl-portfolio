@@ -90,6 +90,9 @@ class PortfolioEnv:
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  episode_clean: bool = False,
                  rebalance_freq: int | None = None,
+                 gamma: float | None = None,            # v12: None -> preset (golden); override
+                 mom_window: int | None = None,         # v12: None -> preset; override
+                 minvol_window: int | None = None,      # v12: None -> preset; override
                  cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
@@ -114,9 +117,10 @@ class PortfolioEnv:
         preset = HORIZON_PRESETS[horizon]
         # rebalance_freq: None -> preset (CLI/golden bit-ayni); UI override -> max(1, int).
         self.rebalance_freq = preset["rebalance"] if rebalance_freq is None else max(1, int(rebalance_freq))
-        self.mom_window     = preset["mom_window"]
-        self.minvol_window  = preset["minvol_window"]
-        self.gamma          = preset["gamma"]
+        # v12: mom/minvol/gamma artik OVERRIDE-edilebilir (None -> preset, golden bit-ayni).
+        self.mom_window     = preset["mom_window"]    if mom_window    is None else max(1, int(mom_window))
+        self.minvol_window  = preset["minvol_window"] if minvol_window is None else max(1, int(minvol_window))
+        self.gamma          = preset["gamma"]         if gamma         is None else float(gamma)
         eta_base    = preset["eta"] if eta_base    is None else float(eta_base)
         lambda_base = preset["lam"] if lambda_base is None else float(lambda_base)
         tau_base    = preset["tau"] if tau_base    is None else float(tau_base)
@@ -212,6 +216,12 @@ class PortfolioEnv:
         # Gunluk: self.window=60 -> min(60, 2552)=60 -> V11-AYNI.
         lo_raw = max(self.window, 21)
         lo = min(lo_raw, max(1, self.n_days - 2))
+        # v12: dejenere (asiri-kisa) veri korumasi — sessiz NaN/bos-slice yerine acik hata.
+        if self.n_days < 3 or lo >= self.n_days - 1:
+            raise ValueError(
+                f"Yetersiz veri: n_days={self.n_days}, warm-up lo={lo}. step_days cok buyuk "
+                f"veya tarih araligi cok dar (resample sonrasi {self.n_days} nokta)."
+            )
         if self.random_start:
             # episode'un max_steps adim + bir sonraki gun erisimi icin yer birak.
             # DIKKAT: rng.integers yalniz hi > lo iken cagrilir (RNG tuketimi /
@@ -274,6 +284,12 @@ class PortfolioEnv:
             a = np.asarray(action, dtype=np.float32).reshape(-1)
             if a.shape[0] != self.N:
                 raise ValueError(f"action must have length {self.N}, got {a.shape}")
+            # v12: NaN/Inf koruması — dejenere aksiyon -> nakit'e (son slot) düş. Sağlıklı
+            # aksiyonda np.isfinite hepsi True -> NO-OP (golden bit-aynı, RNG'ye dokunmaz).
+            if not np.isfinite(a).all():
+                w = np.zeros(self.N, dtype=np.float32)
+                w[-1] = 1.0
+                return w
             return softmax(a, temp=1.0)
         return self.w.copy()
 

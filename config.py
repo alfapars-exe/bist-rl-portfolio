@@ -24,6 +24,9 @@ SEED = 42
 # ---------------------------------------------------------------------
 # Vade preset'leri — env/portfolio_env.py'den tasindi (Faz 2).
 # rebalans frekansi, momentum/minvol pencereleri, (eta, lam, tau, gamma) base.
+# DEPRECATED-COMPAT (v12): yeni model `step_days` (N-gun) + acik parametreler kullanir;
+# bu tablo yalniz (a) model dosya-adi slot'u, (b) env preset-fallback (None gecilen
+# param'lar icin), (c) DEFAULTS'un turetim kaynagi olarak korunur. Degerler DEGISMEZ.
 # ---------------------------------------------------------------------
 HORIZON_PRESETS: Dict[str, dict] = {
     "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95,
@@ -33,6 +36,27 @@ HORIZON_PRESETS: Dict[str, dict] = {
     "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995,
                    min_days=90, max_days=360, train_max_steps=360),
 }
+
+
+# ---------------------------------------------------------------------
+# v12: TEK ADIM/ORTALAMA MODELI — horizon preset + Gun/Ay/Yil granulerlik yerine
+# tek `step_days` (N) + BAGIMSIZ odul parametreleri. DEFAULTS = eski "medium"
+# preset'inin BIREBIR karsiligi (golden re-baseline kanonik degerleri).
+#   N=1 -> gunluk (resample no-op). N>=2 -> N-gunluk blok-ortalama + N-gunluk adim.
+#   Episode uzunlugu = secilen train tarih araliginin TAMAMI (slider yok).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class StepDefaults:
+    step_days: int     = 1        # N: adim/ortalama penceresi (gun)
+    eta: float         = 0.0010   # = HORIZON_PRESETS["medium"]["eta"]
+    lam: float         = 0.50     # = ...["medium"]["lam"]
+    tau: float         = 0.05     # = ...["medium"]["tau"]
+    gamma: float       = 0.99     # = ...["medium"]["gamma"]
+    mom_window: int    = 20       # = ...["medium"]["mom_window"]
+    minvol_window: int = 60       # = ...["medium"]["minvol_window"]
+
+
+DEFAULTS = StepDefaults()
 
 
 # ---------------------------------------------------------------------
@@ -255,3 +279,33 @@ GRANULARITY_MIN_POINTS: dict = {
     "monthly":  20,   # ~20 ay (~1.7 yil)
     "yearly":    5,   # 5 yil
 }
+
+
+# ---------------------------------------------------------------------
+# v12: degenerate-config NaN korumasi. Env warm-up lo = max(window,21);
+# resample sonrasi train aralige yetersizse env dejenere olup sessiz NaN uretir
+# (kullanicinin "cok-kisa tarih araligi" NaN'i). Bu helper egitimi NaN yerine
+# DOSTCA bir hatayla durdurmak icin kullanilir (UI st.error / CLI SystemExit).
+# Leaf: yalniz stdlib + EnvConfig (ayni modul) -> testler ucuz import eder.
+# ---------------------------------------------------------------------
+MIN_TRAIN_POINTS_WARMUP = 21       # env lo_raw = max(window, 21)
+MIN_TRAIN_STEPS_HEADROOM = 5       # warm-up sonrasi birkac adim (dejenere olmasin)
+
+
+def validate_train_range(n_train_points: int, *, window: int = EnvConfig.window,
+                         step_days: int = 1) -> tuple:
+    """(ok, mesaj) — (resample edilmis) train araligi gecerli env kurabilir mi?
+
+    n_train_points: step_days resample SONRASI len(px_tr) (env'in gordugu satir sayisi).
+    ok=False ise mesaj kullaniciya gosterilir ve EGITIM BASLATILMAZ (sessiz NaN yerine).
+    """
+    lo = max(int(window), MIN_TRAIN_POINTS_WARMUP)
+    need = lo + MIN_TRAIN_STEPS_HEADROOM
+    if int(n_train_points) < need:
+        return False, (
+            f"Egitim araligi cok kisa: adim (step_days={step_days}) resample sonrasi "
+            f"{n_train_points} nokta kaldi; en az {need} gerekli (isinma penceresi {lo} "
+            f"+ {MIN_TRAIN_STEPS_HEADROOM} adim). Tarih araligini genislet veya step_days'i "
+            f"dusur. Egitim baslatilmadi (sessiz NaN yerine)."
+        )
+    return True, ""

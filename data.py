@@ -318,6 +318,24 @@ def resample_to_granularity(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
     return resampled
 
 
+def resample_to_step_days(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """N-günlük blok-ortalama resample (v12 tek-adım modeli — granülerliğin yerine).
+
+    n=1  -> df'i AYNEN döndür (NO-OP; golden-güvenli, RNG sırası korunur).
+    n>=2 -> df.resample(f"{n}D").mean().ffill().bfill() (boş blok NaN koruması).
+
+    ÇAĞRI SIRASI (leak-safe): add_features (GÜNLÜK, tam seri) -> train_test_split
+    -> resample_to_step_days (HER split AYRI). Resample atomik nokta üretir -> train/test
+    sınırı blok-hizalı, karışma yok. Feature'lar HER ZAMAN günlük hesaplanır (add_features DEĞİŞMEZ).
+    DatetimeIndex korunur (env `self.dates = prices.index` için).
+    """
+    n = max(1, int(n))
+    if n == 1:
+        return df  # NO-OP: aynı nesne -> golden bit-aynı, RNG sırası korunur
+    resampled = df.resample(f"{n}D").mean()
+    return resampled.ffill().bfill()
+
+
 def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
     """Makroyu BIST işlem takvimine (index) reindex + ffill/bfill (causal)."""
     return macro_raw.reindex(index).ffill().bfill()

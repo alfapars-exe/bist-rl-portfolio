@@ -10,21 +10,17 @@ permissions:
   contents: read
 
 jobs:
-  test-and-analyze:
-    name: Tests (py${{ matrix.python-version }}) + SonarQube Cloud
+  test:
+    name: Tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # pyproject requires-python >=3.10 vaadi artik CI'da dogrulanir
-      # (onceden yalniz 3.12 test ediliyordu — kesif bulgusu).
+      # pyproject requires-python >=3.10 vaadi CI'da dogrulanir (3.10/3.11/3.12).
       matrix:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
-      # SonarCloud "new code" / blame doğruluğu için tam geçmiş gerekir.
-      - name: Checkout (full history)
+      - name: Checkout
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -37,17 +33,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      # Cobertura XML üret → coverage.xml (sonar-project.properties bunu okur).
       - name: Run tests with coverage
-        run: pytest --cov=. --cov-report=xml:coverage.xml --cov-report=term-missing
-
-      # SonarCloud için SONAR_HOST_URL GEREKMEZ. Action sonar-project.properties'i okur.
-      # NOT: SonarCloud'da "Automatic Analysis" KAPALI olmalı, yoksa bu adım reddedilir.
-      - name: SonarQube Cloud Scan
-        # Fork PR'larinda SONAR_TOKEN secret'i expose EDILMEZ -> scan adimi basarisiz olur.
-        # Yalniz push veya ayni-repo PR'larda calistir; fork PR'lari yine test/coverage geri bildirimi alir.
-        # Matriste yalniz 3.12'de kosar (tek scan; coverage 3.12 isinden yuklenir).
-        if: matrix.python-version == '3.12' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: SonarSource/sonarqube-scan-action@v8.1.0
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: pytest --cov=. --cov-report=term-missing

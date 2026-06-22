@@ -1,7 +1,8 @@
 """Deep Q-Network ajanı — PyTorch implementasyonu (ayrık aksiyonlu).
 
 Prompt spec'i:
-  - MLP: state_dim (393, v2) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+  - MLP: state_dim (397: 13×28 + 4 makro + 29 ağırlık) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+    (393 = makro-öncesi V5 tabanı; +4 makro [MacroConfig.enabled] = 397)
   - Replay buffer: 50_000, uniform örnekleme, batch = 64
   - Target network: her 500 adımda hard update (θ⁻ ← θ)
   - ε-greedy: 1.0 → 0.05, 10_000 adımda lineer decay
@@ -60,12 +61,13 @@ class DQNAgent(BaseAgent):
 
         self.buffer = ReplayBuffer(buffer_size)
         self.step_count = 0
+        self.env_step_count = 0
 
     def _sync_target(self):
         self.q_target.load_state_dict(self.q.state_dict())
 
     def eps(self) -> float:
-        frac = min(1.0, self.step_count / max(self.eps_decay, 1))
+        frac = min(1.0, self.env_step_count / max(self.eps_decay, 1))
         return self.eps_start + frac * (self.eps_end - self.eps_start)
 
     @torch.no_grad()
@@ -83,22 +85,27 @@ class DQNAgent(BaseAgent):
         """Eval: greedy secim (epsilon yok) — ayrik sablon indeksi."""
         return self.act(s, greedy=True)
 
-    def remember(self, s, a, r, s2, d):
-        self.buffer.push(s, int(a), r, s2, d)
+    def observe_step(self) -> None:
+        self.env_step_count += 1
+
+    def remember(self, s, a, r, s2, d, discount=None):
+        self.buffer.push(s, int(a), r, s2, d,
+                         self.gamma if discount is None else discount)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
-        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s, a, r, s2, d, discount = self.buffer.sample(self.batch_size)
         s  = torch.as_tensor(s,  dtype=torch.float32, device=self.device)
         a  = torch.as_tensor(a,  dtype=torch.int64,   device=self.device)
         r  = torch.as_tensor(r,  dtype=torch.float32, device=self.device)
         s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
         d  = torch.as_tensor(d,  dtype=torch.float32, device=self.device)
+        discount = torch.as_tensor(discount, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             q_next = self.q_target(s2).max(dim=1).values
-            td_target = r + (1.0 - d) * self.gamma * q_next
+            td_target = r + (1.0 - d) * discount * q_next
 
         q_pred_all = self.q(s)
         q_pred = q_pred_all.gather(1, a.unsqueeze(1)).squeeze(1)
@@ -115,10 +122,12 @@ class DQNAgent(BaseAgent):
         return float(loss.item())
 
     def save(self, path: str):
-        torch.save({"q": self.q.state_dict(), "step_count": self.step_count}, path)
+        torch.save({"q": self.q.state_dict(), "step_count": self.step_count,
+                    "env_step_count": self.env_step_count}, path)
 
     def load(self, path: str):
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
         self.q.load_state_dict(ckpt["q"])
         self._sync_target()
         self.step_count = int(ckpt.get("step_count", 0))
+        self.env_step_count = int(ckpt.get("env_step_count", self.step_count))

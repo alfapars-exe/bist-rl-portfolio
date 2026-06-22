@@ -88,25 +88,27 @@ class TD3Agent(BaseAgent):
         """Eval: deterministik aktör (keşif gürültüsü yok)."""
         return self.act(s, explore=False)
 
-    def remember(self, s, a, r, s2, d):
-        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d)
+    def remember(self, s, a, r, s2, d, discount=None):
+        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d,
+                         self.gamma if discount is None else discount)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
         self._it += 1
-        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s, a, r, s2, d, discount = self.buffer.sample(self.batch_size)
         s = torch.as_tensor(s, dtype=torch.float32, device=self.device)
         a = torch.as_tensor(a, dtype=torch.float32, device=self.device)
         r = torch.as_tensor(r, dtype=torch.float32, device=self.device)
         s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
         d = torch.as_tensor(d, dtype=torch.float32, device=self.device)
+        discount = torch.as_tensor(discount, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             noise = (torch.randn_like(a) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
             a2 = (self.actor_t(s2) + noise).clamp(-1, 1)               # hedef-politika yumuşatma
             q_min = torch.min(self.q1_t(s2, a2), self.q2_t(s2, a2))    # twin min-Q hedefi
-            target = r + (1 - d) * self.gamma * q_min
+            target = r + (1 - d) * discount * q_min
 
         for q, opt in [(self.q1, self.opt_q1), (self.q2, self.opt_q2)]:
             loss = F.mse_loss(q(s, a), target)

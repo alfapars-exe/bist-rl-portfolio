@@ -24,12 +24,42 @@ SEED = 42
 # ---------------------------------------------------------------------
 # Vade preset'leri — env/portfolio_env.py'den tasindi (Faz 2).
 # rebalans frekansi, momentum/minvol pencereleri, (eta, lam, tau, gamma) base.
+# DEPRECATED-COMPAT (v12): yeni model `step_days` (N-gun) + acik parametreler kullanir;
+# bu tablo yalniz (a) model dosya-adi slot'u, (b) env preset-fallback (None gecilen
+# param'lar icin), (c) DEFAULTS'un turetim kaynagi olarak korunur. Degerler DEGISMEZ.
 # ---------------------------------------------------------------------
 HORIZON_PRESETS: Dict[str, dict] = {
-    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95),
-    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99),
-    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995),
+    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95,
+                   min_days=1,  max_days=30,  train_max_steps=30),
+    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99,
+                   min_days=30, max_days=90,  train_max_steps=90),
+    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995,
+                   min_days=90, max_days=360, train_max_steps=360),
 }
+
+
+# ---------------------------------------------------------------------
+# v12: TEK ADIM/ORTALAMA MODELI — horizon preset + Gun/Ay/Yil granulerlik yerine
+# tek `step_days` (N) + BAGIMSIZ odul parametreleri. DEFAULTS = eski "medium"
+# preset'inin BIREBIR karsiligi (golden re-baseline kanonik degerleri).
+#   N=1 -> gunluk (resample no-op). N>=2 -> N seanslik blok-sonu kapanis + N seanslik adim.
+#   Episode uzunlugu = secilen train tarih araliginin TAMAMI (slider yok).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class StepDefaults:
+    step_days: int     = 1        # N: adim/ortalama penceresi (gun)
+    eta: float         = 0.0010   # = HORIZON_PRESETS["medium"]["eta"]
+    lam: float         = 0.50     # = ...["medium"]["lam"]
+    tau: float         = 0.05     # = ...["medium"]["tau"]
+    gamma: float       = 0.99     # = ...["medium"]["gamma"]
+    mom_window: int    = 20       # = ...["medium"]["mom_window"]
+    minvol_window: int = 60       # = ...["medium"]["minvol_window"]
+
+
+DEFAULTS = StepDefaults()
+
+STEP_DAYS_MIN = 1
+STEP_DAYS_MAX = 252
 
 
 # ---------------------------------------------------------------------
@@ -126,6 +156,29 @@ class EnvConfig:
     # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
     price_noise_std: float = 0.001
     price_noise_train_only: bool = True
+    # v10: PARAMETRIK nakit (risksiz) faiz. Nakit varlik artik 0 degil, gunluk risksiz
+    # getiri kazanir. cash_annual_rate gercekci TR 2022-24 mevduat/repo seviyesi (~%40);
+    # UI/CLI'dan ayarlanabilir. Gunluk oran bilesik tutarlilikla turetilir:
+    #   cash_daily_rate = (1 + cash_annual_rate)^(1/252) - 1
+    # SABIT oran -> RNG cagrisi YOK -> golden RNG sirasi korunur (yalniz deger degisir).
+    cash_annual_rate: float = 0.40
+    trading_days: int = 252          # yillik->gunluk bilesik donusum tabani
+
+    @property
+    def cash_daily_rate(self) -> float:
+        """Yillik nakit faizinin bilesik gunluk karsiligi: (1+R)^(1/252) - 1."""
+        return cash_daily_rate(self.cash_annual_rate, self.trading_days)
+
+
+def cash_daily_rate(cash_annual_rate: float, trading_days: int = 252) -> float:
+    """Yillik nakit (risksiz) faizini bilesik gunluk orana cevirir.
+
+    (1 + r_daily)^trading_days = 1 + cash_annual_rate  =>  r_daily = (1+R)^(1/D) - 1.
+    Bagimsiz modul-duzeyi yardimci: env ctor (cash_daily_rate is None) buradan turetir;
+    UI/CLI yillik orani gecerse env gunluk orani hesaplar. RNG kullanmaz (deterministik).
+    """
+    D = max(int(trading_days), 1)
+    return float((1.0 + float(cash_annual_rate)) ** (1.0 / D) - 1.0)
 
 
 # ---------------------------------------------------------------------
@@ -158,11 +211,31 @@ class RewardConfig:
     cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
     regime_beta: float = 1.0    # kriz amplifikasyon gucu
     cvar_amp: float = 1.0       # rejim amplifikasyon usteli
+    # v9: OPT-IN ek terimler (default 0/kapali -> golden bit-ayni). reward_overrides
+    # ile UI'dan ayarlanabilir; env ctor + build_env bunlari okur.
+    w_gain: float = 0.0         # kazanc-carpani odul agirligi (nav>gain_floor uzeri)
+    gain_floor: float = 1.0     # kazanc esigi (nav bunun uzerinde odullenir)
+    w_gain_speed: float = 0.0   # erken-kazanc hiz faktoru (0 -> hizdan bagimsiz)
+    w_ruin_timing: float = 0.0  # erken-iflas ceza olcegi (0 -> flat bankruptcy_penalty)
+
+
+# ---------------------------------------------------------------------
+# Veri penceresi sabitleri — data.py START/END/SPLIT ile BIREBIR (tek kaynak).
+# data.py bu DataConfig'i sonraki dalgada (veri-muhendisi) okuyacak; simdilik
+# yalniz config'te yansitilir (frozen -> kazara mutasyon engellenir).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class DataConfig:
+    start: str = "2015-01-01"      # data.py START
+    end: str = "2024-12-31"        # data.py END
+    train_end: str = "2022-01-01"  # data.py SPLIT (train/test ayrim tarihi)
 
 
 # ---------------------------------------------------------------------
 # v2: CNN-LSTM forecaster (predict-then-optimize). enabled=True ise state'e
-# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^393.
+# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^397 (DQN/SAC/TD3) /
+# R^369 (PPO; forecast haric F=12). Not: 393/365 = makro-oncesi V5 tabani; +4 makro
+# (MacroConfig.enabled, asagida) = 397/369.
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class ForecastConfig:
@@ -193,3 +266,49 @@ class MacroConfig:
     # State'e eklenen 4 yalin oznitelik: rejim omurgasi + faiz/dolar/altin.
     features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
     mom_window: int = 20      # momentum/degisim penceresi (gun)
+
+
+# ---------------------------------------------------------------------
+# Adim granülerliği — UI/CLI'dan secilebilir; feature'lar HER ZAMAN gunluk
+# hesaplanir (add_features degismez), sonra resample_to_granularity() ile
+# istenen frekansi indirgenir. "daily" -> no-op (golden-guvenli).
+# ---------------------------------------------------------------------
+GRANULARITY_OPTIONS: tuple = ("daily", "monthly", "yearly")
+
+# Her granülerlik icin minimum nokta uyari esigi (resample sonrasi).
+# n_points < esik ise downstream kod uyari verebilir.
+GRANULARITY_MIN_POINTS: dict = {
+    "daily":   252,   # 1 tam yil is gunu
+    "monthly":  20,   # ~20 ay (~1.7 yil)
+    "yearly":    5,   # 5 yil
+}
+
+
+# ---------------------------------------------------------------------
+# v12: degenerate-config NaN korumasi. Env warm-up lo = max(window,21);
+# resample sonrasi train aralige yetersizse env dejenere olup sessiz NaN uretir
+# (kullanicinin "cok-kisa tarih araligi" NaN'i). Bu helper egitimi NaN yerine
+# DOSTCA bir hatayla durdurmak icin kullanilir (UI st.error / CLI SystemExit).
+# Leaf: yalniz stdlib + EnvConfig (ayni modul) -> testler ucuz import eder.
+# ---------------------------------------------------------------------
+MIN_TRAIN_POINTS_WARMUP = 21       # env lo_raw = max(window, 21)
+MIN_TRAIN_STEPS_HEADROOM = 5       # warm-up sonrasi birkac adim (dejenere olmasin)
+
+
+def validate_train_range(n_train_points: int, *, window: int = EnvConfig.window,
+                         step_days: int = 1) -> tuple:
+    """(ok, mesaj) — (resample edilmis) train araligi gecerli env kurabilir mi?
+
+    n_train_points: step_days resample SONRASI len(px_tr) (env'in gordugu satir sayisi).
+    ok=False ise mesaj kullaniciya gosterilir ve EGITIM BASLATILMAZ (sessiz NaN yerine).
+    """
+    lo = max(int(window), MIN_TRAIN_POINTS_WARMUP)
+    need = lo + MIN_TRAIN_STEPS_HEADROOM
+    if int(n_train_points) < need:
+        return False, (
+            f"Egitim araligi cok kisa: adim (step_days={step_days}) resample sonrasi "
+            f"{n_train_points} nokta kaldi; en az {need} gerekli (isinma penceresi {lo} "
+            f"+ {MIN_TRAIN_STEPS_HEADROOM} adim). Tarih araligini genislet veya step_days'i "
+            f"dusur. Egitim baslatilmadi (sessiz NaN yerine)."
+        )
+    return True, ""

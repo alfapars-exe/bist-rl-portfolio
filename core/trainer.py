@@ -41,8 +41,9 @@ def train_dqn(agent, env, n_episodes: Optional[int] = None,
         while not (done or trunc):
             a = agent.act(s)
             actions.append(int(a))
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
+            s2, r, done, trunc, info = env.step(a)
+            agent.remember(s, a, r, s2, float(done), discount=info["discount"])
+            agent.observe_step()
             loss = agent.train_step()
             if loss is not None:
                 losses.append(loss)
@@ -75,8 +76,15 @@ def train_ppo(agent, env, n_updates: Optional[int] = None,
         rollout_reward = 0.0
         for _ in range(rollout_len):
             a, lp, v = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, done or trunc, v, lp)
+            s2, r, done, trunc, info = env.step(a)
+            with torch.no_grad():
+                next_v = float(agent.value(
+                    torch.as_tensor(s2, dtype=torch.float32,
+                                    device=agent.device).unsqueeze(0)
+                ).item())
+            agent.remember(s, a, r, done, v, lp, next_v=next_v,
+                           boundary=(done or trunc), discount=info["discount"],
+                           period_length=info["period_length"])
             rollout_reward += r
             s = s2
             if done or trunc:
@@ -113,8 +121,8 @@ def _offpolicy_step(agent, env, s, step: int, warmup: int, train_every: int):
         a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
     else:
         a = agent.act(s)
-    s2, r, done, trunc, _ = env.step(a)
-    agent.remember(s, a, r, s2, float(done))
+    s2, r, done, trunc, info = env.step(a)
+    agent.remember(s, a, r, s2, float(done), discount=info["discount"])
     loss = None
     if len(agent.buffer) > warmup and step % train_every == 0:
         loss = agent.train_step()

@@ -21,20 +21,29 @@ güncel ve özlü tutmak.
 - **Kaynak-doğruluk**: bellek kodla çelişiyorsa **kod kazanır** — çelişkiyi Grep ile teyit
   edip belleği düzelt, kodu belleğe uydurmaya çalışma.
 
-## Bellekteki bölümler (koru/güncelle)
-1. Paket yapısı (üst seviye ağaç).
-2. Veri akışı (data→features→env→agent→trainer→rollout→metrics→plots/UI).
-3. **KIRILMAZ invariant'lar**: golden ≤1e-6 + RNG sırası, sızıntısızlık (train-only fit),
-   tek-kaynak `config.HORIZON_PRESETS`, tek-komut UI, CLI↔UI ortak çekirdek, determinizm (seed=42).
-4. **Sözleşmeler**: trainer generator dict anahtarları, `act_eval` deterministliği, preset sözlüğü.
-5. **Kararlar günlüğü** (Decision Log): tarih + karar + gerekçe (ör. "TD3 eklendi — sürekli
-   kontrol", "PPO forecast feature almaz — v2 ablation").
-6. Bilinen riskler / açık konular.
+## Bellek şeması (§0–§7 — koru/güncelle)
+- **§0 Blackboard Sözleşmesi** — oryantasyon/index + oku-önce/yaz-sonra protokolü + `derived:config`
+  blok (sayılar `config.py`'den türetilir; **elle DÜZENLEME** — `tests/test_config_single_source.py` denetler) + MDP özeti.
+- **§1 Paket yapısı** (üst seviye ağaç).
+- **§2 Veri akışı / MDP** (data→features→forecast→env→agent→trainer→rollout→metrics→plots/UI; STATE_DIM, action, reward).
+- **§3 KIRILMAZ invariant'lar** — her biri kilit-testiyle (golden ≤1e-6 + RNG sırası, sızıntısızlık
+  train-only fit, tek-kaynak `config`, tek-komut UI, CLI↔UI ortak çekirdek, determinizm seed=42).
+- **§4 Sözleşmeler** — trainer generator dict anahtarları, `act_eval` determinizmi, preset/granularity, `build_env` opsiyonel paramlar.
+- **§5 Kararlar Günlüğü** — tarih + karar + gerekçe + "golden: değişti/değişmedi".
+- **§6 Bilinen riskler / açık konular.**
+- **§7 Drift Guard defteri** — hangi guard testi neyi kilitler (roster + config-single-source + golden).
+
+## Yaz-sonra tetikleri (seni ne zaman çağırırlar)
+STATE_DIM/action/feature · reward terim/preset · contract anahtarı · golden re-baseline · yeni ajan/dosya ·
+yeni invariant/risk değişince → ilgili §'yi güncelle + §5'e satır ekle + "Son güncelleme" notunu tazele.
+Hiçbiri tetiklenmediyse (saf bugfix, contract korunuyor) çağrılmazsın → log şişmesin.
 
 ## Çalışma Kuralları
 - Güncellerken **minimal ve doğrulanabilir** yaz; spekülasyon ekleme.
 - Yeni bir karar geldiğinde Decision Log'a bir satır ekle (mümkünse tarih/sürüm).
 - Bir invariant değiştiyse, ilgili testi (Grep ile) bulup belleğe referans ver.
+- **`derived:config` bloğundaki sayıları ELLE değiştirme** — `config.py` değiştiyse oradan türet
+  (guard `test_config_single_source.py` doc⟂config eşitliğini denetler).
 - Büyük değişiklikten sonra "Son güncelleme" notunu tazele.
 
 ## Çıktı Biçimi

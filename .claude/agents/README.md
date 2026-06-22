@@ -5,12 +5,13 @@ oturum, bir görevi ilgili ajanın `description`'ına göre **otomatik yönlendi
 `@ajan-adi` ile elle de çağırabilirsin. Roster ve refleks kuralları için kökteki
 [`CLAUDE.md`](../../CLAUDE.md)'ye de bak.
 
-## Roster (15 ajan)
+## Roster (17 ajan)
 
 | Ajan | Ne zaman | Model |
 |------|----------|-------|
 | **orkestrator-planlayici** | Büyük/çok-disiplinli hedefi parçalara böl, ajanlara dağıt | opus |
 | **rl-arastirma-muhendisi** | DQN/PPO/SAC/TD3, ödül şekillendirme, state tasarımı, eğitim kararlılığı | opus |
+| **odul-ceza-tasarimcisi** | Ödül/ceza tasarımı: terim büyüklükleri/denge, yeni reward shaping (2x/3x bonus, iflas-timing; opt-in) | opus |
 | **backend-muhendisi** | `core/`, `main.py`, `train.py`, `config.py`, pipeline & persistence | sonnet |
 | **frontend-muhendisi** | Streamlit `app.py`/`ui/`/`plots.py` — 4 sekme, grafikler | sonnet |
 | **veri-muhendisi** | `data.py`, `utils/features.py`, makro; **sızıntısızlık** | sonnet |
@@ -24,6 +25,7 @@ oturum, bir görevi ilgili ajanın `description`'ına göre **otomatik yönlendi
 | **proje-rubrik-bekcisi** | `RL_FinalProje.pdf` ister-uyum denetimi (salt-okunur) | opus |
 | **mimari-hafiza-koruyucusu** | `docs/MIMARI_HAFIZA.md` canlı mimari bellek | sonnet |
 | **dokumantasyon-yazari** | README/DOKUMANTASYON/KOD_EKI üretim & senkron | sonnet |
+| **dagitim-tekrarlanabilirlik-uzmani** | HF Space deploy/repro — gerçek-veri pariteleri, Docker, token hijyeni | sonnet |
 
 ## Örnek tetiklemeler
 
@@ -32,6 +34,7 @@ oturum, bir görevi ilgili ajanın `description`'ına göre **otomatik yönlendi
 - "Bu Sharpe overfitting mi, DSR/PBO bak" → **kantitatif-strateji-uzmani**
 - "Bir hisse almanın gerçek maliyeti ne, η gerçekçi mi" → **finansal-regulasyon-uzmani**
 - "Teslim PDF isterlerini karşılıyor mu" → **proje-rubrik-bekcisi**
+- "HF Space'e deploy et / Space sentetik veriye düşüyor (NaN)" → **dagitim-tekrarlanabilirlik-uzmani**
 - "Şu büyük refactor'u baştan sona planla" → **orkestrator-planlayici**
 
 ## Refleks kuralları (ana oturum uygular)
@@ -40,6 +43,10 @@ oturum, bir görevi ilgili ajanın `description`'ına göre **otomatik yönlendi
 - Büyük mimari değişiklik/karar → **mimari-hafiza-koruyucusu** (`docs/MIMARI_HAFIZA.md`).
 - Teslim öncesi → **proje-rubrik-bekcisi** + **akademisyen-degerlendirici**.
 - Kod değişikliği dokümana yansıyor → **dokumantasyon-yazari**.
+- HF Space'e deploy → **dagitim-tekrarlanabilirlik-uzmani** (gerçek-veri paritesi + token hijyeni).
+
+> Tam yönlendirme cascade'i (yol-sahipliği + C1–C4), **öncelik kafesi** (P0>…>P5) ve
+> **R1–R9 refleks yaşam döngüsü**: kök [`CLAUDE.md`](../../CLAUDE.md).
 
 ## Kapasite sınırları (önemli)
 
@@ -53,4 +60,6 @@ oturum, bir görevi ilgili ajanın `description`'ına göre **otomatik yönlendi
 ## Düzenleme
 
 Her dosya YAML frontmatter (`name` = dosya adı, `description`, `tools`, `model`) + Türkçe
-sistem promptu taşır. Yeni ajan eklerken bu README'yi ve kök `CLAUDE.md` roster'ını güncelle.
+sistem promptu taşır. Yeni ajan eklerken bu README'yi ve kök `CLAUDE.md` roster'ını güncelle
+ve `tests/test_agent_roster.py` guard'ını yeşil tut (name↔dosya adı, README↔model,
+açıklama-örtüşme, salt-değerlendiricilerde Edit/Bash yok).

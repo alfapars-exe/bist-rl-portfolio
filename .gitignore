@@ -27,6 +27,7 @@ htmlcov/
 results/
 figures/
 models/
+reward_presets/
 data/*.parquet
 data/*.csv
 

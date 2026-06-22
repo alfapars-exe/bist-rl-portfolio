@@ -45,7 +45,7 @@ from ui.charts import (  # noqa: F401
     _horizon_preset_table, _q_bar, _reward_bar, _state_top_features, _weights_pie,
 )
 from ui.sidebar import _sidebar_reward_editor, sidebar_controls  # noqa: F401
-from ui.tabs import tab_compare, tab_mdp, tab_test, tab_train  # noqa: F401
+from ui.tabs import tab_compare, tab_mdp, tab_test, tab_train, tab_reward  # noqa: F401
 
 
 def main():
@@ -55,21 +55,31 @@ def main():
         layout="wide",
     )
     _init_state()
-    algo, horizon, adaptive, hp = sidebar_controls()
+    algo, step_days, adaptive, hp = sidebar_controls()
 
     st.title("📈 BIST 28 Pekiştirmeli Öğrenme Portföy Yönetimi")
-    st.caption("UYİK 2026 · DQN/PPO/SAC · Vade preset'leri · Adaptif ödül şekillendirici")
+    st.caption("UYİK 2026 · DQN/PPO/SAC/TD3 · N-seans karar adimi · Adaptif odul")
+    provenance = st.session_state.get("data_provenance") or {}
+    if provenance:
+        source = str(provenance.get("source", "unknown")).upper()
+        message = f"Veri kaynagi: {source} ({provenance.get('provider', 'bilinmiyor')})"
+        if source == "REAL":
+            st.success(message)
+        else:
+            st.warning(message + " - sonuclar bu kaynak etiketiyle kaydedilir.")
 
-    t1, t2, t3, t4 = st.tabs([
+    t1, t2, t3, t4, t5 = st.tabs([
         "📐 Veri & MDP",
         "🎓 Eğitim",
         "🎬 Test (Adım-Adım)",
         "📊 Karşılaştırma",
+        "⚖️ Ödül & Ceza Tasarımı",
     ])
     with t1: tab_mdp()
-    with t2: tab_train(algo, horizon, adaptive, hp)
-    with t3: tab_test(algo, horizon, adaptive)
+    with t2: tab_train(algo, step_days, adaptive, hp)
+    with t3: tab_test(algo, step_days, adaptive)
     with t4: tab_compare()
+    with t5: tab_reward()
 
 
 if __name__ == "__main__":

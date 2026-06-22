@@ -77,6 +77,8 @@ class MacroScaler:
         self.fitted = False
 
     def fit(self, df: pd.DataFrame) -> "MacroScaler":
+        if df.empty:
+            raise ValueError("MacroScaler.fit bos veri kabul etmez")
         self.mean = df.mean(axis=0)
         self.std = df.std(axis=0).replace(0, 1.0)
         self.fitted = True

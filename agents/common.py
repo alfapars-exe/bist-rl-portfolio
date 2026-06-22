@@ -61,13 +61,14 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return len(self.buffer)
 
-    def push(self, s, a, r, s2, d) -> None:
+    def push(self, s, a, r, s2, d, discount=1.0) -> None:
         self.buffer.append((
             np.asarray(s, dtype=np.float32),
             a,
             float(r),
             np.asarray(s2, dtype=np.float32),
             float(d),
+            float(discount),
         ))
 
     def sample(self, batch_size: int):
@@ -84,4 +85,5 @@ class ReplayBuffer:
         r  = np.array([b[2] for b in batch])
         s2 = np.stack([b[3] for b in batch])
         d  = np.array([b[4] for b in batch])
-        return s, a, r, s2, d
+        discount = np.array([b[5] for b in batch])
+        return s, a, r, s2, d, discount

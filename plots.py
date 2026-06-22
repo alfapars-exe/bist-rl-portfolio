@@ -197,7 +197,7 @@ def run():
             ha="center", fontsize=10, color="#a64")
     ax.text(6.0, 4.5, "Portföy Yönetimi MDP Formülasyonu",
             ha="center", fontsize=14, fontweight="bold")
-    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 393 boyut        "
+    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 397 boyut (makro dâhil; 393 = makro-öncesi V5 tabanı)        "
             "A: softmax(29-boyutlu simpleks)        γ = 0.99        T ≈ 760 gün/bölüm",
             ha="center", fontsize=9, color="#555")
     plt.tight_layout(); plt.savefig(FIG/"f8_mdp.png"); plt.close()
@@ -206,7 +206,7 @@ def run():
     # ---------- F9: Algo architecture sketch ----------
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
     for ax, (name, desc) in zip(axes, [
-        ("DQN", "s -> MLP(64,64) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
+        ("DQN", "s -> MLP(256,128) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
         ("PPO", "s -> policy -> Normal(mu, sigma) -> softmax(w)\nGAE avantaji\nclipped surrogate loss"),
         ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac"),
         ("TD3", "s -> Actor -> tanh (deterministik)\ncift-Q min + gecikmeli politika\nhedef-politika yumusatma")

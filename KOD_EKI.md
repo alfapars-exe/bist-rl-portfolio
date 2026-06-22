@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 33 kaynak dosya, ~4770 satır.**
+**Toplam: 38 kaynak dosya, ~7893 satır.**
 
 ---
 
@@ -35,12 +35,42 @@ SEED = 42
 # ---------------------------------------------------------------------
 # Vade preset'leri — env/portfolio_env.py'den tasindi (Faz 2).
 # rebalans frekansi, momentum/minvol pencereleri, (eta, lam, tau, gamma) base.
+# DEPRECATED-COMPAT (v12): yeni model `step_days` (N-gun) + acik parametreler kullanir;
+# bu tablo yalniz (a) model dosya-adi slot'u, (b) env preset-fallback (None gecilen
+# param'lar icin), (c) DEFAULTS'un turetim kaynagi olarak korunur. Degerler DEGISMEZ.
 # ---------------------------------------------------------------------
 HORIZON_PRESETS: Dict[str, dict] = {
-    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95),
-    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99),
-    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995),
+    "short":  dict(rebalance=1,  mom_window=5,  minvol_window=20,  eta=0.0015, lam=0.25, tau=0.03, gamma=0.95,
+                   min_days=1,  max_days=30,  train_max_steps=30),
+    "medium": dict(rebalance=5,  mom_window=20, minvol_window=60,  eta=0.0010, lam=0.50, tau=0.05, gamma=0.99,
+                   min_days=30, max_days=90,  train_max_steps=90),
+    "long":   dict(rebalance=20, mom_window=60, minvol_window=120, eta=0.0005, lam=1.00, tau=0.08, gamma=0.995,
+                   min_days=90, max_days=360, train_max_steps=360),
 }
+
+
+# ---------------------------------------------------------------------
+# v12: TEK ADIM/ORTALAMA MODELI — horizon preset + Gun/Ay/Yil granulerlik yerine
+# tek `step_days` (N) + BAGIMSIZ odul parametreleri. DEFAULTS = eski "medium"
+# preset'inin BIREBIR karsiligi (golden re-baseline kanonik degerleri).
+#   N=1 -> gunluk (resample no-op). N>=2 -> N seanslik blok-sonu kapanis + N seanslik adim.
+#   Episode uzunlugu = secilen train tarih araliginin TAMAMI (slider yok).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class StepDefaults:
+    step_days: int     = 1        # N: adim/ortalama penceresi (gun)
+    eta: float         = 0.0010   # = HORIZON_PRESETS["medium"]["eta"]
+    lam: float         = 0.50     # = ...["medium"]["lam"]
+    tau: float         = 0.05     # = ...["medium"]["tau"]
+    gamma: float       = 0.99     # = ...["medium"]["gamma"]
+    mom_window: int    = 20       # = ...["medium"]["mom_window"]
+    minvol_window: int = 60       # = ...["medium"]["minvol_window"]
+
+
+DEFAULTS = StepDefaults()
+
+STEP_DAYS_MIN = 1
+STEP_DAYS_MAX = 252
 
 
 # ---------------------------------------------------------------------
@@ -137,6 +167,29 @@ class EnvConfig:
     # determinizmi korunur. 0.001 ~ gunluk getiriye ±%0.1 mikro-slippage.
     price_noise_std: float = 0.001
     price_noise_train_only: bool = True
+    # v10: PARAMETRIK nakit (risksiz) faiz. Nakit varlik artik 0 degil, gunluk risksiz
+    # getiri kazanir. cash_annual_rate gercekci TR 2022-24 mevduat/repo seviyesi (~%40);
+    # UI/CLI'dan ayarlanabilir. Gunluk oran bilesik tutarlilikla turetilir:
+    #   cash_daily_rate = (1 + cash_annual_rate)^(1/252) - 1
+    # SABIT oran -> RNG cagrisi YOK -> golden RNG sirasi korunur (yalniz deger degisir).
+    cash_annual_rate: float = 0.40
+    trading_days: int = 252          # yillik->gunluk bilesik donusum tabani
+
+    @property
+    def cash_daily_rate(self) -> float:
+        """Yillik nakit faizinin bilesik gunluk karsiligi: (1+R)^(1/252) - 1."""
+        return cash_daily_rate(self.cash_annual_rate, self.trading_days)
+
+
+def cash_daily_rate(cash_annual_rate: float, trading_days: int = 252) -> float:
+    """Yillik nakit (risksiz) faizini bilesik gunluk orana cevirir.
+
+    (1 + r_daily)^trading_days = 1 + cash_annual_rate  =>  r_daily = (1+R)^(1/D) - 1.
+    Bagimsiz modul-duzeyi yardimci: env ctor (cash_daily_rate is None) buradan turetir;
+    UI/CLI yillik orani gecerse env gunluk orani hesaplar. RNG kullanmaz (deterministik).
+    """
+    D = max(int(trading_days), 1)
+    return float((1.0 + float(cash_annual_rate)) ** (1.0 / D) - 1.0)
 
 
 # ---------------------------------------------------------------------
@@ -169,11 +222,31 @@ class RewardConfig:
     cvar_alpha: float = 0.05    # kuyruk seviyesi (%5)
     regime_beta: float = 1.0    # kriz amplifikasyon gucu
     cvar_amp: float = 1.0       # rejim amplifikasyon usteli
+    # v9: OPT-IN ek terimler (default 0/kapali -> golden bit-ayni). reward_overrides
+    # ile UI'dan ayarlanabilir; env ctor + build_env bunlari okur.
+    w_gain: float = 0.0         # kazanc-carpani odul agirligi (nav>gain_floor uzeri)
+    gain_floor: float = 1.0     # kazanc esigi (nav bunun uzerinde odullenir)
+    w_gain_speed: float = 0.0   # erken-kazanc hiz faktoru (0 -> hizdan bagimsiz)
+    w_ruin_timing: float = 0.0  # erken-iflas ceza olcegi (0 -> flat bankruptcy_penalty)
+
+
+# ---------------------------------------------------------------------
+# Veri penceresi sabitleri — data.py START/END/SPLIT ile BIREBIR (tek kaynak).
+# data.py bu DataConfig'i sonraki dalgada (veri-muhendisi) okuyacak; simdilik
+# yalniz config'te yansitilir (frozen -> kazara mutasyon engellenir).
+# ---------------------------------------------------------------------
+@dataclass(frozen=True)
+class DataConfig:
+    start: str = "2015-01-01"      # data.py START
+    end: str = "2024-12-31"        # data.py END
+    train_end: str = "2022-01-01"  # data.py SPLIT (train/test ayrim tarihi)
 
 
 # ---------------------------------------------------------------------
 # v2: CNN-LSTM forecaster (predict-then-optimize). enabled=True ise state'e
-# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^393.
+# bir 'forecast' feature'i eklenir -> F = 12 + 1 = 13, durum R^397 (DQN/SAC/TD3) /
+# R^369 (PPO; forecast haric F=12). Not: 393/365 = makro-oncesi V5 tabani; +4 makro
+# (MacroConfig.enabled, asagida) = 397/369.
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class ForecastConfig:
@@ -205,6 +278,52 @@ class MacroConfig:
     features: tuple = ("regime", "slope", "usd_try_mom", "gold_tl_mom")
     mom_window: int = 20      # momentum/degisim penceresi (gun)
 
+
+# ---------------------------------------------------------------------
+# Adim granülerliği — UI/CLI'dan secilebilir; feature'lar HER ZAMAN gunluk
+# hesaplanir (add_features degismez), sonra resample_to_granularity() ile
+# istenen frekansi indirgenir. "daily" -> no-op (golden-guvenli).
+# ---------------------------------------------------------------------
+GRANULARITY_OPTIONS: tuple = ("daily", "monthly", "yearly")
+
+# Her granülerlik icin minimum nokta uyari esigi (resample sonrasi).
+# n_points < esik ise downstream kod uyari verebilir.
+GRANULARITY_MIN_POINTS: dict = {
+    "daily":   252,   # 1 tam yil is gunu
+    "monthly":  20,   # ~20 ay (~1.7 yil)
+    "yearly":    5,   # 5 yil
+}
+
+
+# ---------------------------------------------------------------------
+# v12: degenerate-config NaN korumasi. Env warm-up lo = max(window,21);
+# resample sonrasi train aralige yetersizse env dejenere olup sessiz NaN uretir
+# (kullanicinin "cok-kisa tarih araligi" NaN'i). Bu helper egitimi NaN yerine
+# DOSTCA bir hatayla durdurmak icin kullanilir (UI st.error / CLI SystemExit).
+# Leaf: yalniz stdlib + EnvConfig (ayni modul) -> testler ucuz import eder.
+# ---------------------------------------------------------------------
+MIN_TRAIN_POINTS_WARMUP = 21       # env lo_raw = max(window, 21)
+MIN_TRAIN_STEPS_HEADROOM = 5       # warm-up sonrasi birkac adim (dejenere olmasin)
+
+
+def validate_train_range(n_train_points: int, *, window: int = EnvConfig.window,
+                         step_days: int = 1) -> tuple:
+    """(ok, mesaj) — (resample edilmis) train araligi gecerli env kurabilir mi?
+
+    n_train_points: step_days resample SONRASI len(px_tr) (env'in gordugu satir sayisi).
+    ok=False ise mesaj kullaniciya gosterilir ve EGITIM BASLATILMAZ (sessiz NaN yerine).
+    """
+    lo = max(int(window), MIN_TRAIN_POINTS_WARMUP)
+    need = lo + MIN_TRAIN_STEPS_HEADROOM
+    if int(n_train_points) < need:
+        return False, (
+            f"Egitim araligi cok kisa: adim (step_days={step_days}) resample sonrasi "
+            f"{n_train_points} nokta kaldi; en az {need} gerekli (isinma penceresi {lo} "
+            f"+ {MIN_TRAIN_STEPS_HEADROOM} adim). Tarih araligini genislet veya step_days'i "
+            f"dusur. Egitim baslatilmadi (sessiz NaN yerine)."
+        )
+    return True, ""
+
 ```
 
 ---
@@ -226,7 +345,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import MacroConfig
+from config import DataConfig, MacroConfig
+from core.contracts import DataProvenance
 
 # BIST 30 tickers — KOZAA.IS ve KOZAL.IS prompt gereği hariç tutuldu (28 hisse).
 BIST28 = [
@@ -240,9 +360,12 @@ BIST28 = [
 # Geriye uyumluluk
 BIST30 = BIST28
 
-START = "2015-01-01"
-END   = "2024-12-31"
-SPLIT = "2022-01-01"
+# Geriye uyum: modül sabitleri DataConfig'e işaret eder (tek kaynak).
+# Bu satırları import eden mevcut kod (main.py, app.py, testler) kırılmaz.
+_dc = DataConfig()
+START = _dc.start      # "2015-01-01"
+END   = _dc.end        # "2024-12-31"
+SPLIT = _dc.train_end  # "2022-01-01"
 
 BASE_DIR     = Path(__file__).resolve().parent
 DATA_DIR     = BASE_DIR / "data"
@@ -253,41 +376,146 @@ PARQUET_PATH = DATA_DIR / "prices.parquet"
 MACRO_PARQUET = DATA_DIR / "macro_raw.parquet"
 
 
-def download_bist(tickers=BIST28, start=START, end=END,
+def _cache_covers(index, start, end) -> bool:
+    idx = pd.DatetimeIndex(index)
+    requested = pd.bdate_range(start=start, end=end)
+    if not len(idx) or not len(requested) or idx.min() > requested[0]:
+        return False
+    # Exchange holidays are not represented by pandas' generic business-day
+    # calendar. Permit at most two nominal business days at the right boundary,
+    # while still rejecting materially truncated caches.
+    missing_tail = len(pd.bdate_range(idx.max(), requested[-1], inclusive="right"))
+    return missing_tail <= 2
+
+
+def _with_provenance(df: pd.DataFrame, *, source: str, provider: str,
+                     start, end, reason: str = "", missing=()) -> pd.DataFrame:
+    df.attrs["synthetic"] = source == "synthetic"
+    df.attrs["provenance"] = DataProvenance(
+        source=source, provider=provider, reason=reason,
+        missing_tickers=tuple(missing), requested_start=str(start), requested_end=str(end),
+    ).to_dict()
+    return df
+
+
+def _sanitize_prices(px: pd.DataFrame) -> pd.DataFrame:
+    """Fiyat matrisini NaN'dan arindir: ileri/geri doldur + tamamen-bos sutunu dus.
+
+    Gercek BIST verisinde halt/eksik gunler NaN birakabilir; tek bir NaN getiri
+    env'de NAV'i zehirleyebilir (v12 env ctor NaN'i reddeder de). Cache OKUMA yolu
+    onceden temizlenmiyordu -> zehirli/eksik cache'e karsi savunma. Temiz veride no-op.
+    """
+    px = px.ffill().bfill()
+    all_nan = px.columns[px.isna().all()]
+    if len(all_nan):
+        px = px.drop(columns=list(all_nan))
+    return px
+
+
+def download_bist(tickers=BIST28, start=None, end=None,
                   use_cache: bool = True) -> pd.DataFrame:
     """28 hisselik (T, N) ayarlı kapanış fiyat matrisi döner.
 
-    Önce parquet cache'i dener; yoksa yfinance'tan indirir. yfinance erişimi
-    başarısızsa BIST-benzeri sentetik GBM seti üretir (deney yine çalışır).
+    Parametreler
+    ------------
+    start : str | None
+        Başlangıç tarihi (dahil). None → DataConfig.start ("2015-01-01").
+    end : str | None
+        Bitiş tarihi (dahil). None → DataConfig.end ("2024-12-31").
+
+    Önce parquet cache'i dener; varsa verilen [start, end] aralığına dilimler.
+    Cache uyumsuzsa veya yoksa yfinance'tan indirir. yfinance başarısızsa BIST-
+    benzeri sentetik GBM üretir (deney yine çalışır).
     """
+    _dc_local = DataConfig()
+    if start is None:
+        start = _dc_local.start
+    if end is None:
+        end = _dc_local.end
+
     if use_cache and PARQUET_PATH.exists():
         try:
             px = pd.read_parquet(PARQUET_PATH)
             px.index = pd.to_datetime(px.index)
             expected = set(tickers)
-            if expected.issubset(set(px.columns)) and len(px) > 500:
-                return px[list(tickers)]
-            print("[INFO] cache uyumsuz, yeniden indiriliyor ...")
+            if (expected.issubset(set(px.columns)) and len(px) > 500
+                    and _cache_covers(px.index, start, end)):
+                # Cache tüm aralığı tutabilir; istenen [start, end]'e dilimle.
+                px_slice = _sanitize_prices(px[list(tickers)])
+                px_slice = px_slice.loc[
+                    (px_slice.index >= pd.Timestamp(start)) &
+                    (px_slice.index <= pd.Timestamp(end))
+                ]
+                if len(px_slice) > 100:
+                    return _with_provenance(px_slice, source="real", provider="parquet-cache",
+                                            start=start, end=end)
+            print("[INFO] cache uyumsuz veya dilim boş, yeniden indiriliyor ...")
         except Exception as exc:
             print(f"[WARN] parquet okunamadı ({exc!r}); yeniden indiriliyor")
 
     synthetic = False
     try:
         import yfinance as yf
+        inclusive_end = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         data = yf.download(
-            tickers, start=start, end=end,
+            tickers, start=start, end=inclusive_end,
             auto_adjust=True, progress=False, threads=True,
         )
         if isinstance(data.columns, pd.MultiIndex):
             px = data["Close"].copy()
         else:
             px = data[["Close"]].copy()
+        # yfinance bazen tz-aware / time-bilesenli index doner; sentetik-doldurma reindex'i
+        # (naive bdate_range) eslesmezse TUM sentetik sutunlar NaN -> son dropna frame'i
+        # BOSALTIR (HF Space MIXED-bos hatasi). Index'i tz-naive GUNE normalize et.
+        _idx = pd.to_datetime(px.index)
+        px.index = (_idx.tz_localize(None) if _idx.tz is not None else _idx).normalize()
         px = px.dropna(axis=1, thresh=int(0.9 * len(px)))
-        px = px.ffill().bfill().dropna()
-        if px.shape[1] < 10:
+        px = px.ffill().dropna()
+        if px.shape[1] < 10 or len(px) < 100:
             raise RuntimeError("Too few tickers returned")
         px = px[[c for c in tickers if c in px.columns]]
+        # Evren degismezligi: yfinance kismi dondurduyse (bazi ticker'lar eksik /
+        # >%10 NaN -> dropna ile dustu) eksikleri sentetik ile doldurup TAM BIST28'i
+        # garanti et. Aksi halde N degisir -> UI ASSET_NAMES (sabit 29) ile uyumsuzluk
+        # + kayitli ajan state-dim (397) ile uyumsuzluk olur.
+        miss = [c for c in tickers if c not in px.columns]
+        if miss:
+            warnings.warn(
+                f"{len(miss)} ticker yfinance'tan gelmedi; sentetik ile dolduruldu: "
+                f"{miss}", RuntimeWarning, stacklevel=2)
+            synth = _synthetic_bist(miss, start, end).reindex(px.index).ffill()
+            for c in miss:
+                px[c] = synth[c].to_numpy()
+        px = px[list(tickers)].ffill().dropna()
+        # EMNIYET AGI: islenmis frame bos/cok-kisa veya NaN'li ise (index eslesmezligi vb.)
+        # bozuk MIXED frame'i DONDURME -> except'e dusur (CSV/sentetik fallback gecerli veri verir).
+        if len(px) < 100 or bool(px.isna().any().any()):
+            raise RuntimeError(f"islenmis yfinance verisi gecersiz ({len(px)} satir)")
+        if miss:
+            _with_provenance(px, source="mixed", provider="yfinance+synthetic",
+                             start=start, end=end, reason="missing yfinance tickers", missing=miss)
+        else:
+            _with_provenance(px, source="real", provider="yfinance", start=start, end=end)
     except Exception as exc:
+        # SENTETIGE DUSMEDEN ONCE: kanonik results/bist30_prices.csv (tam 2015-2024 GERCEK
+        # BIST verisi). Bu dosya .gitignore'da DEGIL -> HF Space'e yuklenir (data/*.parquet
+        # cache'i gitignore-aware upload nedeniyle Space'e GIDEMEZ). Ag/cache yoksa bunu kullan.
+        csv_fb = RESULTS_DIR / "bist30_prices.csv"
+        if use_cache and csv_fb.exists():
+            try:
+                pxc = pd.read_csv(csv_fb, index_col=0, parse_dates=True)
+                if (set(tickers).issubset(set(pxc.columns))
+                        and _cache_covers(pxc.index, start, end)):
+                    pxc = pxc[list(tickers)]
+                    pxc = pxc.loc[(pxc.index >= pd.Timestamp(start)) &
+                                  (pxc.index <= pd.Timestamp(end))].ffill().dropna()
+                    if len(pxc) > 100:
+                        print("[INFO] yfinance yok; results/bist30_prices.csv (GERCEK BIST) kullanildi")
+                        return _with_provenance(pxc, source="real", provider="csv-cache",
+                                                start=start, end=end)
+            except Exception as exc_csv:
+                print(f"[WARN] bist30_prices.csv okunamadi ({exc_csv!r})")
         # Sessiz yutma yok: stderr'e gorunur uyari (CI loglari + kullanici).
         warnings.warn(
             f"yfinance basarisiz ({exc!r}); SENTETIK GBM verisi uretiliyor — "
@@ -297,13 +525,17 @@ def download_bist(tickers=BIST28, start=START, end=END,
         print(f"[WARN] yfinance başarısız ({exc!r}); sentetik BIST verisi üretiliyor")
         px = _synthetic_bist(tickers, start, end)
         synthetic = True
-        px.attrs["synthetic"] = True   # programatik kaynak izi (provenance)
+        _with_provenance(px, source="synthetic", provider="synthetic-gbm",
+                         start=start, end=end, reason=repr(exc))
 
     if synthetic:
         # KRITIK: sentetik veri CACHE'E YAZILMAZ. Onceki surum yaziyordu;
         # bir kez ag hatasi -> sonraki TUM calistirmalar cache'ten sessizce
         # sahte veri okuyordu (cache zehirlenmesi).
         print("[WARN] sentetik veri cache'e yazılmadı; ağ gelince gerçek veri indirilecek")
+        return px
+    if px.attrs.get("provenance", {}).get("source") == "mixed":
+        print("[WARN] karma gercek/sentetik veri cache'e yazilmadi")
         return px
 
     try:
@@ -339,44 +571,91 @@ def _synthetic_bist(tickers, start, end) -> pd.DataFrame:
 # ---------------------------------------------------------------------
 # v6: Makro rejim verisi (faiz/dolar/altin) — egzojen, BIST takvimine hizali.
 # ---------------------------------------------------------------------
-def download_macro(series=tuple(MacroConfig.series), start=START, end=END,
+def download_macro(series=tuple(MacroConfig.series), start=None, end=None,
                    use_cache: bool = True) -> pd.DataFrame:
     """Ham makro seri matrisi (T, M): VIX, S&P, faiz (TNX/IRX), USDTRY, altin (GC=F).
 
-    parquet cache -> yfinance -> sentetik fallback. Sentetik veri CACHE'E YAZILMAZ
-    (download_bist ile ayni zehirlenme korumasi)."""
+    Parametreler
+    ------------
+    start : str | None
+        Başlangıç tarihi (dahil). None → DataConfig.start ("2015-01-01").
+    end : str | None
+        Bitiş tarihi (dahil). None → DataConfig.end ("2024-12-31").
+
+    parquet cache -> yfinance -> sentetik fallback. Cache varsa [start, end]'e
+    dilimler. Sentetik veri CACHE'E YAZILMAZ (download_bist ile ayni zehirlenme
+    korumasi)."""
+    _dc_local = DataConfig()
+    if start is None:
+        start = _dc_local.start
+    if end is None:
+        end = _dc_local.end
+
     series = list(series)
     if use_cache and MACRO_PARQUET.exists():
         try:
             mc = pd.read_parquet(MACRO_PARQUET)
             mc.index = pd.to_datetime(mc.index)
             have = [s for s in series if s in mc.columns]
-            if len(have) >= 3 and len(mc) > 500:
-                return mc[have]
+            if len(have) >= 3 and len(mc) > 500 and _cache_covers(mc.index, start, end):
+                mc_slice = mc[have]
+                mc_slice = mc_slice.loc[
+                    (mc_slice.index >= pd.Timestamp(start)) &
+                    (mc_slice.index <= pd.Timestamp(end))
+                ]
+                if len(mc_slice) > 100:
+                    return _with_provenance(mc_slice, source="real", provider="parquet-cache",
+                                            start=start, end=end)
         except Exception as exc:
             print(f"[WARN] makro cache okunamadı ({exc!r}); yeniden indiriliyor")
 
     synthetic = False
     try:
         import yfinance as yf
-        data = yf.download(series, start=start, end=end, auto_adjust=True,
+        inclusive_end = (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        data = yf.download(series, start=start, end=inclusive_end, auto_adjust=True,
                            progress=False, threads=True)
         mc = (data["Close"].copy() if isinstance(data.columns, pd.MultiIndex)
               else data[["Close"]].copy())
-        mc = mc.ffill().bfill().dropna(axis=1, how="all")
+        mc = mc.ffill().dropna(axis=1, how="all")
         mc = mc[[s for s in series if s in mc.columns]]
-        if mc.shape[1] < 3:
+        if mc.shape[1] < 3 or len(mc) < 100:
             raise RuntimeError("Too few macro series returned")
+        missing = [s for s in series if s not in mc.columns]
+        _with_provenance(mc, source="mixed" if missing else "real", provider="yfinance",
+                         start=start, end=end,
+                         reason="missing macro series" if missing else "", missing=missing)
     except Exception as exc:
+        # SENTETIGE DUSMEDEN ONCE: results/macro_raw.csv (gercek makro; gitignore'da DEGIL
+        # -> HF Space'te bulunur). Ag/cache yoksa bunu kullan.
+        csv_fb = RESULTS_DIR / "macro_raw.csv"
+        if use_cache and csv_fb.exists():
+            try:
+                mcc = pd.read_csv(csv_fb, index_col=0, parse_dates=True)
+                have = [s for s in series if s in mcc.columns]
+                if len(have) >= 3:
+                    mcc = mcc[have].loc[(mcc.index >= pd.Timestamp(start)) &
+                                        (mcc.index <= pd.Timestamp(end))].ffill()
+                    if len(mcc) > 100 and _cache_covers(mcc.index, start, end):
+                        print("[INFO] yfinance yok; results/macro_raw.csv (GERCEK makro) kullanildi")
+                        return _with_provenance(mcc, source="real", provider="csv-cache",
+                                                start=start, end=end)
+            except Exception as exc_csv:
+                print(f"[WARN] macro_raw.csv okunamadi ({exc_csv!r})")
         warnings.warn(
             f"yfinance makro basarisiz ({exc!r}); SENTETIK makro uretiliyor — "
             "gercek piyasa verisi DEGIL!", RuntimeWarning, stacklevel=2)
         print(f"[WARN] yfinance makro başarısız ({exc!r}); sentetik makro üretiliyor")
         mc = _synthetic_macro(series, start, end)
         synthetic = True
+        _with_provenance(mc, source="synthetic", provider="synthetic-macro",
+                         start=start, end=end, reason=repr(exc))
 
     if synthetic:
         print("[WARN] sentetik makro cache'e yazılmadı")
+        return mc
+    if mc.attrs.get("provenance", {}).get("source") == "mixed":
+        print("[WARN] eksik serili karma makro veri cache'e yazilmadi")
         return mc
     try:
         mc.to_parquet(MACRO_PARQUET)
@@ -402,13 +681,112 @@ def _synthetic_macro(series, start, end) -> pd.DataFrame:
     return df[[s for s in series if s in df.columns]]
 
 
+def resample_to_granularity(df: pd.DataFrame, granularity: str) -> pd.DataFrame:
+    """Fiyat/feature/makro DataFrame'ini istenen adım granülerliğine indirgeer.
+
+    Parametreler
+    ------------
+    df : pd.DataFrame
+        DatetimeIndex'li DataFrame (fiyat, feature veya makro).
+    granularity : str
+        "daily"   -> df'i AYNEN döndür (NO-OP; golden-güvenli, RNG sırası korunur).
+        "monthly" -> aylık ortalama (pandas ME kuralı).
+        "yearly"  -> yıllık ortalama (pandas YE kuralı).
+
+    Dönüş
+    ------
+    pd.DataFrame
+        DatetimeIndex korunur. "daily" dışında .ffill().bfill() uygulanır
+        (boş dönem NaN'larına karşı güvenlik).
+
+    Not: feature'lar her zaman günlük hesaplanır (add_features DEĞİŞMEZ).
+    Bu fonksiyon yalnızca downstream adımda (env/UI) granülerliği indirger.
+    """
+    if granularity == "daily":
+        # NO-OP: aynı nesneyi döndür — golden testleri etkilemez, RNG sırası korunur.
+        return df
+
+    rule_map = {
+        "monthly": "ME",   # month-end
+        "yearly":  "YE",   # year-end
+    }
+    rule = rule_map.get(granularity)
+    if rule is None:
+        raise ValueError(
+            f"Geçersiz granularity={granularity!r}; "
+            f"geçerli seçenekler: {('daily', 'monthly', 'yearly')}"
+        )
+
+    resampled = df.resample(rule).mean()
+    # Boş ay/yıl periyotlarında oluşabilecek NaN'lara karşı güvenlik.
+    resampled = resampled.ffill()
+    return resampled
+
+
+def resample_to_step_days(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    """N-günlük blok-ortalama resample (v12 tek-adım modeli — granülerliğin yerine).
+
+    n=1  -> df'i AYNEN döndür (NO-OP; golden-güvenli, RNG sırası korunur).
+    n>=2 -> df.resample(f"{n}D").mean().ffill().bfill() (boş blok NaN koruması).
+
+    ÇAĞRI SIRASI (leak-safe): add_features (GÜNLÜK, tam seri) -> train_test_split
+    -> resample_to_step_days (HER split AYRI). Resample atomik nokta üretir -> train/test
+    sınırı blok-hizalı, karışma yok. Feature'lar HER ZAMAN günlük hesaplanır (add_features DEĞİŞMEZ).
+    DatetimeIndex korunur (env `self.dates = prices.index` için).
+    """
+    n = int(n)
+    if n < 1:
+        raise ValueError(f"step_days en az 1 olmali; {n} geldi")
+    if not isinstance(df.index, pd.DatetimeIndex):
+        raise TypeError("resample_to_step_days DatetimeIndex gerektirir")
+    if n == 1:
+        df.attrs["session_counts"] = tuple([1] * len(df))
+        df.attrs["step_days"] = 1
+        return df
+    if len(df) == 0:
+        out = df.copy()
+        out.attrs["session_counts"] = ()
+        out.attrs["step_days"] = n
+        return out
+
+    # Consecutive exchange sessions, not calendar-day buckets. Each selected row
+    # is a tradable period-end observation. Keep the trailing partial period.
+    positions = list(range(n - 1, len(df), n))
+    counts = [n] * len(positions)
+    if not positions or positions[-1] != len(df) - 1:
+        previous = positions[-1] + 1 if positions else 0
+        positions.append(len(df) - 1)
+        counts.append(len(df) - previous)
+    out = df.iloc[positions].copy()
+    out.attrs.update(df.attrs)
+    out.attrs["session_counts"] = tuple(int(x) for x in counts)
+    out.attrs["step_days"] = n
+    return out
+
+
 def align_macro(macro_raw: pd.DataFrame, index) -> pd.DataFrame:
     """Makroyu BIST işlem takvimine (index) reindex + ffill/bfill (causal)."""
-    return macro_raw.reindex(index).ffill().bfill()
+    out = macro_raw.reindex(index).ffill()
+    out.attrs.update(macro_raw.attrs)
+    return out
 
 
-def train_test_split(df: pd.DataFrame, split=SPLIT):
-    return df[df.index < split], df[df.index >= split]
+def train_test_split(df: pd.DataFrame, split=None):
+    """DataFrame'i train (< split) ve test (>= split) olarak ikiye böler.
+
+    Parametreler
+    ------------
+    split : str | None
+        Bölünme tarihi. None → DataConfig.train_end ("2022-01-01").
+        Train kesinlikle test'ten önce gelir; sızıntı yoktur.
+    """
+    if split is None:
+        split = DataConfig().train_end
+    train = df[df.index < split].copy()
+    test = df[df.index >= split].copy()
+    train.attrs.update(df.attrs)
+    test.attrs.update(df.attrs)
+    return train, test
 
 
 if __name__ == "__main__":
@@ -464,6 +842,11 @@ def add_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     Anahtar sırası `config.FEATURES` ile aynıdır. Tüm göstergeler yalnız-geçmişe
     bakar (rolling/ewm/pct_change/diff — causal) → ileri-bakış (lookahead) yok.
     """
+    if prices.empty or not isinstance(prices.index, pd.DatetimeIndex):
+        raise ValueError("prices bos olmayan DatetimeIndex'li DataFrame olmali")
+    values = prices.to_numpy(dtype=float)
+    if not np.isfinite(values).all() or np.any(values <= 0):
+        raise ValueError("prices pozitif ve sonlu olmali")
     close = prices
     logret = np.log(close).diff().fillna(0.0)
     ma5    = close.pct_change(5).fillna(0.0)
@@ -510,6 +893,8 @@ class TrainScaler:
         self.fitted = False
 
     def fit(self, feats: Dict[str, pd.DataFrame]) -> "TrainScaler":
+        if not feats or any(df.empty for df in feats.values()):
+            raise ValueError("TrainScaler.fit bos feature matrisi kabul etmez")
         for k, df in feats.items():
             self.means[k] = df.mean(axis=0)
             self.stds[k]  = df.std(axis=0).replace(0, 1.0)
@@ -536,6 +921,108 @@ class TrainScaler:
 
 ---
 
+## `utils/macro.py`
+
+```python
+"""Makro rejim özellik mühendisliği — v6 (causal, leak-safe, YALIN omurga).
+
+Ham egzojen makro panelini (VIX, S&P, faiz TNX/IRX, USDTRY, altın GC=F) küçük,
+standart bir **rejim-koşullandırma** vektörüne çevirir → RL state'ine eklenir.
+Tüm dönüşümler yalnız-geçmişe bakar (causal). Standardizasyon (`MacroScaler`)
+YALNIZ train penceresinde fit edilir, test'e aynı uygulanır → sızıntı yok
+(`utils.features.TrainScaler` ile birebir desen).
+
+4 yalın öznitelik (kullanıcının "faiz, dolar, altın" üçlüsü + bileşik rejim):
+  - regime      : tanh(vix_rel + 4·(−spx_dd) − 0.10) ∈ (−1,1)  [OMURGA — V7 amplify eder]
+  - slope       : 10Y − 13W faiz farkı (getiri eğrisi eğimi)    [FAİZ]
+  - usd_try_mom : USD/TRY 20g momentum                           [DOLAR]
+  - gold_tl_mom : (altın×USDTRY = gram-altın/TL) 20g momentum    [ALTIN]
+
+Gerekçe: makro-kör RL tahsisçisi tek fiyat-yoluna aşırı uyar, rejimler arası
+başarısız olur. Makro rejimine koşullanmak ajanın *ortamı* öğrenmesini sağlar.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from config import MacroConfig
+
+
+def add_macro_features(macro_raw: pd.DataFrame,
+                       mom_window: int = MacroConfig.mom_window) -> pd.DataFrame:
+    """Ham makro panel (T, seri) -> yalın makro öznitelikleri (T, 4).
+
+    Kolon sırası `config.MacroConfig.features` ile birebir. Eksik kaynak seri
+    nazikçe 0'a düşer (degrade gracefully)."""
+    def col(name: str) -> pd.Series:
+        if name in macro_raw.columns:
+            return macro_raw[name].astype(float)
+        return pd.Series(0.0, index=macro_raw.index)
+
+    vix = col("^VIX")
+    spx = col("^GSPC")
+    tnx = col("^TNX")
+    irx = col("^IRX")
+    usdtry = col("USDTRY=X")
+    gold = col("GC=F")
+
+    feats: dict[str, pd.Series] = {}
+
+    # OMURGA: bileşik causal rejim skoru ∈ (−1,1) — sakin < 0 < kriz.
+    vix_rel = (vix / vix.rolling(252, min_periods=20).median() - 1.0).fillna(0.0)
+    spx_dd  = (spx / spx.rolling(252, min_periods=20).max() - 1.0).fillna(0.0)  # <=0
+    feats["regime"] = np.tanh(1.0 * vix_rel + 4.0 * (-spx_dd) - 0.10)
+
+    # FAİZ: getiri eğrisi eğimi (10Y − 13W); resesyon/risk proxy.
+    feats["slope"] = (tnx - irx).fillna(0.0)
+
+    # DOLAR: USD/TRY momentum (TL zayıflaması).
+    feats["usd_try_mom"] = usdtry.pct_change(mom_window).fillna(0.0)
+
+    # ALTIN: gram-altın/TL ≈ altın(USD/oz)×USDTRY momentum (oran → sabit düşer).
+    gold_tl = gold * usdtry
+    feats["gold_tl_mom"] = gold_tl.pct_change(mom_window).fillna(0.0)
+
+    df = pd.DataFrame(feats, index=macro_raw.index)
+    cols = [c for c in MacroConfig.features if c in df.columns]
+    return df[cols].replace([np.inf, -np.inf], 0.0).fillna(0.0)
+
+
+class MacroScaler:
+    """Makro öznitelik matrisi için train-only z-score (tek DataFrame).
+
+    `utils.features.TrainScaler` ile aynı sözleşme; tek matris üzerinde çalışır.
+    'regime' zaten ∈(−1,1) olsa da tutarlılık için o da z-skorlanır (state için);
+    ödül amplifikasyonu HAM regime'i ayrıca kullanır (bkz. train.prepare_data)."""
+
+    def __init__(self, clip: float = 8.0):
+        self.mean: pd.Series | None = None
+        self.std: pd.Series | None = None
+        self.clip = clip
+        self.fitted = False
+
+    def fit(self, df: pd.DataFrame) -> "MacroScaler":
+        if df.empty:
+            raise ValueError("MacroScaler.fit bos veri kabul etmez")
+        self.mean = df.mean(axis=0)
+        self.std = df.std(axis=0).replace(0, 1.0)
+        self.fitted = True
+        return self
+
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        if not self.fitted:
+            raise RuntimeError("MacroScaler.fit() önce çağrılmalı")
+        z = (df - self.mean) / self.std
+        return z.clip(lower=-self.clip, upper=self.clip).fillna(0.0)
+
+    def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        return self.fit(df).transform(df)
+
+```
+
+---
+
 ## `utils/metrics.py`
 
 ```python
@@ -553,18 +1040,37 @@ import pandas as pd
 TRADING_DAYS = 252
 
 
-def cagr(nav: np.ndarray) -> float:
-    years = len(nav) / TRADING_DAYS
+def _years_from_dates(dates) -> float | None:
+    if dates is None or len(dates) < 2:
+        return None
+    idx = pd.DatetimeIndex(dates)
+    days = float((idx[-1] - idx[0]).days)
+    return days / 365.2425 if days > 0 else None
+
+
+def _annual_periods(dates, n_obs: int) -> float:
+    years = _years_from_dates(dates)
+    if years and n_obs > 1:
+        return float((n_obs - 1) / years)
+    return float(TRADING_DAYS)
+
+
+def cagr(nav: np.ndarray, dates=None) -> float:
+    years = _years_from_dates(dates)
+    if years is None:
+        years = len(nav) / TRADING_DAYS
     return float(nav[-1] ** (1 / max(years, 1e-6)) - 1)
 
 
-def sharpe(rets: np.ndarray, rf: float = 0.0) -> float:
-    mu = np.mean(rets) - rf / TRADING_DAYS
-    sd = np.std(rets) + 1e-9
-    return float(np.sqrt(TRADING_DAYS) * mu / sd)
+def sharpe(rets: np.ndarray, rf: float = 0.0, annual_periods: float = TRADING_DAYS) -> float:
+    sd_raw = float(np.std(rets))
+    if sd_raw < 1e-10:          # sabit-getiri (risksiz/nakit) -> Sharpe tanimsiz
+        return float("nan")
+    mu = np.mean(rets) - rf / annual_periods
+    return float(np.sqrt(annual_periods) * mu / (sd_raw + 1e-9))
 
 
-def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
+def sortino(rets: np.ndarray, rf: float = 0.0, annual_periods: float = TRADING_DAYS) -> float:
     """Sortino orani — payda kanonik downside deviation (Sortino/Price):
     sqrt(mean(min(r - hedef, 0)^2)), TUM gozlemler uzerinden (empyrical uyumu).
 
@@ -573,13 +1079,13 @@ def sortino(rets: np.ndarray, rf: float = 0.0) -> float:
     negatif gun sayisina bolunuyordu. Uniform kayiplarda payda ~0 olup orani
     sisiriyor, hic negatif getiri yokken NaN donuyordu (kesif bulgusu, HIGH).
     """
-    target = rf / TRADING_DAYS
+    target = rf / annual_periods
     mu = np.mean(rets) - target
     downside_dev = float(np.sqrt(np.mean(np.minimum(rets - target, 0.0) ** 2)))
     if downside_dev < 1e-12:
         # Hic asagi-yonlu sapma yok: pozitif ortalamada sonsuz, aksi halde 0.
-        return float("inf") if mu > 0 else 0.0
-    return float(np.sqrt(TRADING_DAYS) * mu / downside_dev)
+        return float("nan") if mu > 0 else 0.0   # pozitif sabit-getiri -> tanimsiz
+    return float(np.sqrt(annual_periods) * mu / downside_dev)
 
 
 def max_drawdown(nav: np.ndarray) -> float:
@@ -588,9 +1094,11 @@ def max_drawdown(nav: np.ndarray) -> float:
     return float(dd.min())
 
 
-def calmar(nav: np.ndarray) -> float:
+def calmar(nav: np.ndarray, dates=None) -> float:
     mdd = abs(max_drawdown(nav))
-    return cagr(nav) / (mdd + 1e-9)
+    if mdd < 1e-10:             # dususuz (risksiz/nakit) -> Calmar tanimsiz
+        return float("nan")
+    return cagr(nav, dates=dates) / (mdd + 1e-9)
 
 
 def turnover(weights: np.ndarray) -> float:
@@ -599,17 +1107,32 @@ def turnover(weights: np.ndarray) -> float:
     return float(d.mean()) if len(d) else 0.0
 
 
-def summary(nav: np.ndarray, rets: np.ndarray, weights=None) -> dict:
+def summary(nav: np.ndarray, rets: np.ndarray | None = None, weights=None, dates=None,
+            turnover_values=None) -> dict:
+    nav = np.asarray(nav, dtype=float)
+    if nav.ndim != 1 or nav.size == 0 or not np.isfinite(nav).all() or np.any(nav < 0):
+        raise ValueError("nav sonlu, negatif olmayan ve bos olmayan 1D dizi olmali")
+    if rets is None:
+        rets = np.diff(nav) / np.maximum(nav[:-1], 1e-12)
+    rets = np.asarray(rets, dtype=float)
+    if rets.ndim != 1 or not np.isfinite(rets).all():
+        raise ValueError("rets sonlu 1D dizi olmali")
+    # Baseline contracts use the first price date as a bookkeeping row.
+    metric_rets = rets[1:] if len(rets) > 1 and abs(float(rets[0])) < 1e-15 else rets
+    ann = _annual_periods(dates, len(nav))
     out = dict(
-        CAGR=cagr(nav),
-        Sharpe=sharpe(rets),
-        Sortino=sortino(rets),
+        CAGR=cagr(nav, dates=dates),
+        Sharpe=sharpe(metric_rets, annual_periods=ann),
+        Sortino=sortino(metric_rets, annual_periods=ann),
         MaxDD=max_drawdown(nav),
-        Calmar=calmar(nav),
-        Volatility=float(np.std(rets) * np.sqrt(TRADING_DAYS)),
+        Calmar=calmar(nav, dates=dates),
+        Volatility=float(np.std(metric_rets) * np.sqrt(ann)),
         FinalNAV=float(nav[-1]),
     )
-    if weights is not None:
+    if turnover_values is not None:
+        values = np.asarray(turnover_values, dtype=float)
+        out["Turnover"] = float(values.mean()) if values.size else 0.0
+    elif weights is not None:
         out["Turnover"] = turnover(np.asarray(weights))
     else:
         out["Turnover"] = 0.0
@@ -693,69 +1216,473 @@ def real_nav(nav: np.ndarray, usdtry: np.ndarray) -> np.ndarray:
 ## `utils/baselines.py`
 
 ```python
-"""Klasik baseline stratejiler — karşılaştırma için."""
+"""Klasik baseline stratejiler — karşılaştırma için.
+
+İŞLEM MALİYETİ SİMETRİSİ (C2):
+RL ortamı her rebalansta `eta·||Δw||₁` işlem maliyeti düşer (env/reward.py →
+tx_cost = eta_t * delta_w_l1). Baseline'lar maliyetsiz olursa ASİMETRİK bir
+karşılaştırma çıkar (baseline yapay olarak avantajlı). Bu yüzden tüm
+YENİDEN-DENGELEYEN baseline'lar (equal_weight, mean_variance, risk_parity,
+inverse_volatility, min_variance, momentum) RL ile SİMETRİK işlem maliyeti
+düşer: her rebalans gününde günlük net getiri = port_r − eta·||w_yeni−w_eski||₁.
+
+eta KAYNAĞI: RL'in kanonik ortamıyla AYNI base oran —
+`config.HORIZON_PRESETS["medium"]["eta"]` (kanonik vade = medium, eta_base=0.0010).
+RL adaptif ölçekleme (turnover_ewma/turnover_target) uygular; baseline'lar
+deterministik kalsın diye SABIT base eta kullanır (RNG yok, golden-uyumlu).
+Fonksiyon imzaları geriye-uyumlu: eta opsiyonel, default = medium preset eta.
+
+buy_and_hold_index rebalans yapmaz → maliyet 0 (değişmez).
+"""
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
+from config import HORIZON_PRESETS, EnvConfig, cash_daily_rate
 
-def equal_weight(prices: pd.DataFrame) -> dict:
-    """Günlük rebalansla eşit ağırlık."""
-    r = prices.pct_change().fillna(0).values
-    N = prices.shape[1]
-    w = np.ones(N) / N
-    rets = (r * w).sum(axis=1)
-    nav = np.cumprod(1 + rets)
-    return dict(nav=nav, rets=rets, weights=np.tile(w, (len(rets), 1)))
+# RL kanonik ortamıyla aynı base işlem-maliyeti oranı (vade = medium).
+DEFAULT_ETA: float = float(HORIZON_PRESETS["medium"]["eta"])
 
 
-def buy_and_hold_index(prices: pd.DataFrame) -> dict:
-    """Eşit ağırlık alıp tut (rebalans yok)."""
-    p0 = prices.iloc[0].values
-    shares = 1.0 / p0 / prices.shape[1]
-    nav = (prices.values * shares).sum(axis=1)
-    rets = np.diff(np.log(nav))
-    return dict(
-        nav=nav / nav[0],
-        rets=np.concatenate([[0.0], rets]),
-        weights=None,
-    )
+def _normalize(w: np.ndarray) -> np.ndarray:
+    w = np.clip(np.asarray(w, dtype=float), 0.0, None)
+    total = float(w.sum())
+    return w / total if total > 1e-12 else np.full(len(w), 1.0 / len(w))
+
+
+def _turnover_from_holdings(target: np.ndarray, held: np.ndarray) -> float:
+    """L1 turnover including the implicit cash slot."""
+    target = _normalize(target)
+    held = np.asarray(held, dtype=float)
+    return float(np.abs(target - held).sum() + abs((1.0 - target.sum()) - (1.0 - held.sum())))
+
+
+def _simulate(prices: pd.DataFrame, target_fn, *, eta: float,
+              rebalance_fn) -> dict:
+    """Self-financing long-only simulator shared by all risky baselines."""
+    r = prices.pct_change().fillna(0.0).to_numpy(dtype=float)
+    T, N = r.shape
+    nav = np.empty(T, dtype=float)
+    rets = np.empty(T, dtype=float)
+    weights = np.empty((T, N), dtype=float)
+    target_hist = np.empty((T, N), dtype=float)
+    turnover = np.zeros(T, dtype=float)
+    held = np.zeros(N, dtype=float)  # all cash before the first allocation
+    wealth = 1.0
+    pending_initial_cost = 0.0
+    for t in range(T):
+        if rebalance_fn(t):
+            target = _normalize(target_fn(t, r, held.copy()))
+            turn = _turnover_from_holdings(target, held)
+        else:
+            target = held.copy()
+            turn = 0.0
+        if t == 0:
+            # Report the common pre-trade starting wealth. Initial allocation
+            # cost is realized together with the first investable period.
+            pending_initial_cost = float(eta) * turn
+            gross = net = 0.0
+        else:
+            gross = float(target @ r[t])
+            net = gross - float(eta) * turn - pending_initial_cost
+            pending_initial_cost = 0.0
+            wealth = max(0.0, wealth * (1.0 + net))
+        grown = target * (1.0 + (r[t] if t > 0 else 0.0))
+        held = _normalize(grown) if float(grown.sum()) > 1e-12 else target
+        nav[t], rets[t], weights[t], target_hist[t], turnover[t] = \
+            wealth, net, held, target, turn
+    return {"nav": nav, "rets": rets, "weights": weights,
+            "target_weights": target_hist, "turnover": turnover,
+            "dates": list(prices.index)}
+
+
+def equal_weight(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
+    """Günlük rebalansla eşit ağırlık — RL ile simetrik işlem maliyeti düşülür.
+
+    Her gün eşit-ağırlığa geri dönülür (drift düzeltme). Önceki günkü fiyat
+    hareketiyle kayan ağırlıklar (w_drift) tekrar 1/N'e çekilir; bu rebalansın
+    ||Δw||₁'i kadar `eta` maliyeti net getiriden düşülür. Drift küçük olduğundan
+    maliyet de küçüktür ama 0 değildir (RL ile simetri)."""
+    n = prices.shape[1]
+    target = np.full(n, 1.0 / n)
+    return _simulate(prices, lambda t, r, w: target, eta=eta,
+                     rebalance_fn=lambda t: True)
+
+
+def buy_and_hold_index(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
+    """Eşit ağırlık alıp tut; yalnız ilk alım işlem maliyeti doğurur."""
+    n = prices.shape[1]
+    target = np.full(n, 1.0 / n)
+    return _simulate(prices, lambda t, r, w: target, eta=eta,
+                     rebalance_fn=lambda t: t == 0)
 
 
 def mean_variance(prices: pd.DataFrame, lookback: int = 120,
-                  rebalance: int = 20, risk_aversion: float = 5.0) -> dict:
-    """Kısıtlı long-only Markowitz; yuvarlanan pencere + periyodik rebalans."""
+                  rebalance: int = 20, risk_aversion: float = 5.0,
+                  eta: float = DEFAULT_ETA) -> dict:
+    """Kısıtlı long-only Markowitz; yuvarlanan pencere + periyodik rebalans.
+
+    RL ile simetrik: her rebalans gününde ||w_yeni−w_eski||₁ kadar `eta`
+    işlem maliyeti net getiriden düşülür."""
     from scipy.optimize import minimize
 
-    r = prices.pct_change().fillna(0).values
-    T, N = r.shape
-    navs = [1.0]; rets = []; w_hist = []
-    w = np.ones(N) / N
-    for t in range(T):
-        if t >= lookback and (t - lookback) % rebalance == 0:
-            hist = r[t - lookback: t]
-            mu = hist.mean(axis=0)
-            cov = np.cov(hist.T) + 1e-5 * np.eye(N)
+    n = prices.shape[1]
+    equal = np.full(n, 1.0 / n)
 
-            def obj(w_, mu=mu, cov=cov, ra=risk_aversion):
-                return -(w_ @ mu) + 0.5 * ra * w_ @ cov @ w_
+    def target_fn(t, r, held):
+        if t < lookback:
+            return equal
+        hist = r[t - lookback:t]
+        mu = hist.mean(axis=0)
+        cov = np.cov(hist.T) + 1e-5 * np.eye(n)
 
-            res = minimize(
-                obj, np.ones(N) / N,
-                bounds=[(0, 0.2)] * N,
-                constraints=({"type": "eq", "fun": lambda w_: w_.sum() - 1}),
-            )
-            w = res.x
-        port_r = float((w * r[t]).sum())
-        rets.append(port_r)
-        navs.append(navs[-1] * (1 + port_r))
-        w_hist.append(w.copy())
-    return dict(
-        nav=np.array(navs[1:]),
-        rets=np.array(rets),
-        weights=np.array(w_hist),
+        def obj(w_, mu=mu, cov=cov, ra=risk_aversion):
+            return -(w_ @ mu) + 0.5 * ra * w_ @ cov @ w_
+
+        res = minimize(obj, equal, bounds=[(0, 0.2)] * n,
+                       constraints=({"type": "eq", "fun": lambda w_: w_.sum() - 1}))
+        return res.x if res.success and np.isfinite(res.x).all() else equal
+
+    return _simulate(
+        prices, target_fn, eta=eta,
+        rebalance_fn=lambda t: t == 0 or (t >= lookback and (t - lookback) % rebalance == 0),
     )
+
+
+# =====================================================================
+# Ek akademik baseline'lar — hepsi DETERMINISTIK (RNG YOK), long-only,
+# tam-yatirim (sum(w)=1). PARS sibling strategies.py'den odunc alindi ve
+# kod/ API'sine ({"nav", "rets", "weights"} numpy) uyarlandi. Ortak
+# simulasyon cekirdegi _rolling_backtest: yuvarlanan pencere + periyodik
+# rebalans, ilk lookback gunu esit-agirlik isinma (warm-up).
+# =====================================================================
+def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
+                      rebalance: int, eta: float = DEFAULT_ETA) -> dict:
+    """Determinist yuvarlanan-pencere backtest cekirdegi (RL-simetrik tx-cost).
+
+    weight_fn(hist_returns:(L,N), w_prev:(N,)) -> w_new:(N,) dondurur.
+    Donen agirliklar long-only normalize edilir (clip>=0, toplam=1).
+    Her rebalans gununde RL ile SIMETRIK islem maliyeti dusulur:
+        net_r = port_r - eta * ||w_yeni - w_eski||_1
+    eta = config.HORIZON_PRESETS['medium']['eta'] (RL kanonik base oran).
+    Hicbir np.random cagrisi yok -> golden RNG sirasi etkilenmez (determinist)."""
+    n = prices.shape[1]
+    equal = np.full(n, 1.0 / n)
+
+    def target_fn(t, r, held):
+        if t < lookback:
+            return equal
+        candidate = np.asarray(weight_fn(r[t - lookback:t], held), dtype=float)
+        return candidate if candidate.shape == (n,) and np.isfinite(candidate).all() else equal
+
+    return _simulate(
+        prices, target_fn, eta=eta,
+        rebalance_fn=lambda t: t == 0 or (t >= lookback and (t - lookback) % rebalance == 0),
+    )
+
+
+def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
+                       rebalance: int = 20, eta: float = DEFAULT_ETA) -> dict:
+    """Ters-volatilite (1/sigma) agirligi — yuvarlanan vol uzerinden.
+
+    Mantik: w_i ∝ 1/sigma_i (sigma_i = pencere getiri std'i), normalize edilir.
+    Riske gore dengeleme'nin (risk parity) kovaryanssiz, naif halidir: yalniz
+    kosegen (varyans) bilgisi kullanilir, korelasyon yok sayilir. Dusuk-vol
+    hisseye daha cok agirlik -> portfoy vol'unu duzler. 'Volatility tilt'
+    olarak bilinen iyi-belgelenmis defensif bir anomalidir (Asness ve dig.)."""
+    def f(hist, w):
+        iv = 1.0 / (hist.std(axis=0) + 1e-9)
+        return iv / iv.sum()
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
+
+
+def risk_parity(prices: pd.DataFrame, lookback: int = 120,
+                rebalance: int = 20, n_iter: int = 100,
+                eta: float = DEFAULT_ETA) -> dict:
+    """Esit risk katkisi (ERC / risk parity) — iteratif sabit-nokta.
+
+    Hedef: her varligin TOPLAM portfoy riskine katkisi esit olsun:
+        RC_i = w_i (Sigma w)_i ,  hedef RC_i = sigma_p^2 / N  (tum i icin esit).
+    Cozum, marjinal risk katkisi MRC = Sigma w ile sabit-nokta iterasyonu:
+        w_i <- 1 / MRC_i ,  ardindan normalize (Spinu/Maillard tarzi). Yakinsayinca
+    w_i * MRC_i sabittir -> esit risk katkisi. Inverse-vol'un aksine korelasyonu
+    (tam Sigma) hesaba katar; konsantrasyonu cesitlendirip kuyruk riskini azaltir.
+    Tamamen determinist (sabit baslangic w=1/N, np.random yok)."""
+    def f(hist, w):
+        cov = np.cov(hist.T) + 1e-6 * np.eye(hist.shape[1])
+        n = cov.shape[0]
+        wv = np.ones(n) / n
+        for _ in range(n_iter):
+            mrc = cov @ wv
+            wv = 1.0 / np.maximum(mrc, 1e-8)
+            wv /= wv.sum()
+        return wv
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
+
+
+def min_variance(prices: pd.DataFrame, lookback: int = 120,
+                 rebalance: int = 20, max_weight: float = 0.4,
+                 eta: float = DEFAULT_ETA) -> dict:
+    """Saf minimum-varyans portfoyu — getiri tahmini KULLANMAZ.
+
+    Cozulen problem:  min_w  w' Sigma w   s.t.  sum(w)=1, 0<=w_i<=max_weight.
+    mean_variance'tan farki: beklenen getiri (mu) terimi YOK -> yalniz risk
+    minimize edilir. Ortalama getiri tahmini en gurultulu girdidir (mu'nun
+    ornekleme hatasi devasadir); onu atip yalniz kovaryansa guvenmek genelde
+    daha kararli, dusuk-vol portfoy verir (DeMiguel ve dig. bulgusu: min-var
+    cogu zaman tahmini-getiri optimizasyonunu out-of-sample yener). SLSQP
+    determinist baslar (w0=1/N), RNG yok."""
+    from scipy.optimize import minimize as _min
+    def f(hist, w):
+        n = hist.shape[1]
+        cov = np.cov(hist.T) + 1e-5 * np.eye(n)
+        res = _min(lambda x: x @ cov @ x, np.ones(n) / n,
+                   bounds=[(0, max_weight)] * n,
+                   constraints=({"type": "eq", "fun": lambda x: x.sum() - 1}))
+        return res.x if res.success and np.isfinite(res.x).all() else np.ones(n) / n
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
+
+
+def momentum(prices: pd.DataFrame, lookback: int = 60, rebalance: int = 20,
+             top_k: int = 5, eta: float = DEFAULT_ETA) -> dict:
+    """Kesitsel momentum — pencere getirisi en yuksek top_k hisseye esit agirlik.
+
+    Mantik: lookback penceresinde kumulatif getiri  cum_i = prod(1+r) - 1
+    hesaplanir; en yuksek top_k hisse secilip esit (1/top_k) agirlik verilir.
+    Klasik 'kazananlari al' (Jegadeesh & Titman 1993) etkisi: gecmis galipler
+    kisa-orta vadede ortalama ustu getirmeye egilimlidir. lookback vade
+    penceresine baglanir (kisa=5, orta=20, uzun=60 gun); secim determinist
+    (np.argsort kararli) -> RNG yok."""
+    k = max(1, int(top_k))
+    def f(hist, w):
+        n = hist.shape[1]
+        cum = (1.0 + hist).prod(axis=0) - 1.0
+        idx = np.argsort(cum)[-k:]          # en yuksek k (kararli siralama)
+        out = np.zeros(n)
+        out[idx] = 1.0 / len(idx)
+        return out
+    return _rolling_backtest(prices, f, lookback, rebalance, eta)
+
+
+def cash_riskfree(prices: pd.DataFrame,
+                  daily_rf: float | None = None) -> dict:
+    """Nakit / risk-free benchmark — tum sermaye nakitte, sabit gunluk getiri.
+
+    En muhafazakar referans: piyasaya HIC maruz kalmadan elde edilen getiri.
+    daily_rf default'u RL ortamiyla AYNI gercek risksiz faizden gelir:
+        cash_daily_rate(EnvConfig.cash_annual_rate)  (~%40 yillik -> ~0.001336/gun)
+    -> NAV = (1+rf)^t ~ 1.40x/yil (252 gun). Boylece nakit baseline'i de RL'in
+    nakit varligiyla SIMETRIK risksiz getiri kazanir (eski NAV=1.0 / %0 degil).
+    daily_rf acikca verilirse o kullanilir (geriye-uyumlu override). Risk
+    varliklarina agirlik 0 -> weights tamamen sifirdir (Turnover=0).
+    'RL piyasaya girmeyi hak ediyor mu?' sorusunun tabanini olusturur: bir ajan
+    bu (artik egimi pozitif) cizgiyi risk-ayarli gecemiyorsa piyasa riskini
+    almak bosunadir. Tamamen determinist (kapali-form, np.random yok)."""
+    if daily_rf is None:
+        daily_rf = cash_daily_rate(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
+    T, N = prices.shape
+    rets = np.full(T, float(daily_rf))
+    if T:
+        rets[0] = 0.0
+    nav = np.cumprod(1.0 + rets)
+    weights = np.zeros((T, N))
+    return dict(nav=nav, rets=rets, weights=weights,
+                target_weights=weights.copy(), turnover=np.zeros(T),
+                dates=list(prices.index))
+
+```
+
+---
+
+## `utils/deflated_sharpe.py`
+
+```python
+"""Deflated / Probabilistic Sharpe Ratio + CSCV Backtest-Overfitting Olasılığı (PBO).
+
+Kaynaklar: Bailey & López de Prado (2014) "The Deflated Sharpe Ratio" (SSRN 2460551);
+Bailey, Borwein, López de Prado & Zhu (2017) "The Probability of Backtest Overfitting"
+(SSRN 2326253). Sharpe girdileri GÖZLEM-BAŞINA (ör. günlük).
+
+PARS referans ağacından (`Reinforcement Learning Final/generalization/deflated_sharpe.py`)
+kanonik BIST ağacına port edildi. scipy.stats.norm zaten projede bir bağımlılık
+(env/reward.py) → eski `np.math` fallback'ları kaldırıldı (numpy 2.0-güvenli).
+
+GÖZLEMSEL / golden-güvenli: yalnız getiri dizileri üzerinde saf istatistik —
+eğitim/değerlendirme/ödül sayısal yolunu DEĞİŞTİRMEZ (golden-master 1e-6 korunur).
+"""
+from __future__ import annotations
+
+from itertools import combinations
+from math import e
+
+import numpy as np
+from scipy.stats import norm
+
+EULER_MASCHERONI = 0.5772156649015329
+
+
+def probabilistic_sharpe_ratio(sr: float, n_obs: int, skew: float = 0.0,
+                               kurt: float = 3.0, sr_benchmark: float = 0.0) -> float:
+    """PSR: tahmin hatası + çarpıklık/basıklık altında P(gerçek SR > benchmark).
+
+    sr ve sr_benchmark GÖZLEM-BAŞINA Sharpe oranlarıdır.
+    """
+    if n_obs < 2:
+        return 0.5
+    denom = np.sqrt(max(1e-12, 1.0 - skew * sr + (kurt - 1.0) / 4.0 * sr * sr))
+    z = (sr - sr_benchmark) * np.sqrt(n_obs - 1.0) / denom
+    return float(norm.cdf(z))
+
+
+def expected_max_sharpe(sr_variance: float, n_trials: int) -> float:
+    """n_trials bağımsız deneme altında H0'da beklenen MAKSİMUM (gözlem-başı) Sharpe.
+
+    E[max SR] ≈ sqrt(Var_SR) · [ (1−γ)·Z⁻¹(1−1/N) + γ·Z⁻¹(1−1/(N·e)) ].
+    """
+    n_trials = max(int(n_trials), 1)
+    if n_trials == 1 or sr_variance <= 0:
+        return 0.0
+    g = EULER_MASCHERONI
+    z1 = norm.ppf(1.0 - 1.0 / n_trials)
+    z2 = norm.ppf(1.0 - 1.0 / (n_trials * e))
+    return float(np.sqrt(sr_variance) * ((1 - g) * z1 + g * z2))
+
+
+def deflated_sharpe_ratio(sr: float, n_obs: int, n_trials: int, sr_variance: float,
+                          skew: float = 0.0, kurt: float = 3.0) -> float:
+    """DSR = beklenen-maksimum-Sharpe benchmark'ına karşı değerlendirilen PSR.
+
+    DSR > 0.95 → gözlenen Sharpe'ın çoklu-deneme (multiple-testing) tesadüfü olması
+    olası değil. Tüm Sharpe büyüklükleri gözlem-başınadır.
+    """
+    sr_star = expected_max_sharpe(sr_variance, n_trials)
+    return probabilistic_sharpe_ratio(sr, n_obs, skew, kurt, sr_benchmark=sr_star)
+
+
+def cscv_pbo(perf_matrix: np.ndarray, n_splits: int = 10) -> dict:
+    """Kombinatoryal-Simetrik Çapraz-Doğrulama ile Backtest-Overfitting Olasılığı.
+
+    perf_matrix: (T_gözlem, N_config) her aday config için periyot-başı getiri.
+    Zaman ``n_splits`` bloğa bölünür; her dengeli train/test bölüşümünde IS-en-iyi
+    config seçilir ve OOS sırası → logit kaydedilir. PBO = IS-en-iyi config'in
+    OOS-medyan-altı olduğu bölüşüm oranı. {pbo, n_combos, mean_logit} döner.
+    """
+    R = np.asarray(perf_matrix, dtype=float)
+    T, N = R.shape
+    if N < 2 or T < n_splits * 2:
+        return {"pbo": float("nan"), "n_combos": 0, "mean_logit": float("nan")}
+    S = n_splits if n_splits % 2 == 0 else n_splits - 1
+    blocks = np.array_split(np.arange(T), S)
+    logits = []
+    for train_idx in combinations(range(S), S // 2):
+        tr = np.concatenate([blocks[i] for i in train_idx])
+        te = np.concatenate([blocks[i] for i in range(S) if i not in train_idx])
+        is_sr = R[tr].mean(0) / (R[tr].std(0) + 1e-12)
+        oos_sr = R[te].mean(0) / (R[te].std(0) + 1e-12)
+        n_star = int(np.argmax(is_sr))
+        order = np.argsort(oos_sr)                      # 1=en kötü .. N=en iyi OOS
+        rank = int(np.nonzero(order == n_star)[0][0]) + 1
+        w = min(max(rank / (N + 1), 1e-6), 1 - 1e-6)
+        logits.append(np.log(w / (1 - w)))
+    logits = np.asarray(logits)
+    return {"pbo": float((logits <= 0).mean()), "n_combos": int(len(logits)),
+            "mean_logit": float(logits.mean())}
+
+```
+
+---
+
+## `utils/stress_mc.py`
+
+```python
+"""Monte-Carlo stres — şişman-kuyruklu parametrik + durağan blok bootstrap.
+
+İleri çok-varlık getiri patikalarını iki simülatörle üretip portföy ağırlıklarıyla
+terminal-getiri dağılımına ve kuyruk riskine (VaR/CVaR) taşır:
+  * Student-t parametrik — çok-değişkenli t (tarihsel ortalama/kovaryans), ağır kuyruk;
+  * durağan blok bootstrap — ardışık tarihsel blokları yeniden örnekler; dağılım
+    varsayımı olmadan otokorelasyon/volatilite kümelenmesini KORUR (Politis & Romano 1994).
+
+PARS referans ağacından (`Reinforcement Learning Final/stress/montecarlo.py`) kanonik
+BIST ağacına port edildi. Env-yerel `np.random.default_rng(seed)` → global RNG'ye dokunmaz.
+GÖZLEMSEL / golden-güvenli: mevcut backtest çıktıları üzerinde post-hoc stres analizi.
+"""
+from __future__ import annotations
+
+from typing import Dict
+
+import numpy as np
+
+
+def _assets_weights(weights, n_assets):
+    """Ağırlık vektörü n+1 (nakit dahil) ise nakit elemanını düşürür → (n,)."""
+    w = np.asarray(weights, dtype=float).reshape(-1)
+    if w.shape[0] == n_assets + 1:
+        w = w[:n_assets]
+    return w
+
+
+def summarize_mc(terminal_returns: np.ndarray, var_alpha: float = 0.05,
+                 es_alpha: float = 0.025) -> Dict[str, float]:
+    """Terminal getiri dağılımının özet istatistikleri + kuyruk riski (VaR/CVaR)."""
+    tr = np.asarray(terminal_returns, dtype=float)
+    q_var = np.quantile(tr, var_alpha)
+    q_es = np.quantile(tr, es_alpha)
+    tail = tr[tr <= q_es]
+    return {
+        "mean": float(tr.mean()), "median": float(np.median(tr)),
+        "p05": float(np.quantile(tr, 0.05)), "p95": float(np.quantile(tr, 0.95)),
+        "VaR": float(max(0.0, -q_var)),
+        "CVaR": float(max(0.0, -(tail.mean() if tail.size else q_es))),
+        "worst": float(tr.min()), "best": float(tr.max()),
+        "prob_loss": float((tr < 0).mean()),
+        "prob_loss_20pct": float((tr < -0.20).mean()),
+    }
+
+
+def mc_student_t(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 252,
+                 paths: int = 5000, dof: float = 5.0, seed: int = 42) -> dict:
+    """Çok-değişkenli Student-t MC (tarihsel ortalama/kovaryans, ağır kuyruk)."""
+    R = np.asarray(asset_returns, dtype=float)
+    n = R.shape[1]
+    w = _assets_weights(weights, n)
+    rng = np.random.default_rng(seed)
+    mu = R.mean(0)
+    cov = np.cov(R.T) + 1e-8 * np.eye(n)
+    L = np.linalg.cholesky(cov)
+    scale = np.sqrt((dof - 2) / dof) if dof > 2 else 1.0
+    terminal = np.empty(paths)
+    for p in range(paths):
+        z = rng.standard_normal((horizon, n))
+        g = rng.chisquare(dof, size=(horizon, 1)) / dof
+        t = z / np.sqrt(g)                               # standart çok-değişkenli-t yenilik
+        daily = mu + (t * scale) @ L.T
+        port = daily @ w
+        terminal[p] = np.prod(1 + port) - 1
+    return {"terminal": terminal, "summary": summarize_mc(terminal)}
+
+
+def mc_block_bootstrap(asset_returns: np.ndarray, weights: np.ndarray, horizon: int = 252,
+                       paths: int = 5000, block: int = 20, seed: int = 42) -> dict:
+    """Tarihsel getirilerin durağan blok bootstrap'ı → terminal dağılım."""
+    R = np.asarray(asset_returns, dtype=float)
+    T, n = R.shape
+    w = _assets_weights(weights, n)
+    rng = np.random.default_rng(seed)
+    pblock = 1.0 / block
+    terminal = np.empty(paths)
+    for p in range(paths):
+        idx = np.empty(horizon, dtype=int)
+        i = rng.integers(0, T)
+        for h in range(horizon):
+            if h > 0 and rng.random() < pblock:
+                i = rng.integers(0, T)                   # yeni blok başlat
+            idx[h] = i
+            i = (i + 1) % T
+        port = R[idx] @ w
+        terminal[p] = np.prod(1 + port) - 1
+    return {"terminal": terminal, "summary": summarize_mc(terminal)}
 
 ```
 
@@ -783,6 +1710,8 @@ def compute_tl_step(nav: float, w_now: np.ndarray, w_prev: np.ndarray,
                     prices_t: np.ndarray, initial_capital: float,
                     prev_portfolio_tl: float, holding_days_prev: np.ndarray,
                     tx_cost_rate: float = 0.0,
+                    target_weights: np.ndarray | None = None,
+                    holding_period_days: int = 1,
                     eps: float = HOLDING_EPS) -> Dict[str, np.ndarray | float]:
     """Tek adımın TL türevlerini hesapla.
 
@@ -807,12 +1736,15 @@ def compute_tl_step(nav: float, w_now: np.ndarray, w_prev: np.ndarray,
     cash_tl      = portfolio_tl * float(w_now[-1])
     asset_tl     = portfolio_tl * w_now[:N_risky]
     shares       = asset_tl / safe_px
-    trade_tl     = portfolio_tl * (w_now[:N_risky] - w_prev[:N_risky])
+    trade_w = (w_now if target_weights is None
+               else np.asarray(target_weights, dtype=np.float64).reshape(-1))
+    trade_tl     = portfolio_tl * (trade_w[:N_risky] - w_prev[:N_risky])
     trade_shares = trade_tl / safe_px
     commission_tl = portfolio_tl * float(tx_cost_rate)
 
     holding_days_prev = np.asarray(holding_days_prev, dtype=np.int64).reshape(-1)
-    holding_days = np.where(w_now[:N_risky] >= eps, holding_days_prev + 1, 0)
+    holding_days = np.where(w_now[:N_risky] >= eps,
+                            holding_days_prev + max(1, int(holding_period_days)), 0)
 
     return dict(
         portfolio_tl=portfolio_tl,
@@ -1133,6 +2065,21 @@ def build_forecast_feature(prices_full: pd.DataFrame, prices_train: pd.DataFrame
     prices_train ile fit edilir (sizinti yok); prices_full uzerinde causal tahmin
     uretilir (her t icin pencere <=t). Donen DataFrame feats['forecast'] olur.
     """
+    if window < 2:
+        raise ValueError("forecast window en az 2 olmali")
+    if len(prices_train) <= window:
+        raise ValueError(
+            f"Forecaster egitimi icin en az window+1={window + 1} satir gerekli; "
+            f"{len(prices_train)} geldi")
+    if list(prices_full.columns) != list(prices_train.columns):
+        raise ValueError("prices_full ve prices_train kolonlari ayni olmali")
+    if not prices_train.index.isin(prices_full.index).all():
+        raise ValueError("prices_train prices_full'un alt kumesi olmali")
+    for name, frame in (("prices_full", prices_full), ("prices_train", prices_train)):
+        values = frame.to_numpy(dtype=float)
+        if not np.isfinite(values).all() or np.any(values <= 0):
+            raise ValueError(f"{name} pozitif ve sonlu olmali")
+
     set_seed(seed)                          # fit'i tekrar-uretilebilir kil (golden)
     device = get_device()
     lr_tr = _logret(prices_train)
@@ -1179,7 +2126,10 @@ def build_forecast_feature(prices_full: pd.DataFrame, prices_train: pd.DataFrame
 
 MDP tuple (S, A, P, r, γ):
 
-  S : ℝ^393 — 28 hisse × 13 özellik (12 teknik + 1 forecast, z-skorlu) + 29 boyutlu önceki ağırlık
+  S : ℝ^397 (DQN/SAC/TD3) / ℝ^369 (PPO) — 28 hisse × F özellik (z-skorlu)
+      + 4 makro (MacroConfig.enabled) + 29 boyutlu önceki ağırlık (nakit dâhil).
+      F=13 (12 teknik + 1 forecast) forecast ajanlarında; PPO forecast'ı dışlar -> F=12.
+      (393/365 = makro-öncesi V5 tabanı; +4 makro = 397/369)
   A : 6 ayrık şablon (DiscretePortfolioEnv) VEYA ℝ^29 sürekli softmax (PortfolioEnv)
   P : Piyasa tarafından belirlenen stokastik süreç; s_{t+1} sonraki günün
       öznitelikleri + işlem sonrası ağırlıklardan oluşur
@@ -1194,11 +2144,14 @@ Sonlandırma koşulları:
 """
 from __future__ import annotations
 
+from math import ceil
 from typing import Dict, Literal
 import numpy as np
 import pandas as pd
 
-from config import EnvConfig, HORIZON_PRESETS, RewardConfig
+from config import DEFAULTS, EnvConfig, HORIZON_PRESETS, RewardConfig
+from core.contracts import DataProvenance
+from config import cash_daily_rate as _cash_daily_rate_from_annual
 # P7 (SRP): odul siniflari env/reward.py'ye tasindi; buradan re-export edilir
 # (test_env ve dis kullanicilar `from env.portfolio_env import DifferentialSharpe`
 # yapmaya devam edebilir).
@@ -1261,11 +2214,46 @@ class PortfolioEnv:
                  seed: int | None = None,
                  price_noise_std: float = EnvConfig.price_noise_std,
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
+                 force_price_noise: bool = False,
+                 episode_clean: bool = False,
+                 episode_data_fn=None,
+                 rebalance_freq: int | None = None,
+                 gamma: float | None = None,            # v12: None -> preset (golden); override
+                 mom_window: int | None = None,         # v12: None -> preset; override
+                 minvol_window: int | None = None,      # v12: None -> preset; override
+                 step_days: int = DEFAULTS.step_days,
+                 start_index: int | None = None,
+                 cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
+                 w_cvar: float | None = None,
+                 cvar_alpha: float = RewardConfig.cvar_alpha,
+                 regime_beta: float = RewardConfig.regime_beta,
+                 cvar_amp: float = RewardConfig.cvar_amp,
+                 w_gain: float = 0.0,
+                 gain_floor: float = 1.0,
+                 w_gain_speed: float = 0.0,
+                 w_ruin_timing: float = 0.0,
                  macro=None, regime=None):
+        if not isinstance(prices.index, pd.DatetimeIndex):
+            raise TypeError("prices DatetimeIndex gerektirir")
+        if prices.empty or prices.shape[1] == 0:
+            raise ValueError("prices bos olamaz")
+        if not np.isfinite(prices.to_numpy(dtype=float)).all() or (prices <= 0).any().any():
+            raise ValueError("prices pozitif ve sonlu degerlerden olusmali")
+        if any(not prices.index.equals(v.index) or list(prices.columns) != list(v.columns)
+               for v in features.values()):
+            raise ValueError("tum feature matrisleri prices ile ayni index/kolonlara sahip olmali")
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
+        self.step_days = max(1, int(step_days))
+        raw_counts = prices.attrs.get("session_counts")
+        self.session_counts = (np.ones(len(prices), dtype=np.int32) if raw_counts is None
+                               else np.asarray(raw_counts, dtype=np.int32))
+        if self.session_counts.shape != (len(prices),) or np.any(self.session_counts < 1):
+            raise ValueError("prices.attrs['session_counts'] gecersiz")
+        self.provenance = DataProvenance.from_value(prices.attrs.get("provenance"))
+        self.start_index = None if start_index is None else int(start_index)
         self.feat_names = list(features.keys())
         self.feat_tensor = np.stack(
             [features[k].values.astype(np.float32) for k in self.feat_names],
@@ -1274,10 +2262,16 @@ class PortfolioEnv:
 
         self.horizon = horizon
         preset = HORIZON_PRESETS[horizon]
-        self.rebalance_freq = preset["rebalance"]
-        self.mom_window     = preset["mom_window"]
-        self.minvol_window  = preset["minvol_window"]
-        self.gamma          = preset["gamma"]
+        # rebalance_freq: None -> preset (CLI/golden bit-ayni); UI override -> max(1, int).
+        self.rebalance_freq = preset["rebalance"] if rebalance_freq is None else max(1, int(rebalance_freq))
+        # v12: mom/minvol/gamma artik OVERRIDE-edilebilir (None -> preset, golden bit-ayni).
+        mom_days = preset["mom_window"] if mom_window is None else max(1, int(mom_window))
+        minvol_days = preset["minvol_window"] if minvol_window is None else max(1, int(minvol_window))
+        self.mom_window = max(1, int(ceil(mom_days / self.step_days)))
+        self.minvol_window = max(1, int(ceil(minvol_days / self.step_days)))
+        self.mom_lookback_days = mom_days
+        self.minvol_lookback_days = minvol_days
+        self.gamma          = preset["gamma"]         if gamma         is None else float(gamma)
         eta_base    = preset["eta"] if eta_base    is None else float(eta_base)
         lambda_base = preset["lam"] if lambda_base is None else float(lambda_base)
         tau_base    = preset["tau"] if tau_base    is None else float(tau_base)
@@ -1291,6 +2285,9 @@ class PortfolioEnv:
         )
         # v7: CVaR kuyruk cezasi vade-bagli olceklenir (kisa->yuksek tail-bilinci).
         cvar_factor = {"short": 1.6, "medium": 1.0, "long": 0.6}.get(horizon, 1.0)
+        # w_cvar base: None ise config default (golden-guvenli); aksi halde override.
+        # Her iki halde vade-bagli cvar_factor ile carpilir (mevcut davranis korunur).
+        w_cvar_base = RewardConfig.w_cvar if w_cvar is None else float(w_cvar)
         self.reward = RewardEngine(
             shaper=shaper,
             dsharpe=DifferentialSharpe(eta=dsr_eta),   # v2: cevrim-ici risk-ayar (DSR)
@@ -1299,16 +2296,34 @@ class PortfolioEnv:
             bankruptcy_nav=float(bankruptcy_nav) if bankruptcy_nav is not None else BANKRUPTCY_NAV,
             bankruptcy_penalty=(float(bankruptcy_penalty)
                                 if bankruptcy_penalty is not None else BANKRUPTCY_PENALTY),
-            w_cvar=RewardConfig.w_cvar * cvar_factor,   # v7: rejim-amplified kuyruk cezasi
-            cvar_alpha=RewardConfig.cvar_alpha,
-            regime_beta=RewardConfig.regime_beta,
-            cvar_amp=RewardConfig.cvar_amp,
+            w_cvar=w_cvar_base * cvar_factor,           # v7: rejim-amplified kuyruk cezasi
+            cvar_alpha=float(cvar_alpha),
+            regime_beta=float(regime_beta),
+            cvar_amp=float(cvar_amp),
+            # v9: OPT-IN kazanc-carpani + iflas-timing (default 0/kapali -> golden bit-ayni)
+            w_gain=float(w_gain), gain_floor=float(gain_floor),
+            w_gain_speed=float(w_gain_speed), w_ruin_timing=float(w_ruin_timing),
         )
 
         self.N_assets = prices.shape[1]
         self.cash_asset = cash_asset
         self.N = self.N_assets + (1 if cash_asset else 0)
-        self.window = max(window, self.minvol_window)
+        self.n_days = prices.shape[0]
+
+        # --- Kısa-veri adaptasyonu (granülerlik: monthly/yearly) ---
+        # DAILY V11-EXACT: V11'de self.window = max(window, minvol_window) = max(20,60)=60
+        # (DQN min-vol/momentum SABLONLARI minvol_window gecmisi gerektirir; lo=60 olmali,
+        # aksi halde sablon dilimi BOS -> NaN). Bunu KORU; yalniz COARSE veride (n_days kucuk)
+        # pencereleri veriye sigacak sekilde asagi cap'le.
+        # KRITIK (adversarial bulgu): DiscreteEnv sablonlari feat_tensor[t-mom/minvol:t]
+        # kullanir; window cap'lenip mom/minvol cap'lenmezse coarse'da NEGATIF/BOS slice ->
+        # NaN agirlik/NAV. Bu yuzden mom_window/minvol_window'u DA cap'le (window'dan ONCE).
+        _cap = max(1, self.n_days // 3)
+        self.minvol_window = min(self.minvol_window, _cap)   # daily: min(60,851)=60 degismez
+        self.mom_window    = min(self.mom_window, _cap)      # daily: min(20,851)=20 degismez
+        # Günlük (n_days~2554): window=min(max(20,60),851)=60 -> lo=60 V11-AYNI.
+        # Yıllık (~10): minvol=mom=3,window=3; Monthly (~120): minvol=40,mom=20,window=40.
+        self.window = min(max(window, self.minvol_window), _cap)
         self.F = self.feat_tensor.shape[2]
         # v6: makro rejim blogu (z-skorlu (T,M), state'e eklenir) + HAM regime
         # (T,) ∈[-1,1] — V7 odul kriz-amplifikasyonu icin step()'te kullanilir.
@@ -1317,9 +2332,10 @@ class PortfolioEnv:
         self.M = 0 if self.macro is None else int(self.macro.shape[1])
         self.state_dim = self.F * self.N_assets + self.M + self.N
         self.action_dim = self.N
-        # n_days: toplam zaman adimi (satir). 't' ile yalniz buyuk/kucuk harfle
-        # ayrilan 'T' adi karisikliga yol aciyordu (SonarCloud python:S1845) -> n_days.
-        self.n_days = prices.shape[0]
+        # n_days yukarida atandi (window cap hesabi icin ctor'da erken gerekiyordu).
+        # max_steps V11-EXACT (CAP YOK): coarse veride episode dogal olarak done-at-data-end
+        # ile biter (step t>=n_days-1 -> done; son gecerli _risky_returns t=n_days-2). Cap
+        # eklemek daily eval'i 1 adim kisaltir -> golden kayardi; bu yuzden cap YOK.
         self.max_steps = max_steps
         # v2: env-yerel RNG — global np.random'a bagimli degil (tekrar-uretilebilirlik
         # kurulum sirasindan bagimsiz) + tohumlu rastgele-baslangic destegi.
@@ -1328,12 +2344,45 @@ class PortfolioEnv:
         # v8: fiyat gurultusu/slippage (hocanin sarti). train_only -> yalniz random_start
         # (egitim) acik; eval (random_start=False) -> kapali, golden eval determinizmi korunur.
         self.price_noise_std = float(price_noise_std)
+        # force_price_noise: eval'de de gurultu acar (gurultu-artirimli coklu-episode
+        # degerlendirmesi icin). Varsayilan False -> mevcut train-only davranis + golden korunur.
         self._noise_active = (self.price_noise_std > 0.0 and
-                              (self.random_start if price_noise_train_only else True))
+                              (force_price_noise or
+                               (self.random_start if price_noise_train_only else True)))
+        # OPT-IN episode-clean (kullanici istegi: "1. iterasyon orijinal, 2-12 farkli noise").
+        # _episode_idx: ctor'da -1; her reset()'te +1 -> 1. episode idx=0 (TEMIZ/orijinal),
+        # idx>=1 gurultulu. DEFAULT KAPALI -> CLI/golden V11 davranisi (her episode gurultulu)
+        # BIT-AYNI; yalniz UI episode_clean=True gecer. Kapaliyken sayac kullanilmaz -> golden-no-op.
+        self._episode_clean = bool(episode_clean)
+        # OPT-IN per-episode veri degisimi (anti-ezber): her reset()'te callback
+        # (ep_idx) -> (prices_array, feat_tensor_array) doner; env bu episode'un
+        # noise'lu verisini kullanir. DEFAULT None -> blok hic calisMAZ -> CLI/golden
+        # RNG/sonuc BIT-AYNI. episode_clean ile celiSmez (ikisi de opt-in, ayri mekanizma).
+        self._episode_data_fn = episode_data_fn
+        self._episode_idx = -1
+        # v10: nakit (risksiz) gunluk faiz. None -> config EnvConfig.cash_annual_rate'ten
+        # bilesik turetilir; UI/CLI gunluk orani dogrudan gecebilir. SABIT skaler -> RNG
+        # cagrisi YOK, _risky_returns'te 0.0 yerine bu oran nakit varliga atanir.
+        self.cash_daily_rate = float(
+            _cash_daily_rate_from_annual(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
+            if cash_daily_rate is None else cash_daily_rate
+        )
         self._reset_state()
 
     def _reset_state(self):
-        lo = max(self.window, 21)
+        # lo = self.window (V11'de minvol_window'u kapsar, >=21). Coarse veride n_days-2'ye
+        # cap'lenir (yearly ~10: lo<=8 -> gecerli; step done-at-data-end ile t+1 sinir guvenli).
+        # Gunluk: self.window=60 -> min(60, 2552)=60 -> V11-AYNI.
+        lo_raw = max(self.window, 21)
+        lo = min(lo_raw, max(1, self.n_days - 2))
+        if self.start_index is not None:
+            lo = max(lo, self.start_index)
+        # v12: dejenere (asiri-kisa) veri korumasi — sessiz NaN/bos-slice yerine acik hata.
+        if self.n_days < 3 or lo >= self.n_days - 1:
+            raise ValueError(
+                f"Yetersiz veri: n_days={self.n_days}, warm-up lo={lo}. step_days cok buyuk "
+                f"veya tarih araligi cok dar (resample sonrasi {self.n_days} nokta)."
+            )
         if self.random_start:
             # episode'un max_steps adim + bir sonraki gun erisimi icin yer birak.
             # DIKKAT: rng.integers yalniz hi > lo iken cagrilir (RNG tuketimi /
@@ -1345,6 +2394,7 @@ class PortfolioEnv:
                 self.t = lo
         else:
             self.t = lo
+        self.episode_start_date = self.dates[self.t]
         self.step_count = 0
         self.w = np.zeros(self.N, dtype=np.float32)
         self.w[-1] = 1.0  # nakitle başla
@@ -1354,11 +2404,28 @@ class PortfolioEnv:
         self.weight_history = [self.w.copy()]
         self.ret_history = []
         self.reward_terms_history = []
+        self.weights_before_history = []
+        self.target_weight_history = []
+        self.turnover_history = []
+        self.period_length_history = []
+        self.discount_history = []
+        self.date_history = []
         self.reward.reset()
 
     def reset(self, seed: int | None = None):
         if seed is not None:
             self.rng = np.random.default_rng(seed)   # env-yerel; global RNG'ye dokunmaz
+        self._episode_idx += 1                        # 1. episode -> idx=0 (temiz); >=1 -> noise
+        # OPT-IN per-episode veri swap'i: episode_data_fn verilmisse (UI anti-ezber modu)
+        # bu episode'un (prices, feat_tensor)'unu degistir. None ise (CLI/golden) bu
+        # blok HIC calisMAZ -> reset() RNG/sonucu BIT-AYNI. Shape eslesmezse sessizce atla.
+        if self._episode_data_fn is not None:
+            _p, _ft = self._episode_data_fn(self._episode_idx)
+            _p = np.asarray(_p, dtype=np.float32)
+            _ft = np.asarray(_ft, dtype=np.float32)
+            if _p.shape == self.prices.shape and _ft.shape == self.feat_tensor.shape:
+                self.prices = _p
+                self.feat_tensor = _ft
         self._reset_state()
         return self._obs(), {}
 
@@ -1374,52 +2441,91 @@ class PortfolioEnv:
         p0 = self.prices[self.t]
         p1 = self.prices[self.t + 1]
         r = (p1 - p0) / np.maximum(p0, 1e-9)
-        if self._noise_active:
+        # ROBUSTLUK (NaN-guvenligi): gercek BIST verisinde eksik/halt gunleri NaN birakabilir.
+        # Tek bir NaN getiri, w*r agirlikli toplamini (0*nan=nan dahil) zehirleyip NAV'i TUM
+        # episod boyunca nan yapardi (HF Space'te gozlemlenen hata). Eksik veriyi 'hareket yok'
+        # (0 getiri) say -> NAV daima sonlu. Temiz veride no-op (sonlu degerler degismez) ->
+        # golden-master korunur.
+        r = np.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
+        # episode_clean ACIK ise 1. episode (idx=0) gurultusuz orijinal, idx>=1 noise'lu.
+        # KAPALI ise kosul daima True -> V11 davranisi (her episode gurultulu, golden bit-ayni).
+        if self._noise_active and (not self._episode_clean or self._episode_idx >= 1):
             # v8: slippage/fiyat gurultusu (hocanin sarti, anti-ezber) — gerceklesen
             # riskli getiriye kucuk Gauss gurultusu. Env-yerel rng -> global RNG'ye
             # dokunmaz; yalniz egitimde (random_start), eval'de kapali (deterministik).
             r = r + self.rng.normal(0.0, self.price_noise_std, size=r.shape).astype(np.float32)
         if self.cash_asset:
-            r = np.concatenate([r, [0.0]])
+            # v10: nakit varlik artik 0 degil; gunluk risksiz faiz kazanir (SABIT skaler,
+            # RNG kullanmaz -> golden RNG sirasi korunur, yalniz deger degisir).
+            sessions = int(self.session_counts[self.t + 1])
+            cash_period_rate = (1.0 + self.cash_daily_rate) ** sessions - 1.0
+            r = np.concatenate([r, [cash_period_rate]])
         return r
 
     def _should_rebalance(self) -> bool:
-        return (self.step_count % self.rebalance_freq) == 0
+        return True
 
     def _apply_action(self, action) -> np.ndarray:
-        if self._should_rebalance():
-            a = np.asarray(action, dtype=np.float32).reshape(-1)
-            if a.shape[0] != self.N:
-                raise ValueError(f"action must have length {self.N}, got {a.shape}")
-            return softmax(a, temp=1.0)
-        return self.w.copy()
+        a = np.asarray(action, dtype=np.float32).reshape(-1)
+        if a.shape[0] != self.N:
+            raise ValueError(f"action must have length {self.N}, got {a.shape}")
+        if not np.isfinite(a).all():
+            raise ValueError("action NaN/Inf iceremez")
+        return softmax(a, temp=1.0)
 
     def step(self, action):
         # Piyasa/portfoy mekanigi burada; odul aritmetigi RewardEngine'de (P7, SRP).
-        w_new = self._apply_action(action)
-        delta_w_l1 = float(np.abs(w_new - self.w).sum())
+        weights_before = self.w.copy()
+        w_target = self._apply_action(action)
+        delta_w_l1 = float(np.abs(w_target - weights_before).sum())
         r_vec = self._risky_returns()
-        gross_port_r = float((w_new * r_vec).sum())
+        gross_port_r = float((w_target * r_vec).sum())
 
         regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-                                      nav=self.nav, peak=self.peak, regime=regime_t)
+                                      nav=self.nav, peak=self.peak, regime=regime_t,
+                                      step_count=self.step_count, max_steps=self.max_steps)
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 
-        self.w = w_new
+        # Holdings drift after the market move. Fees are modeled as a wealth drag;
+        # relative holdings are normalized by gross portfolio wealth.
+        gross_wealth = 1.0 + gross_port_r
+        if gross_wealth <= 1e-12 or not np.isfinite(gross_wealth):
+            w_after = np.zeros(self.N, dtype=np.float32)
+            w_after[-1] = 1.0
+        else:
+            w_after = np.asarray(w_target * (1.0 + r_vec) / gross_wealth, dtype=np.float32)
+            w_after = np.clip(w_after, 0.0, None)
+            total_w = float(w_after.sum())
+            if total_w <= 1e-12 or not np.isfinite(total_w):
+                raise FloatingPointError("donem-sonu portfoy agirliklari gecersiz")
+            w_after /= total_w
+        self.w = w_after
         self.t += 1
         self.step_count += 1
         self.nav_history.append(self.nav)
         self.weight_history.append(self.w.copy())
         self.ret_history.append(outcome.port_r_net)
         self.reward_terms_history.append(reward_terms)
+        period_len = int(self.session_counts[self.t])
+        discount = float(self.gamma ** period_len)
+        self.weights_before_history.append(weights_before)
+        self.target_weight_history.append(w_target.copy())
+        self.turnover_history.append(delta_w_l1)
+        self.period_length_history.append(period_len)
+        self.discount_history.append(discount)
+        self.date_history.append(self.dates[self.t])
 
         # İflas veya veri sonu → done; 252 adım tavanı → trunc
         done = (self.t >= (self.n_days - 1)) or reward_terms["bankrupt"]
         trunc = (self.step_count >= self.max_steps)
         info = dict(nav=self.nav, dd=reward_terms["dd"], port_r=outcome.port_r_net,
-                    reward_terms=reward_terms, prices_t=self.prices[self.t].copy())
+                    reward_terms=reward_terms, prices_t=self.prices[self.t].copy(),
+                    weights_before=weights_before, target_weights=w_target.copy(),
+                    weights_after=self.w.copy(), turnover=delta_w_l1,
+                    period_length=period_len, discount=discount,
+                    date=self.dates[self.t])
         return self._obs(), float(outcome.total), bool(done), bool(trunc), info
 
 
@@ -1437,8 +2543,15 @@ class DiscretePortfolioEnv(PortfolioEnv):
     def _discrete_to_logits(self, a_idx: int) -> np.ndarray:
         mw = self.mom_window
         mvw = self.minvol_window
-        lb_mom  = self.feat_tensor[self.t - mw:  self.t, :, self.feat_names.index("logret")]
-        lb_vol  = self.feat_tensor[self.t - mvw: self.t, :, self.feat_names.index("logret")]
+        # Slice baslangici 0'a clamp (kemer-ve-askı): coarse veride t-mw/t-mvw negatife dusup
+        # BOS slice -> NaN olmasini engeller. Daily: t>=window>=mvw -> t-mvw>=0 -> max(0,.)
+        # ETKISIZ -> golden bit-ayni. (mom/minvol ctor'da da cap'lendi; bu ikinci savunma hatti.)
+        lo_mom = max(0, self.t - mw)
+        lo_vol = max(0, self.t - mvw)
+        # Portfolio templates operate on raw returns. Scaled feature values would
+        # destroy cross-asset momentum and volatility magnitudes.
+        lb_mom = np.diff(np.log(self.prices[lo_mom:self.t + 1]), axis=0)
+        lb_vol = np.diff(np.log(self.prices[lo_vol:self.t + 1]), axis=0)
         mean_r = lb_mom.mean(axis=0)
         vol    = lb_vol.std(axis=0) + 1e-6
         N_risky = self.N - 1 if self.cash_asset else self.N
@@ -1472,10 +2585,7 @@ class DiscretePortfolioEnv(PortfolioEnv):
         if not (0 <= a_idx < self.n_discrete):
             raise ValueError(
                 f"action_idx={a_idx} aralik disi; [0, {self.n_discrete}) bekleniyor")
-        if self._should_rebalance():
-            logits = self._discrete_to_logits(a_idx)
-        else:
-            logits = np.zeros(self.N, dtype=np.float32)
+        logits = self._discrete_to_logits(a_idx)
         return super().step(logits)
 
 ```
@@ -1528,16 +2638,20 @@ class AdaptiveRewardShaper:
         self.turnover_target = float(turnover_target)
         self.alpha = float(ema_alpha)
         self.enabled = bool(enabled)
+        self.vol_var_ewma = float(vol_target) ** 2
         self.vol_ewma = float(vol_target)
         self.turnover_ewma = float(turnover_target)
 
     def reset(self):
+        self.vol_var_ewma = self.vol_target ** 2
         self.vol_ewma = self.vol_target
         self.turnover_ewma = self.turnover_target
 
     def update_and_shape(self, port_r: float, delta_w_l1: float) -> Tuple[float, float, float, float, float]:
         a = self.alpha
-        self.vol_ewma      = (1 - a) * self.vol_ewma      + a * abs(float(port_r))
+        self.vol_var_ewma  = ((1 - a) * self.vol_var_ewma
+                              + a * float(port_r) * float(port_r))
+        self.vol_ewma      = float(np.sqrt(max(self.vol_var_ewma, 0.0)))
         self.turnover_ewma = (1 - a) * self.turnover_ewma + a * float(delta_w_l1)
 
         if not self.enabled:
@@ -1614,7 +2728,9 @@ class RewardEngine:
     def __init__(self, shaper: AdaptiveRewardShaper, dsharpe: DifferentialSharpe,
                  w_dsr: float, bankruptcy_nav: float, bankruptcy_penalty: float,
                  w_cvar: float = 0.0, cvar_alpha: float = 0.05,
-                 regime_beta: float = 1.0, cvar_amp: float = 1.0):
+                 regime_beta: float = 1.0, cvar_amp: float = 1.0,
+                 w_gain: float = 0.0, gain_floor: float = 1.0,
+                 w_gain_speed: float = 0.0, w_ruin_timing: float = 0.0):
         self.shaper = shaper
         self.dsharpe = dsharpe
         self.w_dsr = float(w_dsr)
@@ -1624,6 +2740,12 @@ class RewardEngine:
         self.w_cvar = float(w_cvar)
         self.regime_beta = float(regime_beta)
         self.cvar_amp = float(cvar_amp)
+        # v9: OPT-IN kazanc-carpani odulu + iflas-timing cezasi (default KAPALI ->
+        # golden bit-ayni). Yeni RNG cagrisi YOK; yalniz nav/step_frac/bankrupt kullanir.
+        self.w_gain = float(w_gain)                # kazanc-carpani agirligi (0 -> kapali)
+        self.gain_floor = float(gain_floor)        # esik nav; uzeri odullenir
+        self.w_gain_speed = float(w_gain_speed)    # erken-kazanc hiz faktoru (0 -> kapali)
+        self.w_ruin_timing = float(w_ruin_timing)  # erken-iflas cezasi olcegi (0 -> flat)
         # Parametrik (Gauss) ileri CVaR/ES carpani: ES_alpha = sigma * phi(z_alpha)/alpha.
         # vol_ewma'yi (mevcut makine) sigma proxy'si olarak yeniden kullanir (ileri-bakisli).
         z = float(norm.ppf(cvar_alpha))
@@ -1634,8 +2756,14 @@ class RewardEngine:
         self.dsharpe.reset()
 
     def compute(self, *, gross_port_r: float, delta_w_l1: float,
-                nav: float, peak: float, regime: float = 0.0) -> RewardOutcome:
-        """Aritmetik sirasi onceki PortfolioEnv.step() ile ayni; +CVaR terimi (V7)."""
+                nav: float, peak: float, regime: float = 0.0,
+                step_count: int = 0, max_steps: int = 1) -> RewardOutcome:
+        """Aritmetik sirasi onceki PortfolioEnv.step() ile ayni; +CVaR terimi (V7).
+
+        v9: step_count/max_steps yalniz OPT-IN kazanc-hizi ve iflas-timing
+        terimlerinde kullanilir; w_gain=w_gain_speed=w_ruin_timing=0 (default) iken
+        sonuca sifir katki -> golden bit-ayni, yeni RNG cagrisi yok.
+        """
         eta_t, lambda_t, tau_t, vol_ewma, to_ewma = \
             self.shaper.update_and_shape(gross_port_r, delta_w_l1)
 
@@ -1647,11 +2775,14 @@ class RewardEngine:
         # İflas eşiğinin altına düşerse clamp et; env episodu sonlandırır.
         nav = max(nav, 0.0)
         bankrupt = bool(nav < self.bankruptcy_nav)
-        bankruptcy_penalty = self.bankruptcy_penalty if bankrupt else 0.0
 
         peak = max(peak, nav)
         dd = (peak - nav) / max(peak, 1e-9)
-        log_r = float(np.log(max(1.0 + gross_port_r, 1e-6)))
+        # C7: log-getiri NET getiri uzerinden (port_r_net = gross - tx_cost). Boylece
+        # islem maliyeti odule TEK SEFER girer (hem NAV'da hem ayri -tx_cost teriminde
+        # cift sayilmasi giderildi). Log-zenginlik maksimizasyonuyla (Kelly/Moody-Saffell)
+        # tutarli: ajan gerceklesen net log-fayda gorur.
+        log_r = float(np.log(max(1.0 + port_r_net, 1e-6)))
         dd_penalty = lambda_t * max(0.0, dd - tau_t)
         dsr = self.dsharpe.update(port_r_net)
         dsr_term = self.w_dsr * dsr
@@ -1661,9 +2792,30 @@ class RewardEngine:
         rm = 1.0 + self.regime_beta * max(0.0, float(regime))   # kriz amplifikasyonu
         cvar_penalty = self.w_cvar * (rm ** self.cvar_amp) * cvar
 
-        total = (log_r - tx_cost - dd_penalty - bankruptcy_penalty
-                 + dsr_term - cvar_penalty)
+        # v9: episod ilerleme orani (0->1). max_steps>=1 garanti (env gecirir).
+        step_frac = float(step_count) / max(float(max_steps), 1e-9)
 
+        # v9 (OPT-IN, default KAPALI): kazanc-carpani odulu. nav esigin (gain_floor)
+        # uzerindeyse dogrusal odul; opsiyonel hiz faktoru erken kazanci kayirir
+        # (1 + w_gain_speed*(1-step_frac)). w_gain=0 -> 0 (golden bit-ayni).
+        gain_bonus = (self.w_gain * max(0.0, nav - self.gain_floor)
+                      * (1.0 + self.w_gain_speed * (1.0 - step_frac)))
+
+        # v9 (OPT-IN, default KAPALI): iflas-timing carpani. Erken iflas daha sert
+        # cezalandirilir: mult = 1 + w_ruin_timing*(1-step_frac). w_ruin_timing=0 ->
+        # mult=1.0 -> ham flat bankruptcy_penalty KORUNUR (golden bit-ayni).
+        ruin_timing_mult = 1.0 + self.w_ruin_timing * (1.0 - step_frac)
+        ruin_pen = (self.bankruptcy_penalty * ruin_timing_mult) if bankrupt else 0.0
+
+        # C7: -tx_cost AYRI terimi KALDIRILDI; islem maliyeti artik log_r icinde
+        # (log(1+port_r_net), port_r_net = gross - tx_cost). terms["tx_cost"] raporlamada
+        # KALIR ama total'e ayrica EKLENMEZ (cift-sayim giderildi).
+        total = (log_r - dd_penalty - ruin_pen
+                 + dsr_term - cvar_penalty + gain_bonus)
+
+        # NOT: terms["bankruptcy_penalty"] = ruin_pen (efektif ceza). w_ruin_timing=0
+        # iken ruin_pen == flat bankruptcy_penalty oldugundan mevcut anahtar anlami korunur.
+        # tx_cost terms'te raporlanmaya devam eder (panel/teshis) ama total'e girmez.
         terms = dict(
             log_return=log_r, tx_cost=tx_cost,
             drawdown_penalty=dd_penalty, total=total,
@@ -1672,7 +2824,8 @@ class RewardEngine:
             eta_t=eta_t, lambda_t=lambda_t, tau_t=tau_t,
             vol_ewma=vol_ewma, turnover_ewma=to_ewma,
             dd=dd, gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
-            bankruptcy_penalty=bankruptcy_penalty, bankrupt=bankrupt,
+            bankruptcy_penalty=ruin_pen, bankrupt=bankrupt,
+            gain_bonus=gain_bonus, ruin_timing_mult=ruin_timing_mult,   # v9 (additive)
         )
         return RewardOutcome(total=total, nav=nav, peak=peak,
                              port_r_net=port_r_net, terms=terms)
@@ -1802,13 +2955,14 @@ class ReplayBuffer:
     def __len__(self) -> int:
         return len(self.buffer)
 
-    def push(self, s, a, r, s2, d) -> None:
+    def push(self, s, a, r, s2, d, discount=1.0) -> None:
         self.buffer.append((
             np.asarray(s, dtype=np.float32),
             a,
             float(r),
             np.asarray(s2, dtype=np.float32),
             float(d),
+            float(discount),
         ))
 
     def sample(self, batch_size: int):
@@ -1825,7 +2979,8 @@ class ReplayBuffer:
         r  = np.array([b[2] for b in batch])
         s2 = np.stack([b[3] for b in batch])
         d  = np.array([b[4] for b in batch])
-        return s, a, r, s2, d
+        discount = np.array([b[5] for b in batch])
+        return s, a, r, s2, d, discount
 
 ```
 
@@ -1837,7 +2992,8 @@ class ReplayBuffer:
 """Deep Q-Network ajanı — PyTorch implementasyonu (ayrık aksiyonlu).
 
 Prompt spec'i:
-  - MLP: state_dim (393, v2) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+  - MLP: state_dim (397: 13×28 + 4 makro + 29 ağırlık) → FC(256, ReLU) → FC(128, ReLU) → 6 (Q-values)
+    (393 = makro-öncesi V5 tabanı; +4 makro [MacroConfig.enabled] = 397)
   - Replay buffer: 50_000, uniform örnekleme, batch = 64
   - Target network: her 500 adımda hard update (θ⁻ ← θ)
   - ε-greedy: 1.0 → 0.05, 10_000 adımda lineer decay
@@ -1896,12 +3052,13 @@ class DQNAgent(BaseAgent):
 
         self.buffer = ReplayBuffer(buffer_size)
         self.step_count = 0
+        self.env_step_count = 0
 
     def _sync_target(self):
         self.q_target.load_state_dict(self.q.state_dict())
 
     def eps(self) -> float:
-        frac = min(1.0, self.step_count / max(self.eps_decay, 1))
+        frac = min(1.0, self.env_step_count / max(self.eps_decay, 1))
         return self.eps_start + frac * (self.eps_end - self.eps_start)
 
     @torch.no_grad()
@@ -1919,22 +3076,27 @@ class DQNAgent(BaseAgent):
         """Eval: greedy secim (epsilon yok) — ayrik sablon indeksi."""
         return self.act(s, greedy=True)
 
-    def remember(self, s, a, r, s2, d):
-        self.buffer.push(s, int(a), r, s2, d)
+    def observe_step(self) -> None:
+        self.env_step_count += 1
+
+    def remember(self, s, a, r, s2, d, discount=None):
+        self.buffer.push(s, int(a), r, s2, d,
+                         self.gamma if discount is None else discount)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
-        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s, a, r, s2, d, discount = self.buffer.sample(self.batch_size)
         s  = torch.as_tensor(s,  dtype=torch.float32, device=self.device)
         a  = torch.as_tensor(a,  dtype=torch.int64,   device=self.device)
         r  = torch.as_tensor(r,  dtype=torch.float32, device=self.device)
         s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
         d  = torch.as_tensor(d,  dtype=torch.float32, device=self.device)
+        discount = torch.as_tensor(discount, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             q_next = self.q_target(s2).max(dim=1).values
-            td_target = r + (1.0 - d) * self.gamma * q_next
+            td_target = r + (1.0 - d) * discount * q_next
 
         q_pred_all = self.q(s)
         q_pred = q_pred_all.gather(1, a.unsqueeze(1)).squeeze(1)
@@ -1951,13 +3113,15 @@ class DQNAgent(BaseAgent):
         return float(loss.item())
 
     def save(self, path: str):
-        torch.save({"q": self.q.state_dict(), "step_count": self.step_count}, path)
+        torch.save({"q": self.q.state_dict(), "step_count": self.step_count,
+                    "env_step_count": self.env_step_count}, path)
 
     def load(self, path: str):
-        ckpt = torch.load(path, map_location=self.device)
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
         self.q.load_state_dict(ckpt["q"])
         self._sync_target()
         self.step_count = int(ckpt.get("step_count", 0))
+        self.env_step_count = int(ckpt.get("env_step_count", self.step_count))
 
 ```
 
@@ -2036,7 +3200,10 @@ class PPOAgent(BaseAgent):
         self.reset_rollout()
 
     def reset_rollout(self):
-        self.S, self.A, self.R, self.D, self.Vs, self.LP = [], [], [], [], [], []
+        self.S, self.A, self.R = [], [], []
+        self.Terminal, self.Boundary = [], []
+        self.Vs, self.NextVs, self.LP = [], [], []
+        self.Discounts, self.GaeDiscounts = [], []
 
     @torch.no_grad()
     def _policy_dist(self, s_t: torch.Tensor):
@@ -2056,25 +3223,38 @@ class PPOAgent(BaseAgent):
                 float(v.item()))
 
     def act_eval(self, s: np.ndarray) -> np.ndarray:
-        """Eval: politikadan ornek (mevcut eval davranisiyla birebir ayni — stokastik)."""
-        a, _, _ = self.act(s)
-        return a
+        """Eval: deterministik ortalama (mu) kullan — SAC/TD3/DQN ile tutarli.
 
-    def remember(self, s, a, r, done, v, logp):
+        Stokastik sample() yerine politika aginin mu ciktisini dogrudan dondurur;
+        boylece PPO backtest tekraranabilir ve tek-deterministik olur.
+        """
+        s_t = torch.as_tensor(s, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            mu, _ = self.policy(s_t)
+        return mu.cpu().numpy()[0].astype(np.float32)
+
+    def remember(self, s, a, r, done, v, logp, *, next_v=0.0,
+                 boundary=None, discount=None, period_length=1):
         self.S.append(np.asarray(s, dtype=np.float32))
         self.A.append(np.asarray(a, dtype=np.float32))
-        self.R.append(float(r)); self.D.append(float(done))
-        self.Vs.append(float(v)); self.LP.append(float(logp))
+        self.R.append(float(r))
+        self.Terminal.append(float(done))
+        self.Boundary.append(float(done if boundary is None else boundary))
+        self.Vs.append(float(v)); self.NextVs.append(float(next_v)); self.LP.append(float(logp))
+        sessions = max(1, int(period_length))
+        self.Discounts.append(float(self.gamma ** sessions if discount is None else discount))
+        self.GaeDiscounts.append(float((self.gamma * self.lam) ** sessions))
 
     def compute_gae(self, last_v: float):
         n = len(self.R)
         adv = np.zeros(n, dtype=np.float32)
         g = 0.0
         for i in reversed(range(n)):
-            next_v = last_v if i == n - 1 else self.Vs[i + 1]
-            mask = 1.0 - self.D[i]
-            delta = self.R[i] + self.gamma * next_v * mask - self.Vs[i]
-            g = delta + self.gamma * self.lam * mask * g
+            terminal_mask = 1.0 - self.Terminal[i]
+            carry_mask = 1.0 - self.Boundary[i]
+            delta = (self.R[i] + self.Discounts[i] * self.NextVs[i] * terminal_mask
+                     - self.Vs[i])
+            g = delta + self.GaeDiscounts[i] * carry_mask * g
             adv[i] = g
         ret = adv + np.array(self.Vs, dtype=np.float32)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
@@ -2248,23 +3428,25 @@ class SACAgent(BaseAgent):
         """Eval: tanh-deterministik aksiyon."""
         return self.act(s, deterministic=True)
 
-    def remember(self, s, a, r, s2, d):
-        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d)
+    def remember(self, s, a, r, s2, d, discount=None):
+        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d,
+                         self.gamma if discount is None else discount)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
-        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s, a, r, s2, d, discount = self.buffer.sample(self.batch_size)
         s  = torch.as_tensor(s,  dtype=torch.float32, device=self.device)
         a  = torch.as_tensor(a,  dtype=torch.float32, device=self.device)
         r  = torch.as_tensor(r,  dtype=torch.float32, device=self.device)
         s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
         d  = torch.as_tensor(d,  dtype=torch.float32, device=self.device)
+        discount = torch.as_tensor(discount, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             a2, logp2 = self.pi.sample(s2)
             q_min = torch.min(self.q1_t(s2, a2), self.q2_t(s2, a2))
-            target = r + (1.0 - d) * self.gamma * (q_min - self.alpha * logp2)
+            target = r + (1.0 - d) * discount * (q_min - self.alpha * logp2)
 
         for q, opt in [(self.q1, self.opt_q1), (self.q2, self.opt_q2)]:
             q_pred = q(s, a)
@@ -2284,6 +3466,246 @@ class SACAgent(BaseAgent):
 
         self._soft_update()
         return float(pi_loss.item())
+
+```
+
+---
+
+## `agents/td3.py`
+
+```python
+"""Twin Delayed DDPG (Fujimoto et al., 2018) — sürekli, deterministik politika.
+
+Derste işlendi (RL_12) ve hoca sürekli-eylem problemleri için **TD3'ü açıkça
+tavsiye etti**. DDPG üzerine üç hile: (1) twin critics + min-Q hedefi (overestimation
+azaltma), (2) gecikmeli politika güncellemesi, (3) hedef-politika yumuşatma.
+Env, ham aksiyon vektörünü softmax ile N+1 simpleksine projeler → aktörün tanh
+çıktı aralığı uygundur. agents.common (mlp, ReplayBuffer, seeding) yeniden kullanılır.
+
+Arayüz SAC ile birebir (act/act_eval/remember/train_step) → core.trainer'ın
+off-policy generator'ı (train_td3) aynı adım-bazlı döngüyü kullanır.
+"""
+from __future__ import annotations
+
+from typing import Tuple
+
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from .base import BaseAgent
+from .common import ReplayBuffer, get_device, mlp, set_seed
+
+
+class Actor(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden: Tuple[int, int] = (256, 128)):
+        super().__init__()
+        self.net = mlp([state_dim, hidden[0], hidden[1], action_dim], nn.ReLU)
+
+    def forward(self, s: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(self.net(s))
+
+
+class Critic(nn.Module):
+    def __init__(self, state_dim: int, action_dim: int, hidden: Tuple[int, int] = (256, 128)):
+        super().__init__()
+        self.net = mlp([state_dim + action_dim, hidden[0], hidden[1], 1], nn.ReLU)
+
+    def forward(self, s: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+        return self.net(torch.cat([s, a], dim=-1)).squeeze(-1)
+
+
+class TD3Agent(BaseAgent):
+    def __init__(self, state_dim: int, action_dim: int, hidden: Tuple[int, int] = (256, 128),
+                 lr_pi: float = 3e-4, lr_q: float = 3e-4, gamma: float = 0.99,
+                 tau: float = 0.005, policy_noise: float = 0.2, noise_clip: float = 0.5,
+                 policy_delay: int = 2, expl_noise: float = 0.1,
+                 buffer_size: int = 50_000, batch_size: int = 128,
+                 seed: int = 42, device: str | None = None):
+        set_seed(seed)
+        self.device = get_device(device)
+        self.state_dim = state_dim; self.action_dim = action_dim
+        self.gamma = float(gamma); self.tau = float(tau)
+        self.policy_noise = float(policy_noise); self.noise_clip = float(noise_clip)
+        self.policy_delay = int(policy_delay); self.expl_noise = float(expl_noise)
+        self.batch_size = int(batch_size)
+
+        self.actor = Actor(state_dim, action_dim, hidden).to(self.device)
+        self.actor_t = Actor(state_dim, action_dim, hidden).to(self.device)
+        self.q1 = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.q2 = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.q1_t = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.q2_t = Critic(state_dim, action_dim, hidden).to(self.device)
+        self.actor_t.load_state_dict(self.actor.state_dict())
+        self.q1_t.load_state_dict(self.q1.state_dict())
+        self.q2_t.load_state_dict(self.q2.state_dict())
+
+        self.opt_pi = torch.optim.Adam(self.actor.parameters(), lr=lr_pi, weight_decay=0.0)
+        self.opt_q1 = torch.optim.Adam(self.q1.parameters(), lr=lr_q, weight_decay=0.0)
+        self.opt_q2 = torch.optim.Adam(self.q2.parameters(), lr=lr_q, weight_decay=0.0)
+        self.buffer = ReplayBuffer(buffer_size)
+        self._it = 0
+
+    def _soft(self, src: nn.Module, dst: nn.Module):
+        with torch.no_grad():
+            for ps, pd in zip(src.parameters(), dst.parameters()):
+                pd.data.mul_(1 - self.tau).add_(self.tau * ps.data)
+
+    def act(self, s: np.ndarray, explore: bool = True) -> np.ndarray:
+        s_t = torch.as_tensor(s, dtype=torch.float32, device=self.device).unsqueeze(0)
+        with torch.no_grad():
+            a = self.actor(s_t).cpu().numpy()[0]
+        if explore:
+            a = a + np.random.normal(0, self.expl_noise, size=a.shape)
+        return a.astype(np.float32)
+
+    def act_eval(self, s: np.ndarray) -> np.ndarray:
+        """Eval: deterministik aktör (keşif gürültüsü yok)."""
+        return self.act(s, explore=False)
+
+    def remember(self, s, a, r, s2, d, discount=None):
+        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d,
+                         self.gamma if discount is None else discount)
+
+    def train_step(self) -> float | None:
+        if len(self.buffer) < self.batch_size:
+            return None
+        self._it += 1
+        s, a, r, s2, d, discount = self.buffer.sample(self.batch_size)
+        s = torch.as_tensor(s, dtype=torch.float32, device=self.device)
+        a = torch.as_tensor(a, dtype=torch.float32, device=self.device)
+        r = torch.as_tensor(r, dtype=torch.float32, device=self.device)
+        s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
+        d = torch.as_tensor(d, dtype=torch.float32, device=self.device)
+        discount = torch.as_tensor(discount, dtype=torch.float32, device=self.device)
+
+        with torch.no_grad():
+            noise = (torch.randn_like(a) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
+            a2 = (self.actor_t(s2) + noise).clamp(-1, 1)               # hedef-politika yumuşatma
+            q_min = torch.min(self.q1_t(s2, a2), self.q2_t(s2, a2))    # twin min-Q hedefi
+            target = r + (1 - d) * discount * q_min
+
+        for q, opt in [(self.q1, self.opt_q1), (self.q2, self.opt_q2)]:
+            loss = F.mse_loss(q(s, a), target)
+            opt.zero_grad(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(q.parameters(), 5.0); opt.step()
+
+        pi_loss_val = None
+        if self._it % self.policy_delay == 0:                          # gecikmeli politika güncelle
+            pi_loss = -self.q1(s, self.actor(s)).mean()
+            self.opt_pi.zero_grad(); pi_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 5.0); self.opt_pi.step()
+            self._soft(self.actor, self.actor_t)
+            self._soft(self.q1, self.q1_t); self._soft(self.q2, self.q2_t)
+            pi_loss_val = float(pi_loss.item())
+        return pi_loss_val
+
+```
+
+---
+
+## `core/contracts.py`
+
+```python
+"""Serializable contracts shared by training, evaluation, UI and persistence."""
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+import hashlib
+import json
+from typing import Any, Literal
+
+import numpy as np
+
+
+DataSource = Literal["real", "mixed", "synthetic", "unknown"]
+
+
+@dataclass(frozen=True)
+class DataProvenance:
+    source: DataSource = "unknown"
+    provider: str = ""
+    reason: str = ""
+    missing_tickers: tuple[str, ...] = ()
+    requested_start: str = ""
+    requested_end: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_value(cls, value: Any) -> "DataProvenance":
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            data = dict(value)
+            data["missing_tickers"] = tuple(data.get("missing_tickers", ()))
+            return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+        return cls()
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    algo: str
+    step_days: int = 1
+    adaptive: bool = True
+    reward_cfg: dict[str, Any] = field(default_factory=dict)
+    agent_hp: dict[str, Any] = field(default_factory=dict)
+    data_start: str = ""
+    data_split: str = ""
+    data_end: str = ""
+    seed: int = 42
+    feature_names: tuple[str, ...] = ()
+    provenance: DataProvenance = field(default_factory=DataProvenance)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["feature_names"] = list(self.feature_names)
+        return data
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "RunSpec":
+        data = dict(value)
+        data["feature_names"] = tuple(data.get("feature_names", ()))
+        data["provenance"] = DataProvenance.from_value(data.get("provenance"))
+        return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
+
+    @property
+    def fingerprint(self) -> str:
+        payload = json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass
+class BacktestResult:
+    nav: np.ndarray
+    rets: np.ndarray
+    dates: list[Any]
+    weights_before: np.ndarray
+    target_weights: np.ndarray
+    weights_after: np.ndarray
+    turnover: np.ndarray
+    reward_terms_history: list[dict]
+    period_lengths: np.ndarray
+    discounts: np.ndarray
+    provenance: DataProvenance = field(default_factory=DataProvenance)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "nav": self.nav,
+            "rets": self.rets,
+            "dates": self.dates,
+            "weights": self.weights_after,
+            "weights_before": self.weights_before,
+            "target_weights": self.target_weights,
+            "weights_after": self.weights_after,
+            "turnover": self.turnover,
+            "reward_terms_history": self.reward_terms_history,
+            "period_lengths": self.period_lengths,
+            "discounts": self.discounts,
+            "provenance": self.provenance.to_dict(),
+        }
 
 ```
 
@@ -2348,7 +3770,7 @@ from typing import Callable, Dict
 import pandas as pd
 
 from agents import DQNAgent, PPOAgent, SACAgent, TD3Agent
-from config import SEED, DQNConfig, EnvConfig, PPOConfig, SACConfig, TD3Config
+from config import DEFAULTS, SEED, DQNConfig, EnvConfig, PPOConfig, RewardConfig, SACConfig, TD3Config
 from core.features import select_features
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 
@@ -2358,9 +3780,14 @@ def _build_dqn(state_dim: int, action_dim: int, hp: dict, seed: int) -> DQNAgent
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", DQNConfig.hidden)),
         lr=hp.get("lr", DQNConfig.lr),
+        gamma=hp.get("gamma", DQNConfig.gamma),
+        eps_start=hp.get("eps_start", DQNConfig.eps_start),
+        eps_end=hp.get("eps_end", DQNConfig.eps_end),
         eps_decay=hp.get("eps_decay", DQNConfig.eps_decay),
+        buffer_size=hp.get("buffer_size", DQNConfig.buffer_size),
         batch_size=hp.get("batch_size", DQNConfig.batch_size),
         target_update=hp.get("target_update", DQNConfig.target_update),
+        huber_delta=hp.get("huber_delta", DQNConfig.huber_delta),
         seed=seed,
     )
 
@@ -2369,10 +3796,13 @@ def _build_ppo(state_dim: int, action_dim: int, hp: dict, seed: int) -> PPOAgent
     return PPOAgent(
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", PPOConfig.hidden)),
+        gamma=hp.get("gamma", PPOConfig.gamma),
+        lam=hp.get("lam", PPOConfig.lam),
         lr_p=hp.get("lr_p", PPOConfig.lr_p), lr_v=hp.get("lr_v", PPOConfig.lr_v),
         clip=hp.get("clip", PPOConfig.clip), ent_coef=hp.get("ent_coef", PPOConfig.ent_coef),
         batch_size=hp.get("batch_size", PPOConfig.batch_size),
         n_epochs=hp.get("n_epochs", PPOConfig.n_epochs),
+        log_std_init=hp.get("log_std_init", PPOConfig.log_std_init),
         seed=seed,
     )
 
@@ -2381,8 +3811,10 @@ def _build_sac(state_dim: int, action_dim: int, hp: dict, seed: int) -> SACAgent
     return SACAgent(
         state_dim, action_dim,
         hidden=tuple(hp.get("hidden", SACConfig.hidden)),
+        gamma=hp.get("gamma", SACConfig.gamma),
         lr_pi=hp.get("lr_pi", SACConfig.lr_pi), lr_q=hp.get("lr_q", SACConfig.lr_q),
         alpha=hp.get("alpha", SACConfig.alpha), tau=hp.get("tau", SACConfig.tau),
+        buffer_size=hp.get("buffer_size", SACConfig.buffer_size),
         batch_size=hp.get("batch_size", SACConfig.batch_size), seed=seed,
     )
 
@@ -2397,6 +3829,7 @@ def _build_td3(state_dim: int, action_dim: int, hp: dict, seed: int) -> TD3Agent
         noise_clip=hp.get("noise_clip", TD3Config.noise_clip),
         policy_delay=hp.get("policy_delay", TD3Config.policy_delay),
         expl_noise=hp.get("expl_noise", TD3Config.expl_noise),
+        buffer_size=hp.get("buffer_size", TD3Config.buffer_size),
         batch_size=hp.get("batch_size", TD3Config.batch_size), seed=seed,
     )
 
@@ -2424,14 +3857,31 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               horizon: str = "medium", adaptive: bool = True,
               max_steps: int, random_start: bool = False, seed: int = SEED,
               reward_overrides: dict | None = None,
+              price_noise_std: float | None = None,
+              force_price_noise: bool = False,
+              cash_daily_rate: float | None = None,
+              episode_clean: bool = False,
+              episode_data_fn=None,
+              rebalance_freq: int | None = None,
+              gamma: float | None = None,
+              mom_window: int | None = None,
+              minvol_window: int | None = None,
+              step_days: int = DEFAULTS.step_days,
+              start_index: int | None = None,
               macro=None, regime=None) -> PortfolioEnv:
     """Tek ortam kurulum noktasi: discrete<->continuous secimi + feature secimi.
 
     reward_overrides (UI'nin reward_cfg'i): None/eksik anahtarlar env'in preset
     default'larina duser — onceki app._make_env mapping'i ile birebir ayni.
+
+    cash_daily_rate: None -> env ctor kendi config'inden turetir (EnvConfig.cash_daily_rate).
+    UI/CLI parametrik gunluk nakit faiz oranini dogrudan gecebilir.
     """
     cfg = reward_overrides or {}
     cls = DiscretePortfolioEnv if algo == "DQN" else PortfolioEnv
+    # cash_daily_rate: None gecilirse env ctor config default'a duser (EnvConfig.cash_daily_rate).
+    # Parametrik gecilirse (UI/CLI) env ctor None olmayan degeri kullanir.
+    extra_cash = {} if cash_daily_rate is None else {"cash_daily_rate": float(cash_daily_rate)}
     return cls(
         prices, select_features(feats, algo),
         horizon=horizon, adaptive=adaptive, max_steps=max_steps,
@@ -2444,7 +3894,29 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         ema_alpha=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
         bankruptcy_nav=cfg.get("bankruptcy_nav"),
         bankruptcy_penalty=cfg.get("bankruptcy_penalty"),
+        price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
+        force_price_noise=bool(force_price_noise),   # gurultu-artirimli coklu-episode (eval'de gurultu); default kapali
+        episode_clean=bool(episode_clean),   # OPT-IN: UI training True (1. iter orijinal); CLI/golden False
+        episode_data_fn=episode_data_fn,     # OPT-IN: per-episode veri swap (anti-ezber); None -> CLI/golden BIT-AYNI
+        rebalance_freq=rebalance_freq,        # OPT-IN: None -> preset (CLI/golden); UI override eder
+        gamma=gamma, mom_window=mom_window, minvol_window=minvol_window,  # v12: acik override (None->preset)
+        step_days=step_days,
+        start_index=start_index,
+        # Mevcut 6 odul param'i parametrik akisa acilir — eksik/None anahtar config
+        # default'una duser (golden-guvenli; eta_base/bankruptcy_penalty deseni ile ayni).
+        w_dsr=float(cfg.get("w_dsr", RewardConfig.w_dsr)),
+        dsr_eta=float(cfg.get("dsr_eta", RewardConfig.dsr_eta)),
+        w_cvar=cfg.get("w_cvar"),   # None -> env'de config default*cvar_factor (golden-guvenli)
+        cvar_alpha=float(cfg.get("cvar_alpha", RewardConfig.cvar_alpha)),
+        regime_beta=float(cfg.get("regime_beta", RewardConfig.regime_beta)),
+        cvar_amp=float(cfg.get("cvar_amp", RewardConfig.cvar_amp)),
+        # v9: OPT-IN kazanc-carpani + iflas-timing (default 0/kapali -> golden bit-ayni)
+        w_gain=float(cfg.get("w_gain", 0.0)),
+        gain_floor=float(cfg.get("gain_floor", 1.0)),
+        w_gain_speed=float(cfg.get("w_gain_speed", 0.0)),
+        w_ruin_timing=float(cfg.get("w_ruin_timing", 0.0)),
         macro=macro, regime=regime,   # v6: makro rejim blogu + ham regime (V7)
+        **extra_cash,
     )
 
 ```
@@ -2497,8 +3969,9 @@ def train_dqn(agent, env, n_episodes: Optional[int] = None,
         while not (done or trunc):
             a = agent.act(s)
             actions.append(int(a))
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, s2, float(done))
+            s2, r, done, trunc, info = env.step(a)
+            agent.remember(s, a, r, s2, float(done), discount=info["discount"])
+            agent.observe_step()
             loss = agent.train_step()
             if loss is not None:
                 losses.append(loss)
@@ -2531,8 +4004,15 @@ def train_ppo(agent, env, n_updates: Optional[int] = None,
         rollout_reward = 0.0
         for _ in range(rollout_len):
             a, lp, v = agent.act(s)
-            s2, r, done, trunc, _ = env.step(a)
-            agent.remember(s, a, r, done or trunc, v, lp)
+            s2, r, done, trunc, info = env.step(a)
+            with torch.no_grad():
+                next_v = float(agent.value(
+                    torch.as_tensor(s2, dtype=torch.float32,
+                                    device=agent.device).unsqueeze(0)
+                ).item())
+            agent.remember(s, a, r, done, v, lp, next_v=next_v,
+                           boundary=(done or trunc), discount=info["discount"],
+                           period_length=info["period_length"])
             rollout_reward += r
             s = s2
             if done or trunc:
@@ -2569,8 +4049,8 @@ def _offpolicy_step(agent, env, s, step: int, warmup: int, train_every: int):
         a = np.random.randn(env.action_dim).astype(np.float32) * 0.5
     else:
         a = agent.act(s)
-    s2, r, done, trunc, _ = env.step(a)
-    agent.remember(s, a, r, s2, float(done))
+    s2, r, done, trunc, info = env.step(a)
+    agent.remember(s, a, r, s2, float(done), discount=info["discount"])
     loss = None
     if len(agent.buffer) > warmup and step % train_every == 0:
         loss = agent.train_step()
@@ -2681,6 +4161,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from core.contracts import BacktestResult
+
 
 def evaluate(agent, env) -> dict:
     """Egitilmis ajani env uzerinde bir kez kosturur; backtest cikti dict'i dondurur.
@@ -2693,13 +4175,23 @@ def evaluate(agent, env) -> dict:
     while not (done or trunc):
         a = agent.act_eval(s)
         s, r, done, trunc, _ = env.step(a)
-    nav = np.array(env.nav_history[1:])
-    rets = np.array(env.ret_history)
-    W = np.array(env.weight_history[1:])
-    offset = env.window
-    dates = list(env.dates[offset: offset + len(nav)])
-    return dict(nav=nav, rets=rets, weights=W, dates=dates,
-                reward_terms_history=env.reward_terms_history)
+    nav = np.array(env.nav_history)
+    rets = np.concatenate([[0.0], np.array(env.ret_history)])
+    initial_w = np.asarray(env.weight_history[0])
+    result = BacktestResult(
+        nav=nav,
+        rets=rets,
+        dates=[env.episode_start_date] + list(env.date_history),
+        weights_before=np.vstack([initial_w, np.asarray(env.weights_before_history)]),
+        target_weights=np.vstack([initial_w, np.asarray(env.target_weight_history)]),
+        weights_after=np.asarray(env.weight_history),
+        turnover=np.concatenate([[0.0], np.asarray(env.turnover_history, dtype=float)]),
+        reward_terms_history=env.reward_terms_history,
+        period_lengths=np.concatenate([[0], np.asarray(env.period_length_history, dtype=np.int32)]),
+        discounts=np.concatenate([[1.0], np.asarray(env.discount_history, dtype=float)]),
+        provenance=env.provenance,
+    )
+    return result.to_dict()
 
 ```
 
@@ -2723,15 +4215,17 @@ ile cagrilmali (main.py boyle yapar).
 from __future__ import annotations
 
 from collections import deque
+from math import ceil
 
 import numpy as np
 
-from config import HORIZON_PRESETS
+from config import DEFAULTS
 from core.rollout import evaluate
 from core.trainer import train as train_loop
 from env.portfolio_env import DiscretePortfolioEnv, PortfolioEnv
 from utils.features import TrainScaler
 from utils.metrics import summary
+from utils.macro import MacroScaler
 
 
 def _slice(feats_raw, idx):
@@ -2741,11 +4235,18 @@ def _slice(feats_raw, idx):
 def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
                  n_folds: int = 3, val_frac: float = 0.2, purge: int = 5,
                  n_iters: int = 10, rollout_len: int = 400, seed: int = 42,
-                 horizon: str = "short", adaptive: bool = True) -> dict:
+                 step_days: int = DEFAULTS.step_days, adaptive: bool = True,
+                 macro=None, regime=None) -> dict:
     """Genisleyen-pencere walk-forward.
 
     agent_factory(state_dim, action_dim, seed) -> ajan. Doner:
     {"folds": [metrik dict...], "mean": {...}, "std": {...}}.
+
+    macro: (T, F_macro) numpy dizisi (tam veri uzunlugu, fold icinde dilimlenir).
+           None -> makrosuz ortam (V5 davranisi).
+    regime: (T,) numpy dizisi (tam veri uzunlugu, fold icinde dilimlenir).
+            None -> rejim amplifikasyonu kapali.
+    NOT: forecast feature WF'de DAHIL EDILMEZ (sızıntı-güvenli mevcut karar KORUNUR).
     """
     T = len(prices)
     val_len = max(1, int(T * val_frac / n_folds))
@@ -2755,14 +4256,17 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
     # sabit-baslangica duser (bkz. PortfolioEnv._reset_state) ve fold tek-pencereye dejenere
     # olur. Bu yuzden fold-atlama esigini sabit 80 yerine env'in episode-pencere gereksinimine
     # baglariz (lo, env ile ayni: max(window=20, minvol_window, 21)).
-    train_max_steps = 252
-    lo = max(20, HORIZON_PRESETS[horizon]["minvol_window"], 21)
-    min_train = lo + train_max_steps + 8       # +8: dejenere olmayan baslangic cesitliligi
+    step_days = int(step_days)
+    if step_days < 1:
+        raise ValueError("step_days en az 1 olmali")
+    purge_steps = ceil(purge / step_days)
+    lo = max(ceil(20 / step_days), ceil(DEFAULTS.minvol_window / step_days), 21)
+    min_train = lo + 2
     fold_metrics = []
     for i in range(n_folds):
         val_end = T - (n_folds - 1 - i) * val_len
         val_start = val_end - val_len
-        tr_end = val_start - purge
+        tr_end = val_start - purge_steps
         if tr_end < min_train:                 # random_start icin yeterli/cesitli train yok -> atla
             continue
         tr_idx = prices.index[:tr_end]
@@ -2770,20 +4274,50 @@ def walk_forward(prices, feats_raw, agent_factory, *, discrete: bool = False,
 
         sc = TrainScaler().fit(_slice(feats_raw, tr_idx))     # fold-yerel (sizintisiz)
         f_tr = sc.transform(_slice(feats_raw, tr_idx))
-        f_va = sc.transform(_slice(feats_raw, va_idx))
+        context = min(val_start, lo + 1)
+        ctx_start = val_start - context
+        va_context_idx = prices.index[ctx_start:val_end]
+        f_va = sc.transform(_slice(feats_raw, va_context_idx))
 
-        tr_env = env_cls(prices.loc[tr_idx], f_tr, horizon=horizon, adaptive=adaptive,
-                         max_steps=train_max_steps, random_start=True, seed=seed)
+        # T6 (C6): macro/regime fold dilimleri (None gecilirse None kalir -> makrosuz).
+        if macro is not None and hasattr(macro, "iloc"):
+            raw_tr = macro.iloc[:tr_end]
+            raw_va = macro.iloc[ctx_start:val_end]
+            macro_scaler = MacroScaler().fit(raw_tr)
+            macro_tr = macro_scaler.transform(raw_tr).to_numpy(np.float32)
+            macro_va = macro_scaler.transform(raw_va).to_numpy(np.float32)
+        else:
+            # Legacy callers may provide already-scaled arrays. New callers pass
+            # raw DataFrames so each fold owns its scaler fit.
+            macro_tr = macro[:tr_end] if macro is not None else None
+            macro_va = macro[ctx_start:val_end] if macro is not None else None
+        regime_tr = regime[:tr_end] if regime is not None else None
+        regime_va = regime[ctx_start:val_end] if regime is not None else None
+
+        tr_env = env_cls(
+            prices.loc[tr_idx], f_tr, adaptive=adaptive,
+            max_steps=len(tr_idx), random_start=False, seed=seed,
+            macro=macro_tr, regime=regime_tr, rebalance_freq=1,
+            step_days=step_days, gamma=DEFAULTS.gamma,
+            mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+        )
         action_dim = tr_env.n_discrete if discrete else tr_env.action_dim
         agent = agent_factory(tr_env.state_dim, action_dim, seed)
         # generator'i sonuna kadar tuket (egitim yan-etkili; ciktiya gerek yok)
         deque(train_loop(agent, tr_env, n_iters=n_iters, rollout_len=rollout_len), maxlen=0)
 
-        va_env = env_cls(prices.loc[va_idx], f_va, horizon=horizon, adaptive=adaptive,
-                         max_steps=10_000, random_start=False, seed=seed)
+        va_env = env_cls(
+            prices.loc[va_context_idx], f_va, adaptive=adaptive,
+            max_steps=len(va_idx) + 10, random_start=False, seed=seed,
+            macro=macro_va, regime=regime_va, rebalance_freq=1,
+            step_days=step_days, gamma=DEFAULTS.gamma,
+            mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+            start_index=context,
+        )
         bt = evaluate(agent, va_env)
         if len(bt["nav"]) > 0:
-            fold_metrics.append(summary(bt["nav"], bt["rets"], bt["weights"]))
+            fold_metrics.append(summary(bt["nav"], bt["rets"], bt["weights"], dates=bt["dates"],
+                                        turnover_values=bt.get("turnover")))
 
     keys = list(fold_metrics[0].keys()) if fold_metrics else []
     mean = {k: float(np.mean([m[k] for m in fold_metrics])) for k in keys}
@@ -2809,19 +4343,127 @@ gerekmez. Yukleme core.factory.build_agent ile ayni mimaride iskelet kurup
 state_dict'leri ad'a gore geri yukler (cikarim icin ag agirliklari yeterli —
 optimizer/replay buffer kaydedilmez).
 
+N11: Dosya adi semasindan algo_{horizon}_{adaptive}.pt — ayni algoritmay
+farkli vade/adaptive ile kaydedince birbirinin uzerine yazmaz.
+
+Isimli kayit (UI-only): named_model_path(name) -> models/{guvenli_isim}.pt
+Meta'da name + saved_at (ISO, saniye hassasiyeti) tutulur; geriye-uyumlu.
+
 DAVRANIS: golden-irrelevant. Yalniz kalicilik; egitim/odul/eval sayisal yoluna
 dokunmaz.
 """
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from pathlib import Path
 
 import torch
 import torch.nn as nn
 
+from core.contracts import RunSpec
 from core.factory import build_agent
 
-FORMAT = 1
+FORMAT = 2
+
+# Tum kaydedilmis modellerin bulundugu dizin (proje koku / models/).
+MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+# Kullanici tarafindan kaydedilen odul preset JSON dosyalari.
+REWARD_PRESETS_DIR = Path(__file__).resolve().parent.parent / "reward_presets"
+
+
+def reward_preset_path(name: str) -> Path:
+    """Odul preset dosya yolu: reward_presets/{guvenli_isim}.json
+
+    Sanitize: harf/rakam/_/- disini _ ile degistir; bos ise 'preset' kullanilir.
+    """
+    safe = re.sub(r"[^\w\-]", "_", name.strip()) or "preset"
+    return REWARD_PRESETS_DIR / f"{safe}.json"
+
+
+def save_reward_preset(reward_cfg: dict, name: str, description: str = "") -> str:
+    """Odul preset'ini JSON'a yazar; yolu doner.
+
+    Format: {name, description, saved_at, format:1, reward_cfg}.
+    REWARD_PRESETS_DIR otomatik olusturulur.
+    """
+    import json
+    path = reward_preset_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "name": name,
+        "description": description,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "format": 1,
+        "reward_cfg": dict(reward_cfg),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def load_reward_preset(name: str) -> "dict | None":
+    """Odul preset'ini yukler; reward_cfg dict doner (yoksa None)."""
+    import json
+    path = reward_preset_path(name)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return dict(data.get("reward_cfg", {}))
+    except Exception:
+        return None
+
+
+def list_reward_presets() -> "list[dict]":
+    """Tum kayitli odul preset'lerini listeler; saved_at'e gore yeni->eski sirali.
+
+    Her eleman: {path, name, description, saved_at, reward_cfg}.
+    Bozuk JSON dosyalari sessizce atlanir.
+    """
+    import json
+    results = []
+    if not REWARD_PRESETS_DIR.exists():
+        return results
+    for fpath in REWARD_PRESETS_DIR.glob("*.json"):
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            results.append({
+                "path": str(fpath),
+                "name": data.get("name", fpath.stem),
+                "description": data.get("description", ""),
+                "saved_at": data.get("saved_at", ""),
+                "reward_cfg": dict(data.get("reward_cfg", {})),
+            })
+        except Exception:
+            continue
+    results.sort(key=lambda x: x["saved_at"], reverse=True)
+    return results
+
+
+def model_path(algo: str, horizon: str | int = "medium", adaptive: bool = True) -> Path:
+    """N11: algo_{horizon}_{adaptive}.pt — vade+adaptive farklilastirir.
+
+    Ornek: model_path("DQN", "short", False) -> models/DQN_short_False.pt
+    Eski tek-dosya yolunun yerine gecer; farkli vade/adaptive birbirini ezmez.
+    CLI/golden bu fonksiyonu kullanir — degistirilmez.
+    """
+    suffix = f"{adaptive}".lower()
+    slot = f"step{horizon}" if isinstance(horizon, int) else str(horizon)
+    return MODELS_DIR / f"{algo}_{slot}_{suffix}.pt"
+
+
+def named_model_path(name: str, saved_at: str = "") -> Path:
+    """Kullanici-verilen isimle kayit yolu: models/{guvenli_isim}.pt
+
+    Sanitize: harf/rakam/_/- disini _ ile degistir; bos ise 'model_{saved_at}'.
+    saved_at yalnizca fallback icin kullanilir (isim bossa).
+    """
+    safe = re.sub(r"[^\w\-]", "_", name.strip()) if name.strip() else ""
+    if not safe:
+        ts = re.sub(r"[^\w\-]", "_", saved_at) if saved_at else "model"
+        safe = f"model_{ts}"
+    return MODELS_DIR / f"{safe}.pt"
 
 
 def _action_dim(agent) -> int:
@@ -2838,11 +4480,43 @@ def _modules(agent) -> dict:
             for name, m in vars(agent).items() if isinstance(m, nn.Module)}
 
 
+def _hidden_from_modules(algo: str, modules: dict) -> tuple[int, int] | None:
+    module_name = {"DQN": "q", "PPO": "policy", "SAC": "pi", "TD3": "actor"}.get(algo)
+    state = modules.get(module_name, {})
+    weights = [v for k, v in state.items() if k.endswith("weight") and getattr(v, "ndim", 0) == 2]
+    if len(weights) < 2:
+        return None
+    return int(weights[0].shape[0]), int(weights[1].shape[0])
+
+
+def _agent_config(agent, algo: str, modules: dict) -> dict:
+    hidden = _hidden_from_modules(algo, modules)
+    cfg = {"hidden": list(hidden)} if hidden else {}
+    for key in ("gamma", "batch_size", "eps_decay", "target_update", "lam", "clip",
+                "ent_coef", "n_epochs", "alpha", "tau", "policy_noise", "noise_clip",
+                "policy_delay", "expl_noise"):
+        if hasattr(agent, key):
+            value = getattr(agent, key)
+            if isinstance(value, (str, int, float, bool)):
+                cfg[key] = value
+    return cfg
+
+
 def save_agent(agent, algo: str, path, *, horizon: str = "medium",
-               adaptive: bool = True) -> str:
-    """Ajanin ag agirliklarini + meta'yi `path`'e yazar; yolu doner."""
+               adaptive: bool = True, name: str = "",
+               saved_at: str | None = None, run_spec: RunSpec | dict | None = None) -> str:
+    """Ajanin ag agirliklarini + meta'yi `path`'e yazar; yolu doner.
+
+    name: kullanici-verilen model adi (bos olabilir — meta'da saklanir).
+    saved_at: ISO datetime str (sn hassasiyeti); None ise simdi hesaplanir.
+    """
+    if saved_at is None:
+        saved_at = datetime.now().isoformat(timespec="seconds")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    modules = _modules(agent)
+    spec_dict = (run_spec.to_dict() if isinstance(run_spec, RunSpec)
+                 else dict(run_spec or {}))
     torch.save({
         "format": FORMAT,
         "algo": algo,
@@ -2850,29 +4524,70 @@ def save_agent(agent, algo: str, path, *, horizon: str = "medium",
         "adaptive": bool(adaptive),
         "state_dim": int(agent.state_dim),
         "action_dim": _action_dim(agent),
-        "modules": _modules(agent),
+        "name": name,
+        "saved_at": saved_at,
+        "modules": modules,
+        "agent_config": _agent_config(agent, algo, modules),
+        "run_spec": spec_dict,
     }, path)
     return str(path)
 
 
 def load_agent(path):
-    """Kaydedilmis ajani yukler. (agent, meta) doner; meta: algo/horizon/adaptive.
+    """Kaydedilmis ajani yukler. (agent, meta) doner; meta: algo/horizon/adaptive/name/saved_at.
 
     build_agent ile ayni mimaride iskelet kurulur (config default hidden=(256,128)
     egitimdekiyle ayni), sonra state_dict'ler ad'a gore yuklenir.
+    Eski modellerde name/saved_at yoksa bos string doner (geriye-uyumlu, KeyError yok).
     """
     # weights_only=True (guvenli unpickler): checkpoint yalniz metadata (str/int/bool)
     # + tensor state_dict'leri icerir; rastgele kod calistirma riski yok (SonarCloud S5042).
     ckpt = torch.load(Path(path), map_location="cpu", weights_only=True)
-    agent = build_agent(ckpt["algo"], int(ckpt["state_dim"]), int(ckpt["action_dim"]))
+    agent_cfg = dict(ckpt.get("agent_config", {}))
+    if "hidden" not in agent_cfg:
+        hidden = _hidden_from_modules(ckpt["algo"], ckpt["modules"])
+        if hidden:
+            agent_cfg["hidden"] = hidden
+    agent = build_agent(ckpt["algo"], int(ckpt["state_dim"]), int(ckpt["action_dim"]), agent_cfg)
     for name, sd in ckpt["modules"].items():
         module = getattr(agent, name, None)
         if isinstance(module, nn.Module):
             module.load_state_dict(sd)
-    meta = {"algo": ckpt["algo"],
-            "horizon": ckpt.get("horizon", "medium"),
-            "adaptive": bool(ckpt.get("adaptive", True))}
+    meta = {
+        "algo": ckpt["algo"],
+        "horizon": ckpt.get("horizon", "medium"),
+        "adaptive": bool(ckpt.get("adaptive", True)),
+        "name": ckpt.get("name", ""),
+        "saved_at": ckpt.get("saved_at", ""),
+        "format": int(ckpt.get("format", 1)),
+        "legacy": int(ckpt.get("format", 1)) < FORMAT,
+        "agent_config": agent_cfg,
+        "run_spec": ckpt.get("run_spec", {}),
+    }
     return agent, meta
+
+
+def read_meta(path) -> dict:
+    """Ajani KURMADAN yalniz meta'yi okur (liste goruntuleme icin hizli yol).
+
+    torch.load ile checkpoint yuklenir; 'modules' (buyuk tensor'lar) goz ardi edilir.
+    Eski/meta'siz dosyada guvenli default doner — KeyError/exception yok.
+    """
+    try:
+        ckpt = torch.load(Path(path), map_location="cpu", weights_only=True)
+        return {
+            "algo": ckpt.get("algo", ""),
+            "horizon": ckpt.get("horizon", "medium"),
+            "adaptive": bool(ckpt.get("adaptive", True)),
+            "name": ckpt.get("name", ""),
+            "saved_at": ckpt.get("saved_at", ""),
+            "format": int(ckpt.get("format", 1)),
+            "legacy": int(ckpt.get("format", 1)) < FORMAT,
+            "run_spec": ckpt.get("run_spec", {}),
+        }
+    except Exception:
+        return {"algo": "", "horizon": "medium", "adaptive": True, "name": "", "saved_at": "",
+                "format": 0, "legacy": True, "run_spec": {}}
 
 ```
 
@@ -2881,7 +4596,7 @@ def load_agent(path):
 ## `train.py`
 
 ```python
-"""Main training + backtest driver — yeni paket yapısı + horizon + adaptive reward.
+"""Main training + backtest driver — step_days + adaptive reward.
 
 Trains DQN (discrete, 6 templates), PPO (continuous), SAC (continuous) ve TD3
 (continuous, hocanin tavsiyesi) on BIST 28 — 2015-2021 train, 2022-2024 test
@@ -2893,20 +4608,24 @@ from __future__ import annotations
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import json
 from pathlib import Path
+from math import ceil
 import numpy as np
 import pandas as pd
 
-from data import download_bist, train_test_split, download_macro, align_macro
+from data import (download_bist, train_test_split, download_macro, align_macro,
+                  resample_to_step_days)
 from utils.features import add_features, TrainScaler
 from utils.macro import add_macro_features, MacroScaler
 from utils.metrics import summary, training_diagnostics
 from utils.baselines import equal_weight, mean_variance, buy_and_hold_index
-from config import SEED, TrainConfig, EnvConfig, ForecastConfig, MacroConfig, TD3Config  # noqa: F401
+from config import DEFAULTS, SEED, TrainConfig, EnvConfig, ForecastConfig, MacroConfig, TD3Config  # noqa: F401
+from core.contracts import DataProvenance, RunSpec
 from core.factory import build_agent, build_env
 from core.features import select_features
-from core.persistence import save_agent
+from core.persistence import save_agent, model_path
 from core.rollout import evaluate as rollout_evaluate
 from core.trainer import train as train_loop
 
@@ -2932,22 +4651,30 @@ class DataBundle:
     macro_te: "np.ndarray | None" = None
     regime_tr: "np.ndarray | None" = None
     regime_te: "np.ndarray | None" = None
+    step_days: int = DEFAULTS.step_days
+    provenance: DataProvenance = DataProvenance()
 
 
-def prepare_data() -> DataBundle:
+def prepare_data(step_days: int = DEFAULTS.step_days) -> DataBundle:
     """BIST verisini yukler, train/test ayirir, train-only z-score uygular;
     DataBundle dondurur (onceki surum modul globallerini dolduruyordu)."""
-    px = download_bist()
-    feats_all_raw = add_features(px)
-    px_tr, px_te = train_test_split(px)
+    px_daily = download_bist()
+    feats_all_raw = add_features(px_daily)
+    px_tr_daily, px_te_daily = train_test_split(px_daily)
     if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
         from forecast.forecaster import build_forecast_feature
         feats_all_raw["forecast"] = build_forecast_feature(
-            px, px_tr, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
+            px_daily, px_tr_daily, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
             hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
             lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
-    feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
-    feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
+    px_tr = resample_to_step_days(px_tr_daily, step_days)
+    px_te = resample_to_step_days(px_te_daily, step_days)
+    px = pd.concat([px_tr, px_te])
+    px.attrs.update(px_daily.attrs)
+    feats_tr_raw = {k: resample_to_step_days(v.loc[px_tr_daily.index], step_days)
+                    for k, v in feats_all_raw.items()}
+    feats_te_raw = {k: resample_to_step_days(v.loc[px_te_daily.index], step_days)
+                    for k, v in feats_all_raw.items()}
     scaler = TrainScaler().fit(feats_tr_raw)
     feats_tr = scaler.transform(feats_tr_raw)
     feats_te = scaler.transform(feats_te_raw)
@@ -2956,21 +4683,26 @@ def prepare_data() -> DataBundle:
     # v6: makro rejim (faiz/dolar/altin) — train-only z-score (leak-safe), ham regime ayri.
     macro_tr = macro_te = regime_tr = regime_te = None
     if MacroConfig.enabled:
-        mraw = align_macro(download_macro(), px.index)
+        mraw = align_macro(download_macro(), px_daily.index)
         mfeat = add_macro_features(mraw)                       # (T,4) ham
         regime_full = mfeat["regime"]                          # ham ∈[-1,1] -> V7 amplify
-        msc = MacroScaler().fit(mfeat.loc[px_tr.index])        # YALNIZ train (sizintisiz)
-        macro_z = msc.transform(mfeat)                         # (T,4) z-skorlu -> state
-        macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
-        macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
-        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
-        regime_te = regime_full.loc[px_te.index].to_numpy(np.float32)
-        print(f"Makro: {macro_z.shape[1]} oznitelik (regime/slope/usd_try/gold_tl)")
+        mtr = resample_to_step_days(mfeat.loc[px_tr_daily.index], step_days)
+        mte = resample_to_step_days(mfeat.loc[px_te_daily.index], step_days)
+        msc = MacroScaler().fit(mtr)
+        macro_tr = msc.transform(mtr).to_numpy(np.float32)
+        macro_te = msc.transform(mte).to_numpy(np.float32)
+        regime_tr = resample_to_step_days(
+            regime_full.loc[px_tr_daily.index].to_frame(), step_days).iloc[:, 0].to_numpy(np.float32)
+        regime_te = resample_to_step_days(
+            regime_full.loc[px_te_daily.index].to_frame(), step_days).iloc[:, 0].to_numpy(np.float32)
+        print(f"Makro: {mfeat.shape[1]} oznitelik (regime/slope/usd_try/gold_tl)")
 
     return DataBundle(px=px, px_tr=px_tr, px_te=px_te,
                       feats_tr=feats_tr, feats_te=feats_te, scaler=scaler,
                       macro_tr=macro_tr, macro_te=macro_te,
-                      regime_tr=regime_tr, regime_te=regime_te)
+                      regime_tr=regime_tr, regime_te=regime_te,
+                      step_days=int(step_days),
+                      provenance=DataProvenance.from_value(px_daily.attrs.get("provenance")))
 
 
 def _feats_for(feats: dict, algo: str) -> dict:
@@ -2979,18 +4711,32 @@ def _feats_for(feats: dict, algo: str) -> dict:
     return select_features(feats, algo)
 
 
+def _ew_nav_train(bundle: DataBundle) -> np.ndarray:
+    """Egitim seti icin esit-agirlikli benchmark NAV dizisi (C3: basari metriginde
+    kullanilir; train fonksiyonlari bu diziyi ew_nav olarak train_loop'a gecer).
+    Sifir boylukta guvenli (None yerine bos dizi degil)."""
+    return equal_weight(bundle.px_tr)["nav"]
+
+
 # -------------------- DQN training --------------------
 def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
-              horizon: str = "medium", adaptive: bool = True):
-    env = build_env("DQN", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=252, random_start=EnvConfig.random_start, seed=SEED,
-                    macro=bundle.macro_tr, regime=bundle.regime_tr)
+              adaptive: bool = True, step_days: int | None = None):
+    step_days = bundle.step_days if step_days is None else int(step_days)
+    train_max_steps = len(bundle.px_tr)
+    env = build_env("DQN", bundle.px_tr, bundle.feats_tr, adaptive=adaptive,
+                    max_steps=train_max_steps, random_start=EnvConfig.random_start, seed=SEED,
+                    macro=bundle.macro_tr, regime=bundle.regime_tr, rebalance_freq=1,
+                    step_days=step_days, gamma=DEFAULTS.gamma,
+                    mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window)
     agent = build_agent("DQN", env.state_dim, env.n_discrete, seed=SEED)
+    # C3: egitim seti EW benchmark'i — trainer success_vs_benchmark'e gecer.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_episodes):
+    for rec in train_loop(agent, env, n_iters=n_episodes, ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir (success_vs_benchmark); override yok.
         curve.append(dict(episode=rec["episode"], reward=rec["reward"],
                           train_nav=rec["train_nav"], eps=rec["eps"],
-                          gain=rec["gain"], success=int(rec["nav"] > 1.0),
+                          gain=rec["gain"], success=rec["success"],
                           steps=len(rec.get("actions") or [])))
         print(f"[DQN] ep {rec['episode']:02d}  ret={rec['reward']:+.3f}  "
               f"NAV={rec['train_nav']:.3f}  eps={rec['eps']:.3f}")
@@ -3000,17 +4746,28 @@ def train_dqn(bundle: DataBundle, n_episodes: int = TrainConfig.dqn_episodes,
 # -------------------- PPO training --------------------
 def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
               rollout_len: int = TrainConfig.ppo_rollout_len,
-              horizon: str = "medium", adaptive: bool = True):
-    env = build_env("PPO", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=10_000, random_start=EnvConfig.random_start, seed=SEED,
-                    macro=bundle.macro_tr, regime=bundle.regime_tr)
+              adaptive: bool = True, step_days: int | None = None):
+    # T7: PPO on-policy; rollout_len zaten episode'u belirler; max_steps > rollout_len olsun.
+    # Vade bazlı train_max_steps ile uyumlu (büyük değer verirsek sorun yok ama
+    # train_max_steps * 5 ile rollout'ların kesintisiz akmasına izin verelim).
+    step_days = bundle.step_days if step_days is None else int(step_days)
+    train_max_steps = len(bundle.px_tr)
+    env = build_env("PPO", bundle.px_tr, bundle.feats_tr, adaptive=adaptive,
+                    max_steps=train_max_steps, random_start=EnvConfig.random_start, seed=SEED,
+                    macro=bundle.macro_tr, regime=bundle.regime_tr, rebalance_freq=1,
+                    step_days=step_days, gamma=DEFAULTS.gamma,
+                    mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window)
     agent = build_agent("PPO", env.state_dim, env.action_dim, seed=SEED)
+    # C3: egitim seti EW benchmark'i.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len):
+    for rec in train_loop(agent, env, n_iters=n_updates, rollout_len=rollout_len,
+                          ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir; override yok.
         curve.append(dict(update=rec["update"], p_loss=rec["p_loss"], v_loss=rec["v_loss"],
                           ent=rec["ent"], kl=rec["kl"], mean_nav=rec["mean_nav"],
                           reward=rec["reward"], gain=rec["gain"],
-                          success=int(rec["mean_nav"] > 1.0), steps=rollout_len))
+                          success=rec["success"], steps=rollout_len))
         print(f"[PPO] upd {rec['update']:02d}  p_loss={rec['p_loss']:.3f} "
               f"v_loss={rec['v_loss']:.3f} ent={rec['ent']:.2f} kl={rec['kl']:.3f}")
     return agent, curve
@@ -3018,54 +4775,88 @@ def train_ppo(bundle: DataBundle, n_updates: int = TrainConfig.ppo_updates,
 
 # -------------------- SAC training --------------------
 def train_sac(bundle: DataBundle, n_episodes: int = TrainConfig.sac_episodes,
-              max_steps_per_episode: int = TrainConfig.sac_episode_len,
-              horizon: str = "medium", adaptive: bool = True):
-    env = build_env("SAC", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=max_steps_per_episode,
+              adaptive: bool = True, step_days: int | None = None):
+    step_days = bundle.step_days if step_days is None else int(step_days)
+    env = build_env("SAC", bundle.px_tr, bundle.feats_tr, adaptive=adaptive,
+                    max_steps=len(bundle.px_tr),
                     random_start=EnvConfig.random_start, seed=SEED,
-                    macro=bundle.macro_tr, regime=bundle.regime_tr)
+                    macro=bundle.macro_tr, regime=bundle.regime_tr, rebalance_freq=1,
+                    step_days=step_days, gamma=DEFAULTS.gamma,
+                    mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window)
     agent = build_agent("SAC", env.state_dim, env.action_dim, seed=SEED)
+    # C3: egitim seti EW benchmark'i.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_episodes):
+    for rec in train_loop(agent, env, n_iters=n_episodes, ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir; override yok.
         curve.append(dict(episode=rec["episode"], train_nav=rec["train_nav"], steps=rec["steps"],
                           reward=rec["reward"], gain=rec["gain"],
-                          success=int(rec["nav"] > 1.0)))
+                          success=rec["success"]))
         print(f"[SAC] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 
 
 # -------------------- TD3 training --------------------
 def train_td3(bundle: DataBundle, n_episodes: int = TrainConfig.td3_episodes,
-              max_steps_per_episode: int = TrainConfig.td3_episode_len,
-              horizon: str = "medium", adaptive: bool = True):
+              adaptive: bool = True, step_days: int | None = None):
     # TD3 surekli-kontrol (hocanin tavsiyesi) — SAC ile ayni off-policy rejim.
-    env = build_env("TD3", bundle.px_tr, bundle.feats_tr, horizon=horizon, adaptive=adaptive,
-                    max_steps=max_steps_per_episode,
+    # Her episode secilen train tarih araliginin tamamini kullanir.
+    step_days = bundle.step_days if step_days is None else int(step_days)
+    env = build_env("TD3", bundle.px_tr, bundle.feats_tr, adaptive=adaptive,
+                    max_steps=len(bundle.px_tr),
                     random_start=EnvConfig.random_start, seed=SEED,
-                    macro=bundle.macro_tr, regime=bundle.regime_tr)
+                    macro=bundle.macro_tr, regime=bundle.regime_tr, rebalance_freq=1,
+                    step_days=step_days, gamma=DEFAULTS.gamma,
+                    mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window)
     agent = build_agent("TD3", env.state_dim, env.action_dim, seed=SEED)
+    # C3: egitim seti EW benchmark'i.
+    ew_nav_tr = _ew_nav_train(bundle)
     curve = []
-    for rec in train_loop(agent, env, n_iters=n_episodes):
+    for rec in train_loop(agent, env, n_iters=n_episodes, ew_nav=ew_nav_tr):
+        # C3: rec["success"] kernel'den gelir; override yok.
         curve.append({"episode": rec["episode"], "train_nav": rec["train_nav"], "steps": rec["steps"],
                       "reward": rec["reward"], "gain": rec["gain"],
-                      "success": int(rec["nav"] > 1.0)})
+                      "success": rec["success"]})
         print(f"[TD3] ep {rec['episode']:02d}  NAV={rec['train_nav']:.3f}  buf={len(agent.buffer)}")
     return agent, curve
 
 
 # -------------------- Evaluation --------------------
-def evaluate(bundle: DataBundle, agent, algo: str, horizon: str = "medium", adaptive: bool = True):
-    env = build_env(algo, bundle.px_te, bundle.feats_te, horizon=horizon, adaptive=adaptive,
-                    max_steps=10_000, macro=bundle.macro_te, regime=bundle.regime_te)
+def evaluate(bundle: DataBundle, agent, algo: str, adaptive: bool = True,
+             step_days: int | None = None):
+    # T7: eval env TAM test donemini kosturur — max_steps = len(test) (backtest
+    # tum test penceresini kapsar, egitim episode uzunlugundan bagimsiz).
+    step_days = bundle.step_days if step_days is None else int(step_days)
+    context = min(len(bundle.px_tr), max(21, ceil(DEFAULTS.minvol_window / step_days)) + 1)
+    px_context = bundle.px_tr.iloc[-context:]
+    px_eval = pd.concat([px_context, bundle.px_te])
+    px_eval.attrs.update(bundle.px_te.attrs)
+    px_eval.attrs["session_counts"] = np.concatenate([
+        np.asarray(bundle.px_tr.attrs.get(
+            "session_counts", np.ones(len(bundle.px_tr), dtype=int)))[-context:],
+        np.asarray(bundle.px_te.attrs.get("session_counts", np.ones(len(bundle.px_te), dtype=int))),
+    ])
+    feats_eval = {k: pd.concat([bundle.feats_tr[k].iloc[-context:], bundle.feats_te[k]])
+                  for k in bundle.feats_te}
+    macro_eval = (None if bundle.macro_te is None else
+                  np.concatenate([bundle.macro_tr[-context:], bundle.macro_te], axis=0))
+    regime_eval = (None if bundle.regime_te is None else
+                   np.concatenate([bundle.regime_tr[-context:], bundle.regime_te], axis=0))
+    eval_max_steps = len(bundle.px_te) + 10
+    env = build_env(algo, px_eval, feats_eval, adaptive=adaptive,
+                    max_steps=eval_max_steps, macro=macro_eval, regime=regime_eval,
+                    rebalance_freq=1, step_days=step_days, gamma=DEFAULTS.gamma,
+                    mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+                    start_index=context)
     return rollout_evaluate(agent, env)
 
 
 # -------------------- Main --------------------
-def run():
+def run(step_days: int = DEFAULTS.step_days):
     """Tam egitim + backtest akisi: seed -> veri -> 3 ajan -> eval -> CSV.
     main.py bunu DOGRUDAN cagirir (runpy yerine). Modul import'u yan etkisizdir (M1)."""
     np.random.seed(SEED)
-    bundle = prepare_data()
+    bundle = prepare_data(step_days=step_days)
     t0 = time.time()
     print("=" * 60)
     dqn_agent, dqn_curve = train_dqn(bundle)
@@ -3084,30 +4875,66 @@ def run():
     print("TD3 total time:", round(time.time() - t3, 1), "s")
 
     print("=" * 60)
-    results = {}
+
+    # ---- T2 (C1): once ham eval; sonra ORTAK min_len ile hizala; metrics.csv
+    # hizali dizilerden uretilir -> RL + baseline ayni gun sayisinda kiyaslanir. ----
+    raw_results = {}
     for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent),
                         ("SAC", sac_agent), ("TD3", td3_agent)]:
         bt = evaluate(bundle, agent, name)
-        m = summary(bt["nav"], bt["rets"], bt["weights"])
-        results[name] = dict(backtest=bt, metrics=m)
-        print(f"[TEST] {name:<3}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
-              f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
+        raw_results[name] = bt
 
-    print("-" * 60)
     bh = buy_and_hold_index(bundle.px_te)
     ew = equal_weight(bundle.px_te)
     mv = mean_variance(bundle.px_te, lookback=120, rebalance=20)
     for name, d in [("BuyHold", bh), ("EqualWeight", ew), ("MeanVar", mv)]:
-        m = summary(d["nav"], d["rets"], d.get("weights"))
-        results[name] = dict(backtest=d, metrics=m)
+        raw_results[name] = d
+
+    date_indexes = [pd.DatetimeIndex(v.get("dates", bundle.px_te.index[:len(v["nav"])]))
+                    for v in raw_results.values()]
+    common_dates = date_indexes[0]
+    for idx in date_indexes[1:]:
+        common_dates = common_dates.intersection(idx)
+    common_dates = common_dates.sort_values()
+    if len(common_dates) < 2:
+        raise RuntimeError("Stratejiler arasinda yeterli ortak degerleme tarihi yok")
+
+    results = {}
+    for name, bt in raw_results.items():
+        # Hizalama: son min_len elemanı al (ortak takvim kuyruğu) VE ortak pencere
+        # başlangıcına YENİDEN-TABANLA (NAV[0]=1) -> FinalNAV/CAGR tüm stratejiler
+        # için AYNI pencere büyümesini ölçer; baseline'lar RL'in görmediği ilk
+        # ~window günü dahil etmez (C1 adil karşılaştırma tam olarak sağlanır).
+        idx = pd.DatetimeIndex(bt.get("dates", bundle.px_te.index[:len(bt["nav"])]))
+        nav_series = pd.Series(np.asarray(bt["nav"], dtype=float), index=idx)
+        nav_aligned = nav_series.reindex(common_dates).to_numpy()
+        rets_aligned = np.concatenate([[0.0], np.diff(nav_aligned) / nav_aligned[:-1]])
+        w_aligned    = bt.get("weights")
+        if w_aligned is not None:
+            w_aligned = pd.DataFrame(np.asarray(w_aligned), index=idx).reindex(common_dates).to_numpy()
+        turn_aligned = None
+        if bt.get("turnover") is not None:
+            turn_aligned = pd.Series(np.asarray(bt["turnover"], dtype=float), index=idx).reindex(common_dates).to_numpy()
+        # Hizali diziler uzerinden metrik hesapla (C1 duzeltme).
+        m = summary(nav_aligned, rets_aligned, w_aligned, dates=common_dates,
+                    turnover_values=turn_aligned)
+        results[name] = dict(backtest=bt, nav_aligned=nav_aligned, metrics=m)
+        if name in ("DQN", "PPO", "SAC", "TD3"):
+            print(f"[TEST] {name:<3}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
+                  f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
+
+    print("-" * 60)
+    for name in ("BuyHold", "EqualWeight", "MeanVar"):
+        m = results[name]["metrics"]
         print(f"[TEST] {name:<12}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
               f"MaxDD={m['MaxDD']:+.2%}  Final={m['FinalNAV']:.3f}")
 
-    min_len = min(len(v["backtest"]["nav"]) for v in results.values())
-    dfn = pd.DataFrame({k: v["backtest"]["nav"][-min_len:] for k, v in results.items()})
-    dfn.index = bundle.px_te.index[-min_len:]
+    # navs_aligned.csv: hizali NAV dizileri (T2: metrics.csv ile AYNI pencere).
+    dfn = pd.DataFrame({k: v["nav_aligned"] for k, v in results.items()})
+    dfn.index = common_dates
     dfn.to_csv(RES / "navs_aligned.csv")
 
+    # metrics.csv: hizali dizilerden hesaplanan metrikler (C1 duzeltme).
     met_df = pd.DataFrame({k: v["metrics"] for k, v in results.items()}).T
     met_df.to_csv(RES / "metrics.csv")
     print(met_df.round(4))
@@ -3125,15 +4952,36 @@ def run():
     print(pd.DataFrame(diag).T.round(4))
 
     # PDF §11: egitilmis modelleri diske kaydet (sunumda yeniden egitmeden test).
+    config_by_algo = {"DQN": asdict(__import__("config").DQNConfig()),
+                      "PPO": asdict(__import__("config").PPOConfig()),
+                      "SAC": asdict(__import__("config").SACConfig()),
+                      "TD3": asdict(__import__("config").TD3Config())}
     for name, agent in [("DQN", dqn_agent), ("PPO", ppo_agent),
                         ("SAC", sac_agent), ("TD3", td3_agent)]:
-        save_agent(agent, name, MODELS / f"{name}.pt", horizon="medium", adaptive=True)
+        spec = RunSpec(name, step_days=bundle.step_days, adaptive=True,
+                       agent_hp=config_by_algo[name], feature_names=tuple(bundle.feats_tr),
+                       provenance=bundle.provenance)
+        save_agent(agent, name, model_path(name, bundle.step_days, True),
+                   horizon=f"step{bundle.step_days}", adaptive=True, run_spec=spec)
     print("Modeller kaydedildi:", MODELS)
 
     for name in ["DQN", "PPO", "SAC", "TD3"]:
         W = results[name]["backtest"]["weights"]
         cols = list(bundle.px_te.columns) + ["CASH"]
         pd.DataFrame(W, columns=cols).to_csv(RES / f"weights_{name}.csv", index=False)
+        bt = results[name]["backtest"]
+        trace = pd.DataFrame({
+            "date": bt["dates"][1:],
+            "gross_return": [x["gross_port_r"] for x in bt["reward_terms_history"]],
+            "net_return": bt["rets"][1:], "turnover": bt["turnover"][1:],
+            "period_length": bt["period_lengths"][1:],
+        })
+        trace.to_csv(RES / f"backtest_{name}.csv", index=False)
+
+    (RES / "run_manifest.json").write_text(json.dumps({
+        "step_days": bundle.step_days, "seed": SEED,
+        "provenance": bundle.provenance.to_dict(),
+    }, ensure_ascii=True, indent=2), encoding="utf-8")
 
     print("=" * 60)
     print("DONE. Total wall time:", round(time.time() - t0, 1), "s")
@@ -3180,14 +5028,18 @@ RES.mkdir(exist_ok=True)
 FIG.mkdir(exist_ok=True)
 
 
-def step_data():
+def step_data(allow_synthetic: bool = False):
     print("=" * 70)
-    print("[1/3] BIST 28 fiyatları hazırlanıyor ...")
+    print("[1/4] BIST 28 fiyatları hazırlanıyor ...")
     print("=" * 70)
     from data import download_bist
     from utils.features import add_features
     prices_path = RES / "bist30_prices.csv"
     px = download_bist()
+    # T5 (C5): sentetik veri koruması — akademik sonuç sentetik veriyle üretilemez.
+    source = px.attrs.get("provenance", {}).get("source", "unknown")
+    if source != "real":
+        print(f"  UYARI: {source.upper()} veri kullaniliyor; tum ciktilar etiketlenecek.")
     px.to_csv(prices_path)
     feats = add_features(px)
     for name, f in feats.items():
@@ -3195,12 +5047,19 @@ def step_data():
     print(f"  Kaydedildi: {prices_path}  (shape={px.shape})")
 
 
-def step_train():
+def step_train(allow_synthetic: bool = False, step_days: int = 1):
     print("=" * 70)
     print("[2/4] DQN + PPO + SAC + TD3 eğitimi ve backtest ...")
     print("=" * 70)
-    import train
-    train.run()
+    # T5 (C5): egitim adiminda da sentetik veri kontrolu (veri indirilmeden
+    # dogrudan --skip-data ile train atlandiysa cache'den gelir).
+    from data import download_bist
+    px = download_bist()
+    source = px.attrs.get("provenance", {}).get("source", "unknown")
+    if source != "real":
+        print(f"  UYARI: {source.upper()} veri ile egitim; manifest provenance tasiyacak.")
+    import train as train_mod
+    train_mod.run(step_days=step_days)
 
 
 def step_rigor():
@@ -3220,25 +5079,50 @@ def step_plots():
     print(f"  Figürler: {FIG}")
 
 
-def step_walkforward():
+def step_walkforward(step_days: int = 1):
     print("=" * 70)
     print("[WF] Walk-forward dogrulama (PPO, train donemi, fold-yerel olcekleme) ...")
     print("=" * 70)
-    from data import download_bist, train_test_split
+    from data import (download_bist, train_test_split, download_macro, align_macro,
+                      resample_to_step_days)
     from utils.features import add_features
+    from utils.macro import add_macro_features
     from core.walkforward import walk_forward
     from agents import PPOAgent
-    from config import PPOConfig, SEED
+    from config import PPOConfig, SEED, MacroConfig
+    import numpy as np
     px = download_bist()
-    px_tr, _ = train_test_split(px)
-    feats_raw = add_features(px_tr)        # teknik feat (forecast haric -> fold-yerel leak-safe)
+    px_tr_daily, _ = train_test_split(px)
+    feats_daily = add_features(px)
+    px_tr = resample_to_step_days(px_tr_daily, step_days)
+    feats_raw = {
+        k: resample_to_step_days(v.loc[px_tr_daily.index], step_days)
+        for k, v in feats_daily.items()
+    }
+
+    # T6 (C6): macro/regime walk-forward'a gecirilir (fold icinde dilimlenir).
+    # Forecast feature WF'de DAHIL EDILMEZ (sizinti-guvenli mevcut karar KORUNUR).
+    macro_tr = regime_tr = None
+    if MacroConfig.enabled:
+        mraw = align_macro(download_macro(), px.index)
+        mfeat = add_macro_features(mraw)
+        regime_full = mfeat["regime"]
+        # Raw fold panel: core.walkforward fits MacroScaler independently in
+        # every train fold, preventing future-fold statistics from leaking.
+        macro_tr = resample_to_step_days(mfeat.loc[px_tr_daily.index], step_days)
+        regime_tr = resample_to_step_days(
+            regime_full.loc[px_tr_daily.index].to_frame(), step_days
+        ).iloc[:, 0].to_numpy(np.float32)
 
     def ppo_factory(sd, ad, seed):
         return PPOAgent(sd, ad, hidden=PPOConfig.hidden, lr_p=PPOConfig.lr_p,
                         lr_v=PPOConfig.lr_v, batch_size=PPOConfig.batch_size,
                         n_epochs=PPOConfig.n_epochs, seed=seed)
 
-    rep = walk_forward(px_tr, feats_raw, ppo_factory, n_folds=3, n_iters=12, seed=SEED)
+    rep = walk_forward(
+        px_tr, feats_raw, ppo_factory, n_folds=3, n_iters=12, seed=SEED,
+        step_days=step_days, macro=macro_tr, regime=regime_tr,
+    )
     print(f"  Fold sayisi: {len(rep['folds'])}")
     for key in ("CAGR", "Sharpe", "Sortino", "MaxDD", "Calmar"):
         print(f"  {key:<8} mean={rep['mean'].get(key, 0):+.4f}  std={rep['std'].get(key, 0):.4f}")
@@ -3252,14 +5136,22 @@ def main():
     ap.add_argument("--skip-plots", action="store_true", help="Çizim adımını atla")
     ap.add_argument("--skip-rigor", action="store_true", help="Titizlik (DSR/PBO/stres) adımını atla")
     ap.add_argument("--walkforward", action="store_true", help="Walk-forward doğrulama çalıştır (v2)")
+    # T5 (C5): sentetik veri koruması — akademik sonuç sentetik veriyle üretilemez.
+    ap.add_argument("--allow-synthetic", action="store_true",
+                    help="Sentetik/eksik BIST verisiyle çalışmaya izin ver (yalnız test/debug için)")
+    ap.add_argument("--step-days", type=int, default=1,
+                    help="Karar/rebalans araligi: ardışık BIST seansi sayisi (1..252)")
     args = ap.parse_args()
+    if not 1 <= args.step_days <= 252:
+        ap.error("--step-days 1..252 araliginda olmali")
 
     t0 = time.time()
-    if not args.skip_data:  step_data()
-    if not args.skip_train: step_train()
+    if not args.skip_data:  step_data(allow_synthetic=args.allow_synthetic)
+    if not args.skip_train: step_train(allow_synthetic=args.allow_synthetic,
+                                      step_days=args.step_days)
     if not args.skip_rigor: step_rigor()       # plot'tan ÖNCE (F11-F13 rigor çıktısını okur)
     if not args.skip_plots: step_plots()
-    if args.walkforward:    step_walkforward()
+    if args.walkforward:    step_walkforward(step_days=args.step_days)
 
     print("=" * 70)
     print(f"BİTTİ.  Toplam süre: {time.time() - t0:.1f} s")
@@ -3477,7 +5369,7 @@ def run():
             ha="center", fontsize=10, color="#a64")
     ax.text(6.0, 4.5, "Portföy Yönetimi MDP Formülasyonu",
             ha="center", fontsize=14, fontweight="bold")
-    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 393 boyut        "
+    ax.text(6.0, 0.7, "S: 13 özellik × 28 hisse + mevcut ağırlıklar = 397 boyut (makro dâhil; 393 = makro-öncesi V5 tabanı)        "
             "A: softmax(29-boyutlu simpleks)        γ = 0.99        T ≈ 760 gün/bölüm",
             ha="center", fontsize=9, color="#555")
     plt.tight_layout(); plt.savefig(FIG/"f8_mdp.png"); plt.close()
@@ -3486,7 +5378,7 @@ def run():
     # ---------- F9: Algo architecture sketch ----------
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.5))
     for ax, (name, desc) in zip(axes, [
-        ("DQN", "s -> MLP(64,64) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
+        ("DQN", "s -> MLP(256,128) -> Q(s,a)\nayrik eylem: 6 portfoy sablonu\nTD hedefi + hedef ag"),
         ("PPO", "s -> policy -> Normal(mu, sigma) -> softmax(w)\nGAE avantaji\nclipped surrogate loss"),
         ("SAC", "s -> policy -> tanh(Normal)\ncift-Q elestirmen\nentropi-duzenlenmis amac"),
         ("TD3", "s -> Actor -> tanh (deterministik)\ncift-Q min + gecikmeli politika\nhedef-politika yumusatma")
@@ -3637,7 +5529,7 @@ from ui.charts import (  # noqa: F401
     _horizon_preset_table, _q_bar, _reward_bar, _state_top_features, _weights_pie,
 )
 from ui.sidebar import _sidebar_reward_editor, sidebar_controls  # noqa: F401
-from ui.tabs import tab_compare, tab_mdp, tab_test, tab_train  # noqa: F401
+from ui.tabs import tab_compare, tab_mdp, tab_test, tab_train, tab_reward  # noqa: F401
 
 
 def main():
@@ -3647,21 +5539,31 @@ def main():
         layout="wide",
     )
     _init_state()
-    algo, horizon, adaptive, hp = sidebar_controls()
+    algo, step_days, adaptive, hp = sidebar_controls()
 
     st.title("📈 BIST 28 Pekiştirmeli Öğrenme Portföy Yönetimi")
-    st.caption("UYİK 2026 · DQN/PPO/SAC · Vade preset'leri · Adaptif ödül şekillendirici")
+    st.caption("UYİK 2026 · DQN/PPO/SAC/TD3 · N-seans karar adimi · Adaptif odul")
+    provenance = st.session_state.get("data_provenance") or {}
+    if provenance:
+        source = str(provenance.get("source", "unknown")).upper()
+        message = f"Veri kaynagi: {source} ({provenance.get('provider', 'bilinmiyor')})"
+        if source == "REAL":
+            st.success(message)
+        else:
+            st.warning(message + " - sonuclar bu kaynak etiketiyle kaydedilir.")
 
-    t1, t2, t3, t4 = st.tabs([
+    t1, t2, t3, t4, t5 = st.tabs([
         "📐 Veri & MDP",
         "🎓 Eğitim",
         "🎬 Test (Adım-Adım)",
         "📊 Karşılaştırma",
+        "⚖️ Ödül & Ceza Tasarımı",
     ])
     with t1: tab_mdp()
-    with t2: tab_train(algo, horizon, adaptive, hp)
-    with t3: tab_test(algo, horizon, adaptive)
+    with t2: tab_train(algo, step_days, adaptive, hp)
+    with t3: tab_test(algo, step_days, adaptive)
     with t4: tab_compare()
+    with t5: tab_reward()
 
 
 if __name__ == "__main__":
@@ -3679,10 +5581,15 @@ from __future__ import annotations
 
 import streamlit as st
 
+from config import DEFAULTS, DataConfig, EnvConfig, RewardConfig
+from core.contracts import DataProvenance, RunSpec
 from data import BIST28
 from env.portfolio_env import HORIZON_PRESETS
 
 ASSET_NAMES = BIST28 + ["CASH"]
+
+_dc = DataConfig()
+_rc = RewardConfig()
 
 
 def _init_state():
@@ -3704,21 +5611,72 @@ def _init_state():
         "playing": False,
         "selected_algo": "DQN",
         "horizon": "medium",
+        "step_days": DEFAULTS.step_days,
         "adaptive": True,
         "initial_capital": 100_000.0,
         "train_delay": 0.0,
         "reward_cfg": {},  # kullanıcı ayarları; boş ise env preset'leri kullanır
+        "n_episodes": 12,                          # parametrik episode sayısı (UI)
+        "price_noise_std": EnvConfig.price_noise_std,  # fiyat gürültüsü σ (UI kontrolü)
+        "episode_clean": True,   # 1. iterasyon orijinal veri (anti-ezber); UI default açık
+        "train_noisy_episodes": True,  # OPT-IN: her episode = noise'lu yeni veri seti (anti-ezber); default açık
+        "train_rebalance": None,  # rebalans frekansı override (None -> vade preset'i; golden-güvenli)
+        # Tarih aralığı — DataConfig tek kaynak
+        "data_start": _dc.start,
+        "data_split": _dc.train_end,
+        "data_end": _dc.end,
+        # Genişletilmiş ödül parametreleri — RewardConfig tek kaynak
+        # (6 açılan parametre; değer None/boş olunca env preset default'una düşer)
+        "reward_w_dsr": _rc.w_dsr,
+        "reward_w_cvar": _rc.w_cvar,
+        "reward_dsr_eta": _rc.dsr_eta,
+        "reward_cvar_alpha": _rc.cvar_alpha,
+        "reward_regime_beta": _rc.regime_beta,
+        "reward_cvar_amp": _rc.cvar_amp,
+        # 4 opt-in deneysel terim (default 0 → davranış değişmez)
+        "reward_w_gain": 0.0,
+        "reward_gain_floor": 1.0,
+        "reward_w_gain_speed": 0.0,
+        "reward_w_ruin_timing": 0.0,
+        # Adım granülerliği — "daily" no-op (golden-güvenli)
+        "granularity": "daily",
+        "granularity_n_points": None,   # resample sonrası satır sayısı (uyarı için)
+        "active_run_spec": None,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
 
-def _agent_key(algo: str, horizon: str, adaptive: bool) -> tuple:
-    return (algo, horizon, bool(adaptive))
+def set_active_run_spec(algo: str, step_days: int, adaptive: bool, hp: dict) -> RunSpec:
+    prices = st.session_state.get("prices")
+    provenance = DataProvenance.from_value(
+        getattr(prices, "attrs", {}).get("provenance") if prices is not None else None)
+    feats = st.session_state.get("feats_tr") or {}
+    spec = RunSpec(
+        algo=algo, step_days=int(step_days), adaptive=bool(adaptive),
+        reward_cfg=dict(st.session_state.get("reward_cfg", {}) or {}),
+        agent_hp=dict(hp or {}), data_start=str(st.session_state.get("data_start", "")),
+        data_split=str(st.session_state.get("data_split", "")),
+        data_end=str(st.session_state.get("data_end", "")),
+        feature_names=tuple(feats.keys()), provenance=provenance,
+    )
+    st.session_state.active_run_spec = spec.to_dict()
+    return spec
 
 
-def env_rebalance_hint(horizon: str) -> int:
-    return int(HORIZON_PRESETS[horizon]["rebalance"])
+def _agent_key(algo: str, step_days, adaptive: bool) -> tuple:
+    if isinstance(step_days, str):
+        return (algo, step_days, bool(adaptive))  # legacy checkpoint/UI key
+    spec_data = st.session_state.get("active_run_spec")
+    if spec_data:
+        spec = RunSpec.from_dict(spec_data)
+        if spec.algo == algo and spec.step_days == int(step_days) and spec.adaptive == bool(adaptive):
+            return (algo, int(step_days), bool(adaptive), spec.fingerprint)
+    return (algo, int(step_days), bool(adaptive), "unbound")
+
+
+def env_rebalance_hint(step_days) -> int:
+    return int(step_days) if not isinstance(step_days, str) else int(HORIZON_PRESETS[step_days]["rebalance"])
 
 ```
 
@@ -3736,17 +5694,21 @@ trajectory yakalama.
 from __future__ import annotations
 
 from pathlib import Path
+from math import ceil
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from agents.base import SupportsQValues
-from config import SEED, ForecastConfig, MacroConfig
+from config import DEFAULTS, SEED, ForecastConfig, MacroConfig, validate_train_range
 from core.factory import build_agent, build_env
-from core.persistence import load_agent, save_agent
+from core.episodes import episode_metrics, make_noisy_prices
+from core.persistence import (load_agent, model_path, named_model_path,
+                              read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
-from data import align_macro, download_bist, download_macro, train_test_split
+from data import (align_macro, download_bist, download_macro,
+                  resample_to_step_days, train_test_split)
 from env.portfolio_env import ACTION_NAMES
 from ui.state import _agent_key
 from utils.baselines import equal_weight
@@ -3755,24 +5717,63 @@ from utils.macro import MacroScaler, add_macro_features
 from utils.portfolio_tl import compute_tl_step
 
 # PDF §11: egitilmis modeller diske burada kaydedilir/yuklenir (sunum kaliciligi).
-MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+# N11: MODELS_DIR ve model_path artik core.persistence'da tanimlidi; _MODELS_DIR olarak yukarda import edildi.
+MODELS_DIR = _MODELS_DIR  # noqa: N816  — dis erisim icin re-export (sidebar import eder)
 
 
-def model_path(algo: str) -> Path:
-    return MODELS_DIR / f"{algo}.pt"
+def save_trained_agent(algo: str, step_days: int, adaptive: bool, name: str = ""):
+    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None).
 
-
-def save_trained_agent(algo: str, horizon: str, adaptive: bool):
-    """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None)."""
-    entry = st.session_state.trained_agents.get(_agent_key(algo, horizon, adaptive))
+    N11: isim verilmisse named_model_path(name).pt kullanilir (UI isimli kayit).
+         isim bossa fallback: {algo}_{horizon} ismiyle named_model_path.
+         Geriye-uyumluluk: model_path(algo,horizon,adaptive) CLI/golden yolu KORUNUR —
+         bu fonksiyon yalnizca UI "Kaydet" butonundan cagirilir.
+    name: kullanici-girilen model adi; bos olursa "{algo}_{horizon}" kullanilir.
+    """
+    entry = st.session_state.trained_agents.get(_agent_key(algo, step_days, adaptive))
     if not entry or entry[0] is None:
         return None
-    return save_agent(entry[0], algo, model_path(algo), horizon=horizon, adaptive=adaptive)
+    effective_name = name.strip() if name.strip() else f"{algo}_step{step_days}"
+    path = named_model_path(effective_name)
+    return save_agent(entry[0], algo, path,
+                      horizon=f"step{step_days}", adaptive=adaptive,
+                      name=effective_name, run_spec=st.session_state.get("active_run_spec"))
 
 
-def load_saved_agent(algo: str):
-    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner."""
-    path = model_path(algo)
+def list_saved_models() -> list[dict]:
+    """models/*.pt dosyalarini tarar; her biri icin read_meta ile meta okur.
+
+    Donus: [{path, name, saved_at, algo, horizon, adaptive}, ...]
+    saved_at'e gore yeniden-eskiye sirali. Bozuk/okunamayan dosyalar atlanmaz;
+    meta bos string'lerle doldurulur (read_meta guvenli default doner).
+    """
+    _MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    results = []
+    for pt in _MODELS_DIR.glob("*.pt"):
+        meta = read_meta(pt)
+        # Eger name meta'da bossa dosya adini goster (eski format geriye-uyumlu)
+        display_name = meta["name"] if meta["name"] else pt.stem
+        results.append({
+            "path": str(pt),
+            "name": display_name,
+            "saved_at": meta["saved_at"],
+            "algo": meta["algo"],
+            "horizon": meta["horizon"],
+            "adaptive": meta["adaptive"],
+            "step_days": int(meta.get("run_spec", {}).get("step_days", 1)),
+            "legacy": bool(meta.get("legacy", True)),
+        })
+    # saved_at'e gore yeniden→eskiye sirala (ISO string karsilastirmasi dogru calisir)
+    results.sort(key=lambda x: x["saved_at"], reverse=True)
+    return results
+
+
+def load_saved_agent(algo: str, horizon: str = "medium", adaptive: bool = True):
+    """Diskteki modeli yukler, session_state.trained_agents'a koyar; anahtari doner.
+
+    N11: horizon + adaptive parametreleri dosya adini belirler.
+    """
+    path = model_path(algo, horizon, adaptive)
     if not path.exists():
         return None
     agent, meta = load_agent(path)
@@ -3781,21 +5782,91 @@ def load_saved_agent(algo: str):
     return key
 
 
+def load_saved_agent_from_path(path):
+    """N11: Tam yol verilince dogrudan yukler (selectbox ile secilen model icin)."""
+    from pathlib import Path as _Path
+    path = _Path(path)
+    if not path.exists():
+        return None
+    agent, meta = load_agent(path)
+    if meta.get("run_spec"):
+        st.session_state.active_run_spec = meta["run_spec"]
+        step_days = int(meta["run_spec"].get("step_days", 1))
+        key = _agent_key(meta["algo"], step_days, meta["adaptive"])
+    else:
+        key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
+    st.session_state.trained_agents[key] = (agent, [])
+    return key, meta
+
+
 def _load_data():
-    """Veri indir + z-score scaler'ı fit et."""
+    """Veri indir + granülerliğe resample + z-score scaler'ı fit et.
+
+    Tarih aralığı session_state.data_start / data_split / data_end'den okunur
+    (sidebar tarih seçici). Scaler/forecaster/MacroScaler YALNIZ px_tr'de fit
+    edilir — sızıntı yok.
+
+    Granülerlik akışı (golden-güvenli Approach 1):
+      1. prices_daily  = download_bist(...)           — her zaman GÜNLÜK
+      2. feats_daily   = add_features(prices_daily)   — GÜNLÜK (add_features DEĞİŞMEZ)
+      3. Forecast da prices_daily üzerinde hesaplanır (GÜNLÜK)
+      4. prices / feats_all_raw = resample_to_granularity(...)  — g="daily" → no-op
+      5. train_test_split RESAMPLE'LANMIŞ fiyat üzerinde yapılır
+      6. Scaler RESAMPLE'LANMIŞ feats_tr'de fit edilir (sızıntı korunur)
+      7. Makro: download_macro GÜNLÜK → align (GÜNLÜK prices_daily.index) →
+         add_macro_features (GÜNLÜK) → resample → MacroScaler resample'lı px_tr'de fit
+    """
+    from config import DataConfig as _DC
+    _dc_defaults = _DC()
+    data_start = st.session_state.get("data_start", _dc_defaults.start)
+    data_split = st.session_state.get("data_split", _dc_defaults.train_end)
+    data_end   = st.session_state.get("data_end",   _dc_defaults.end)
+    step_days = int(st.session_state.get("step_days", DEFAULTS.step_days))
+
     with st.spinner("Veri indiriliyor / cache okunuyor ..."):
-        prices = download_bist()
-    feats_all_raw = add_features(prices)
-    px_tr, px_te = train_test_split(prices)
+        prices_daily = download_bist(start=data_start, end=data_end)
+    # Sentetik-veri görünürlüğü: ağ + cache yoksa download_bist SENTETİK GBM'e düşer
+    # (px.attrs["synthetic"]=True). Bu durumda sonuçlar GERÇEK DEĞİLDİR ve NaN/anlamsız
+    # değerler çıkabilir → kullanıcıya AÇIK uyarı (sessiz NaN yerine).
+    source = prices_daily.attrs.get("provenance", {}).get("source", "unknown")
+    if source != "real":
+        st.warning(
+            f"Veri kaynagi {source.upper()}. Egitim ve test devam eder; modeller, "
+            "CSV'ler ve ekran bu provenance etiketini korur."
+        )
+
+    # --- 1. Feature'lar her zaman GÜNLÜK hesaplanır (add_features DEĞİŞMEZ) ---
+    feats_daily = add_features(prices_daily)
+
+    # --- 2. Forecast feature GÜNLÜK prices_daily üzerinde fit edilir ---
     if ForecastConfig.enabled:                     # v2: forecast feature (train-only fit)
         from forecast.forecaster import build_forecast_feature
-        feats_all_raw["forecast"] = build_forecast_feature(
-            prices, px_tr, window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
+        # Forecast fit için geçici günlük train split kullanılır (sızıntısız)
+        _px_tr_daily, _ = train_test_split(prices_daily, split=data_split)
+        feats_daily["forecast"] = build_forecast_feature(
+            prices_daily, _px_tr_daily,
+            window=ForecastConfig.window, conv_ch=ForecastConfig.conv_ch,
             hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
             lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
-    feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
-    feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
 
+    # Split daily data first, then independently select N-session endpoints. A
+    # period can never mix train and test observations.
+    px_tr_daily, px_te_daily = train_test_split(prices_daily, split=data_split)
+    px_tr = resample_to_step_days(px_tr_daily, step_days)
+    px_te = resample_to_step_days(px_te_daily, step_days)
+    prices = pd.concat([px_tr, px_te])
+    prices.attrs.update(prices_daily.attrs)
+    feats_tr_raw = {
+        k: resample_to_step_days(v.loc[px_tr_daily.index], step_days) for k, v in feats_daily.items()
+    }
+    feats_te_raw = {
+        k: resample_to_step_days(v.loc[px_te_daily.index], step_days) for k, v in feats_daily.items()
+    }
+    ok, message = validate_train_range(len(px_tr), step_days=step_days)
+    if not ok:
+        raise ValueError(message)
+
+    # SIZINTI KORUMASI: scaler YALNIZ eğitim kısmında fit edilir, test'e transform uygulanır.
     scaler = TrainScaler().fit(feats_tr_raw)
     st.session_state.prices = prices
     st.session_state.px_tr = px_tr
@@ -3804,16 +5875,28 @@ def _load_data():
     st.session_state.feats_te = scaler.transform(feats_te_raw)
     st.session_state.scaler = scaler
 
-    # v6: makro rejim (faiz/dolar/altin) — train-only z-score; ham regime ayri (V7).
+    # Nokta sayısını kaydet (uyarı için sidebar/tab kullanabilir)
+    st.session_state.granularity_n_points = len(prices)
+    st.session_state.data_provenance = prices_daily.attrs.get("provenance", {})
+
+    # --- 6. Makro: GÜNLÜK indir → GÜNLÜK align → add_macro_features (GÜNLÜK) → resample ---
+    # MacroScaler RESAMPLE'LANMIŞ px_tr'de fit edilir (sızıntı korunur).
     macro_tr = macro_te = regime_tr = regime_te = None
     if MacroConfig.enabled:
-        mfeat = add_macro_features(align_macro(download_macro(), prices.index))
-        regime_full = mfeat["regime"]
-        macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
-        macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
-        macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
-        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
-        regime_te = regime_full.loc[px_te.index].to_numpy(np.float32)
+        mfeat_daily = add_macro_features(
+            align_macro(download_macro(start=data_start, end=data_end), prices_daily.index)
+        )
+        # Makro + regime'i granülerliğe resample et
+        regime_daily = mfeat_daily["regime"].to_frame("regime")
+        mtr_daily, mte_daily = train_test_split(mfeat_daily, split=data_split)
+        rtr_daily, rte_daily = train_test_split(regime_daily, split=data_split)
+        mtr = resample_to_step_days(mtr_daily, step_days)
+        mte = resample_to_step_days(mte_daily, step_days)
+        scaler_m = MacroScaler().fit(mtr)
+        macro_tr = scaler_m.transform(mtr).to_numpy(np.float32)
+        macro_te = scaler_m.transform(mte).to_numpy(np.float32)
+        regime_tr = resample_to_step_days(rtr_daily, step_days)["regime"].to_numpy(np.float32)
+        regime_te = resample_to_step_days(rte_daily, step_days)["regime"].to_numpy(np.float32)
     st.session_state.macro_tr = macro_tr
     st.session_state.macro_te = macro_te
     st.session_state.regime_tr = regime_tr
@@ -3821,18 +5904,189 @@ def _load_data():
     st.session_state.data_loaded = True
 
 
-def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int):
-    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3)."""
+def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_steps: int,
+              cash_daily_rate: float | None = None, *,
+              force_noise: bool = False, noise_eval: float = 0.0,
+              seed_override: int | None = None,
+              episode_data_fn=None):
+    """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3).
+
+    N12: cash_daily_rate None verilirse session_state.cash_daily_rate okunur;
+         o da yoksa env kendi config default'unu kullanir.
+    N10: is_train=True ise max_steps egitim episode uzunlugu (sidebar slider'dan);
+         is_train=False ise max_steps=10_000 (tam test donemi — degistirilmez).
+    """
     px_df = st.session_state.px_tr if is_train else st.session_state.px_te
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
     macro = st.session_state.get("macro_tr" if is_train else "macro_te")
     regime = st.session_state.get("regime_tr" if is_train else "regime_te")
+    start_index = None
+    if not is_train:
+        context = min(len(st.session_state.px_tr), max(21, ceil(DEFAULTS.minvol_window / step_days)) + 1)
+        px_context = st.session_state.px_tr.iloc[-context:]
+        px_df = pd.concat([px_context, px_df])
+        counts = np.concatenate([
+            np.asarray(st.session_state.px_tr.attrs.get(
+                "session_counts", np.ones(len(st.session_state.px_tr), dtype=int)))[-context:],
+            np.asarray(st.session_state.px_te.attrs.get(
+                "session_counts", np.ones(len(st.session_state.px_te), dtype=int))),
+        ])
+        px_df.attrs.update(st.session_state.px_te.attrs)
+        px_df.attrs["session_counts"] = counts
+        feats = {k: pd.concat([st.session_state.feats_tr[k].iloc[-context:], v])
+                 for k, v in st.session_state.feats_te.items()}
+        if macro is not None:
+            macro = np.concatenate([st.session_state.macro_tr[-context:], macro], axis=0)
+        if regime is not None:
+            regime = np.concatenate([st.session_state.regime_tr[-context:], regime], axis=0)
+        start_index = context
+    # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
+    # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
+    noise_std = (st.session_state.get("price_noise_std") if is_train else None)
+    # Episode-clean (kullanici istegi: 1. iterasyon ORIJINAL veri, 2+ farkli noise'lu).
+    # Yalniz egitimde + UI toggle (default True) acikken. Eval'de noise zaten kapali -> etkisiz.
+    ep_clean = bool(is_train and st.session_state.get("episode_clean", True))
+    # Rebalans frekansı override (sidebar): None -> preset (golden-güvenli). Train+eval'e
+    # AYNI değer uygulanır (model hangi frekansla eğitildiyse onunla test edilsin).
+    # N12: nakit faiz — önce parametre, sonra session_state, sonra env default (None).
+    if cash_daily_rate is None:
+        cash_daily_rate = st.session_state.get("cash_daily_rate", None)
     return build_env(
-        algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
-        random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
+        algo, px_df, feats, adaptive=adaptive, max_steps=max_steps,
+        random_start=is_train,                     # v2: egitimde rastgele pencere, eval'de sabit
+        seed=(int(seed_override) if seed_override is not None else SEED),  # noise-episode: per-episode tohum
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        price_noise_std=(float(noise_eval) if force_noise else noise_std),  # UI σ (train) / noise-episode (eval)
+        force_price_noise=bool(force_noise),       # gurultu-artirimli coklu-episode: eval'de gurultu ac
+        episode_clean=ep_clean,                    # 1. iterasyon orijinal (anti-ezber)
+        episode_data_fn=episode_data_fn,           # OPT-IN: per-episode veri swap (anti-ezber); None -> degismez
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
+        cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
+        rebalance_freq=1, step_days=int(step_days),
+        gamma=float(st.session_state.get("gamma_daily", DEFAULTS.gamma)),
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+        start_index=start_index,
     )
+
+
+def _make_noisy_eval_env(noisy_te: pd.DataFrame, algo: str, step_days: int,
+                         adaptive: bool, seed: int):
+    """Noisy test serisi uzerinden eval ortami kurar (fiyat-seviyesi gurultu).
+
+    _make_env'in eval bloguyla AYNI context penceresi + start_index mantigini
+    taklit eder; ancak px_te yerine noisy_te kullanir. Feature'lar noisy_te
+    uzerinden YENIDEN HESAPLANIR (add_features) ve egitimde fit edilmis
+    session_state.scaler ile donusturulur — sizinti yok (scaler train-only).
+
+    Forecast feature (ForecastConfig.enabled=True iken feats_te'de bulunur):
+    Tahmin modeli egzojen (hisse serisiyle baglantiyi kesilmis) ve noisy
+    fiyattan yeniden hesaplanamaz (fit edilmemis). Bu nedenle forecast feature
+    orijinal feats_te'den (context+te dilimi) kopyalanir. State-dim KORUNUR.
+
+    Makro + regime egzojen (hisse fiyatiyla baglantisiz); orijinal olanlar
+    kullanilir (context + te dilimi, _make_env eval yoluyla ayni).
+    """
+    context = min(
+        len(st.session_state.px_tr),
+        max(21, ceil(DEFAULTS.minvol_window / step_days)) + 1
+    )
+    px_context = st.session_state.px_tr.iloc[-context:]
+
+    # Noisy te + context penceresi birlestir (baslangic fiyati px_tr'den gelir)
+    px_df = pd.concat([px_context, noisy_te])
+
+    # session_counts
+    counts = np.concatenate([
+        np.asarray(st.session_state.px_tr.attrs.get(
+            "session_counts", np.ones(len(st.session_state.px_tr), dtype=int)))[-context:],
+        np.asarray(st.session_state.px_te.attrs.get(
+            "session_counts", np.ones(len(st.session_state.px_te), dtype=int))),
+    ])
+    px_df.attrs.update(st.session_state.px_te.attrs)
+    px_df.attrs["session_counts"] = counts
+
+    # Feature'lari noisy fiyat uzerinden yeniden hesapla; egitim scaler'i uygula
+    # add_features: saf teknik feature'lar (12 adet); forecast egzojen -> ayri islenir
+    raw_feats_noisy = add_features(px_df)
+    feats_noisy = st.session_state.scaler.transform(raw_feats_noisy)
+
+    # Forecast feature varsa (state-dim uyumu icin): orijinal feats_te'den kopyala
+    # feats_te zaten context+te ile build edilmis (services._make_env eval yolu)
+    feats_te_orig = {k: pd.concat([st.session_state.feats_tr[k].iloc[-context:], v])
+                     for k, v in st.session_state.feats_te.items()}
+    if "forecast" in feats_te_orig and "forecast" not in feats_noisy:
+        feats_noisy["forecast"] = feats_te_orig["forecast"]
+
+    # Makro + regime orijinal (egzojen, hisse noisy'siyle degismez)
+    macro = st.session_state.get("macro_te")
+    regime = st.session_state.get("regime_te")
+    if macro is not None:
+        macro = np.concatenate([st.session_state.macro_tr[-context:], macro], axis=0)
+    if regime is not None:
+        regime = np.concatenate([st.session_state.regime_tr[-context:], regime], axis=0)
+
+    # Nakit faizi
+    cash_daily_rate = st.session_state.get("cash_daily_rate", None)
+    extra_cash = {} if cash_daily_rate is None else {"cash_daily_rate": float(cash_daily_rate)}
+
+    return build_env(
+        algo, px_df, feats_noisy,
+        adaptive=adaptive, max_steps=10_000,
+        random_start=False, seed=seed,
+        reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        # force_price_noise GECME: fiyat zaten noisy (fiyat-seviyesi)
+        episode_clean=False,
+        macro=macro, regime=regime,
+        rebalance_freq=1, step_days=int(step_days),
+        gamma=float(st.session_state.get("gamma_daily", DEFAULTS.gamma)),
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+        start_index=context,
+        **extra_cash,
+    )
+
+
+def evaluate_noise_episodes_ui(agent, algo: str, step_days: int, adaptive: bool, *,
+                               n_episodes: int = 5, noise_std: float = 0.01) -> list:
+    """Egitilmis ajani test araligi boyunca SIRAYLA birden cok episode'da kosturur;
+    HER episode icin tam adim-adim trace toplar (Test sekmesindeki detay tablosu icin).
+
+    Episode 0 = orijinal (gurultusuz) referans — normal testle AYNI kurulum (_make_env
+    eval yolu: context penceresi + start_index) -> episode 0 normal test sonucuyla
+    ortusur.
+
+    Episode 1..N = orijinal px_te'ye UNIFORM noise eklenip YENIDEN HESAPLANMIS
+    fiyat serisinden kurulan YENI ortamlar (fiyat-seviyesi anti-ezber). Her episode
+    farkli seed kullanir; feature'lar noisy fiyat uzerinden yeniden hesaplanir.
+    Ajan GERCEKTEN FARKLI veri gorur (getiri-seviyesi Gauss'tan farkli).
+
+    Her episode TUM veri tarih araligini kapsar ve SIRAYLA kosar — biri tam bitmeden
+    digeri baslamaz. Donen her episode dict'i: episode, noise_std, steps, nav, dates,
+    trace (adim-adim), + final_nav/total_return/max_drawdown/sharpe.
+    """
+    results = []
+    for i in range(int(n_episodes)):
+        nstd = 0.0 if i == 0 else float(noise_std)
+        if i == 0:
+            # Episode 0: orijinal fiyatlar — _make_env eval yoluyla birebir ayni
+            env = _make_env(False, algo, step_days, adaptive, max_steps=10_000,
+                            seed_override=SEED + i)
+        else:
+            # Episode 1..N: px_te uzerine UNIFORM noise -> yeni fiyat serisi -> env
+            noisy_te = make_noisy_prices(
+                st.session_state.px_te, nstd, seed=SEED + i
+            )
+            env = _make_noisy_eval_env(noisy_te, algo, step_days, adaptive,
+                                       seed=SEED + i)
+        # Tam aralik, adim-adim trace — done'a (veri sonu) kadar sirayla kosar
+        trace = _run_trace_loop(env, agent, algo, light=True)
+        nav = np.asarray(env.nav_history, dtype=float)
+        rets = np.asarray(getattr(env, "ret_history", []), dtype=float)
+        results.append(dict(
+            episode=i, noise_std=nstd, steps=len(trace),
+            nav=nav, dates=[t["date"] for t in trace], trace=trace,
+            **episode_metrics(nav, rets),
+        ))
+    return results
 
 
 def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
@@ -3844,15 +6098,71 @@ def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
 # =====================================================================
 # Eğitim jeneratörü — canlı UI için episod başına yield
 # =====================================================================
-def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
-                    rollout_len: int = 400, resume_agent=None):
-    """Episod/update başına bir telemetri kaydı yield eder. Sonsuz akış —
-    tüketici (tab_train) 'Durdur' butonuyla keser.
+def train_generator(algo: str, step_days: int, adaptive: bool, hp: dict,
+                    rollout_len: int = 400, resume_agent=None,
+                    n_episodes: int | None = None):
+    """Episod/update başına bir telemetri kaydı yield eder.
+
+    n_episodes verilirse (UI'dan gelir) tam o kadar episode/update koşar ve
+    generator kendiliğinden biter. None ise sonsuz akış — tüketici (tab_train)
+    'Eğitimi Durdur' butonuyla keser.
 
     resume_agent verilirse (G4) yeni ajan kurulmaz; durdurulan ajan AYNI
-    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder."""
-    max_steps = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}[algo]
-    env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
+    ağırlık/optimizer/replay buffer'la kaldığı yerden öğrenmeye devam eder.
+
+    N10: session_state.train_max_steps varsa o değer kullanılır (sidebar slider);
+         yoksa algo'ya özgü sabit fallback.
+    """
+    _algo_defaults = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}
+    max_steps = max(1, len(st.session_state.px_tr))
+
+    # OPT-IN: per-episode noise'lu veri seti (anti-ezber). Toggle aciksa her episode
+    # train verisinin UNIFORM-noise'lu yeni bir versiyonunu gorur (episode 0 = orijinal).
+    # KAPALI veya veri yuklenmemisse: episode_data_fn=None -> mevcut davranis korunur (golden BIT-AYNI).
+    _edf = None
+    if st.session_state.get("train_noisy_episodes", True) and st.session_state.get("data_loaded"):
+        from core.factory import select_features as _select_features
+        from utils.features import add_features as _add_features
+
+        _px_tr_orig = st.session_state.px_tr            # orijinal train fiyat DataFrame
+        _scaler = st.session_state.scaler               # train-only fit edilmis scaler
+        _feats_tr_orig = st.session_state.feats_tr      # zaten transform edilmis feats dict
+        _nstd = float(st.session_state.get("price_noise_std", 0.01))
+
+        # feat_names: select_features sonrasi env'in kullandigi sira (algo'ya gore forecast filtreli)
+        _feat_names = list(_select_features(_feats_tr_orig, algo).keys())
+
+        # Episode 0 icin orijinal feat_tensor — env ctor'un kullandigi ile BIT-AYNI
+        _orig_feat_tensor = np.stack(
+            [_feats_tr_orig[k].values.astype(np.float32) for k in _feat_names], axis=-1
+        )
+        _orig_prices = _px_tr_orig.values.astype(np.float32)
+
+        def _edf(ep_idx: int):
+            """Her episode icin (prices_array, feat_tensor_array) dondurur.
+            ep_idx == 0 -> orijinal (BIT-AYNI); ep_idx >= 1 -> noise'lu yeni veri seti."""
+            if ep_idx == 0 or _nstd == 0.0:
+                return (_orig_prices, _orig_feat_tensor)
+            # Noise'lu fiyat serisi uret (UNIFORM; core.episodes.make_noisy_prices)
+            _noisy_px = make_noisy_prices(_px_tr_orig, _nstd, seed=SEED + ep_idx)
+            # Teknik feature'lari noisy fiyat uzerinden yeniden hesapla; egitim scaler'i uygula
+            _raw_noisy = _add_features(_noisy_px)
+            _feats_noisy = _scaler.transform(_raw_noisy)
+            # Forecast feature (varsa) egzojen -> orijinal feats_tr'den kopyala (state_dim KORU)
+            if "forecast" in _feats_tr_orig and "forecast" not in _feats_noisy:
+                _feats_noisy["forecast"] = _feats_tr_orig["forecast"]
+            # select_features filtresi (DQN forecast'i dislar vs PPO/SAC/TD3 icin)
+            _feats_noisy_sel = _select_features(_feats_noisy, algo)
+            _ft = np.stack(
+                [_feats_noisy_sel[k].values.astype(np.float32) for k in _feat_names], axis=-1
+            )
+            return (_noisy_px.values.astype(np.float32), _ft)
+
+    # episode_data_fn aktifse train adim-noise'u KAPAT (veri zaten noise'lu; cift-noise gereksiz)
+    _noise_std_override = 0.0 if _edf is not None else None  # None -> _make_env kendi okur
+
+    env = _make_env(True, algo, step_days, adaptive, max_steps=max_steps,
+                    episode_data_fn=_edf)
     if resume_agent is not None:
         agent = resume_agent
     else:
@@ -3860,25 +6170,33 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
         agent = _make_agent(algo, env.state_dim, action_dim, hp)
     # Başarı kıyası için tren EW NAV'ı (core.trainer success'i bununla hesaplar)
     ew_tr = equal_weight(st.session_state.px_tr)["nav"]
-    # Sonsuz akış (n_iters=None) — core.trainer.train ajan tipine göre dispatch eder;
-    # tüketici (tab_train) 'Durdur' ile keser. Telemetri dict'i CLI ile ortaktır.
-    yield from train_loop(agent, env, n_iters=None, rollout_len=rollout_len, ew_nav=ew_tr)
+    # n_episodes=None → sonsuz akış; int → tam o kadar episode/update sonra generator biter.
+    # core.trainer.train ajan tipine göre dispatch eder; telemetri dict'i CLI ile ortaktır.
+    yield from train_loop(agent, env, n_iters=n_episodes, rollout_len=rollout_len, ew_nav=ew_tr)
 
 
 # =====================================================================
 # Test dönemi — adım adım trajectory yakalama
 # =====================================================================
-def evaluate_with_trace(agent, algo: str, horizon: str, adaptive: bool) -> list:
-    env = _make_env(False, algo, horizon, adaptive, max_steps=10_000)
+def evaluate_with_trace(agent, algo: str, step_days: int, adaptive: bool) -> list:
+    env = _make_env(False, algo, step_days, adaptive, max_steps=10_000)
+    return _run_trace_loop(env, agent, algo)
+
+
+def _run_trace_loop(env, agent, algo: str, light: bool = False) -> list:
+    """Bir env'i adim-adim kosturup TAM trace dondurur (ORTAK cekirdek: tekli test
+    playback'i + gurultu-artirimli per-episode tablo ayni dongey reuse eder). Episode
+    veri sonuna (done) kadar SIRAYLA kosar. light=True -> 'state'/'q_values' atlanir
+    (cok-episode bellek; detay tablosu icin gereksiz). light=False -> tam trace."""
     s, _ = env.reset()
     trace = []
     done = trunc = False
     # P5 (ISP): hasattr yoklamasi yerine resmi Protocol — ayni semantik, acik niyet.
-    has_q = isinstance(agent, SupportsQValues)  # yalnizca DQN introspeksiyonu sunar
+    has_q = (not light) and isinstance(agent, SupportsQValues)  # yalnizca DQN introspeksiyonu
     while not (done or trunc):
-        date = env.dates[env.t]
+        decision_date = env.dates[env.t]
         weights_before = env.w.copy()
-        state_snapshot = s.copy()
+        state_snapshot = None if light else s.copy()
 
         q_vals = agent.q_values(s) if has_q else None
         a = agent.act_eval(s)                       # ajan-agnostik (BaseAgent.act_eval)
@@ -3893,14 +6211,17 @@ def evaluate_with_trace(agent, algo: str, horizon: str, adaptive: bool) -> list:
 
         trace.append({
             "step": len(trace),
-            "date": str(pd.Timestamp(date).date()),
+            "date": str(pd.Timestamp(info["date"]).date()),
+            "decision_date": str(pd.Timestamp(decision_date).date()),
             "state": state_snapshot,
             "action_idx": action_idx,
             "action_name": action_name,
             "q_values": q_vals,
             "weights_before": weights_before,
+            "target_weights": info["target_weights"].copy(),
             "weights_after": env.w.copy(),
             "reward_terms": info["reward_terms"],
+            "period_length": info["period_length"],
             "nav": float(env.nav),
             "prices_t": info["prices_t"].copy(),
         })
@@ -3925,6 +6246,8 @@ def _compute_test_tl_snaps(trace: list, initial_capital: float) -> list:
             prev_portfolio_tl=prev_portfolio_tl,
             holding_days_prev=holding_days_prev,
             tx_cost_rate=float(t["reward_terms"].get("tx_cost", 0.0)),
+            target_weights=t.get("target_weights"),
+            holding_period_days=int(t.get("period_length", 1)),
         )
         snap["w_now"] = t["weights_after"]
         snaps.append(snap)
@@ -3958,7 +6281,14 @@ from ui.state import ASSET_NAMES
 
 
 def _weights_pie(weights: np.ndarray, title: str = "Portföy Ağırlıkları"):
-    df = pd.DataFrame({"asset": ASSET_NAMES, "weight": weights})
+    # Güvenlik ağı: evren beklenen 28+nakit'ten farklıysa (ör. yfinance kısmi veri
+    # döndürdü) etiketleri ağırlık uzunluğuna hizala — UI çökmemeli (ASSET_NAMES sabit 29).
+    w = list(np.asarray(weights).ravel())
+    names = list(ASSET_NAMES)
+    if len(names) != len(w):
+        names = names[:max(0, len(w) - 1)] + ["CASH"]
+        names = (names + [f"A{i}" for i in range(len(names), len(w))])[:len(w)]
+    df = pd.DataFrame({"asset": names, "weight": w})
     df = df[df["weight"] > 0.005]  # çok küçük dilimleri gizle
     fig = px.pie(df, names="asset", values="weight", title=title, hole=0.35)
     fig.update_traces(textposition="inside", textinfo="percent+label")
@@ -4035,93 +6365,52 @@ def _horizon_preset_table() -> pd.DataFrame:
 """Kontrol paneli (sidebar) — app.py'den tasindi (P5)."""
 from __future__ import annotations
 
+import datetime
+
 import streamlit as st
 
-from config import SEED, EnvConfig
+from config import (DEFAULTS, SEED, STEP_DAYS_MAX, DataConfig, DQNConfig, EnvConfig,
+                    PPOConfig, RewardConfig, SACConfig, TD3Config,
+                    cash_daily_rate as _cash_daily_rate)
 from env.portfolio_env import HORIZON_PRESETS
-from ui.services import _load_data, load_saved_agent, model_path, save_trained_agent
-from ui.state import _agent_key
+from core.persistence import MODELS_DIR, model_path
+from ui.services import (_load_data, list_saved_models, load_saved_agent,
+                         load_saved_agent_from_path, save_trained_agent)
+from ui.state import _agent_key, set_active_run_spec
+
+_dc = DataConfig()
+_rc = RewardConfig()
+
+# Tarih aralığı sınırları (UI kısıtı)
+_DATE_MIN = datetime.date(2015, 1, 1)
+_DATE_MAX = datetime.date(2024, 12, 31)
 
 # SonarCloud S1192: 3+ kez tekrar eden UI literal'leri tek sabitte topla.
-_EP_HINT = "Epizot sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes."
+_EP_HINT = ("Eğitim **N episode** koşar (sidebar'daki 'Episode sayısı' değeri); "
+            "'Eğitimi Durdur' ile erken kesilebilir.")
 _LBL_POLICY_LR = "Policy LR"
 _LBL_BATCH = "Batch"
 
 
 def _sidebar_reward_editor(preset: dict):
-    """⚖️ Ödül & Ceza katsayıları düzenleyicisi — session_state.reward_cfg'i günceller.
+    """⚖️ Ödül & Ceza — sidebar slim stub.
 
-    None/boş değerler env'in preset default'larına düşer. Kullanıcı 'Preset'e dön'
-    ile tüm override'ları sıfırlayabilir.
+    Tüm detaylı editör 'Ödül & Ceza Tasarımı' sekmesine taşındı.
+    Sidebar'da yalnız bilgi notu + reset butonu bırakıldı; böylece
+    iki ayrı widget seti aynı reward_cfg key'lerini desync etmez.
     """
-    cfg = st.session_state.setdefault("reward_cfg", {})
     with st.sidebar.expander("⚖️ Ödül & Ceza Katsayıları", expanded=False):
-        st.caption("Ödül = log-getiri − η·turnover − λ·max(0, DD−τ) − iflas cezası")
-
-        if st.button("↺ Preset'e dön (tüm override'ları sıfırla)",
-                     key="reset_reward_cfg", use_container_width=True):
+        st.info(
+            "⚖️ Ödül/ceza ayarları artık **'Ödül & Ceza Tasarımı'** sekmesinde.\n\n"
+            "Tüm katsayıları, preset kaydet/yükle ve canlı önizlemeyi oradan yönetin."
+        )
+        if st.button(
+            "↺ Preset'e dön (tüm override'ları sıfırla)",
+            key="reset_reward_cfg",
+            width="stretch",
+        ):
             st.session_state.reward_cfg = {}
             st.rerun()
-
-        st.markdown("**Ödül terimleri** (vade preset'i default olarak)")
-        cfg["eta_base"] = st.number_input(
-            "η — İşlem (turnover) maliyeti katsayısı",
-            value=float(cfg.get("eta_base", preset["eta"])),
-            min_value=0.0, max_value=0.1, step=0.0001, format="%.4f",
-            help="Ağırlık değişiminin L1 normu bu katsayı ile çarpılıp ödülden düşülür "
-                 "(ve NAV'ı azaltır). Büyütünce ajan daha az işlem yapar.",
-        )
-        cfg["lambda_base"] = st.number_input(
-            "λ — Drawdown (DD) ceza katsayısı",
-            value=float(cfg.get("lambda_base", preset["lam"])),
-            min_value=0.0, max_value=10.0, step=0.05, format="%.3f",
-            help="max(0, DD − τ) bu katsayı ile çarpılıp ödülden düşülür.",
-        )
-        cfg["tau_base"] = st.number_input(
-            "τ — DD eşiği (oran)",
-            value=float(cfg.get("tau_base", preset["tau"])),
-            min_value=0.0, max_value=0.5, step=0.005, format="%.3f",
-            help="Tepe-den DD > τ olduğunda ceza başlar. 0.05 = %5'lik DD toleransı.",
-        )
-
-        st.markdown("**İflas (simülasyonu durdurma)**")
-        cfg["bankruptcy_nav"] = st.number_input(
-            "İflas NAV eşiği",
-            value=float(cfg.get("bankruptcy_nav", EnvConfig.bankruptcy_nav)),
-            min_value=0.0, max_value=0.9, step=0.01, format="%.2f",
-            help="NAV bu eşiğin altına düşerse episod iflas olarak sonlandırılır. "
-                 "Örn. 0.01 = başlangıç sermayesinin %1'ine inmek.",
-        )
-        cfg["bankruptcy_penalty"] = st.number_input(
-            "İflas ek ceza değeri",
-            value=float(cfg.get("bankruptcy_penalty", EnvConfig.bankruptcy_penalty)),
-            min_value=0.0, max_value=1000.0, step=1.0, format="%.1f",
-            help="İflas anında toplam ödüle eklenen negatif terim. Log-ölçeğinde büyük değer "
-                 "(normal adım ödülü ~±0.01). Ajan iflasa gitmemeyi öğrenir.",
-        )
-
-        st.markdown("**Adaptif şekillendirici hedefleri**")
-        cfg["vol_target"] = st.number_input(
-            "vol_target (hedef realize vol)",
-            value=float(cfg.get("vol_target", EnvConfig.vol_target)),
-            min_value=0.0001, max_value=0.5, step=0.001, format="%.4f",
-            help="Adaptif mod açıkken λ ve τ bu hedefe göre ölçeklenir.",
-        )
-        cfg["turnover_target"] = st.number_input(
-            "turnover_target (hedef turnover)",
-            value=float(cfg.get("turnover_target", EnvConfig.turnover_target)),
-            min_value=0.001, max_value=1.0, step=0.005, format="%.3f",
-            help="Adaptif mod açıkken η bu hedefe göre ölçeklenir.",
-        )
-        cfg["ema_alpha"] = st.slider(
-            "EMA α (adaptif hafıza)",
-            min_value=0.001, max_value=0.5, value=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
-            step=0.005, format="%.3f",
-            help="Büyük α = daha hızlı uyum, küçük α = daha stabil.",
-        )
-
-        st.caption("⚠️ Bu ayarları değiştirdikten sonra ajanları **yeniden eğitmek** "
-                   "anlamlı olur; eski ajan farklı ortamda öğrenilmiştir.")
 
 
 def sidebar_controls():
@@ -4143,12 +6432,68 @@ def sidebar_controls():
              "canlı adım tablolarını rahat okumak için kullan.",
     )
 
+    st.session_state.n_episodes = st.sidebar.number_input(
+        "Episode / iterasyon sayısı",
+        min_value=1, max_value=1000,
+        value=int(st.session_state.n_episodes),
+        step=1,
+        help="Eğitim tam bu kadar episode/iterasyon koşar; '1. iterasyon orijinal' açıksa "
+             "1. iterasyon gürültüsüz ORİJİNAL, 2.–N. iterasyonlar FARKLI gürültülü "
+             "realizasyondur. 'Eğitimi Durdur' erken kesebilir. (PPO için birim 'update'.)",
+    )
+
+    st.session_state.price_noise_std = st.sidebar.slider(
+        "Fiyat gürültüsü σ (anti-ezber)",
+        min_value=0.0, max_value=0.01,
+        value=float(st.session_state.price_noise_std),
+        step=0.0005, format="%.4f",
+        help="σ = gürültünün STANDART SAPMASI (ölçek) — eklenen SABİT sayı DEĞİL. Her train "
+             "ADIMINDA her hisseye N(0, σ)'dan ÇEKİLEN AYRI bir rastgele sayı eklenir "
+             "(rng.normal, env-yerel); ardışık adımlar ve her episode farklı realizasyon → "
+             "ezberi önler. Eğitim-YALNIZ; eval'de hep KAPALI. 0 = kapalı.",
+    )
+
+    st.session_state.episode_clean = st.sidebar.checkbox(
+        "1. iterasyon orijinal veri (anti-ezber)",
+        value=bool(st.session_state.get("episode_clean", True)),
+        help="Açık (varsayılan): 1. iterasyon gürültüsüz ORİJİNAL fiyatlarla; 2.–N. "
+             "iterasyonlar her biri N(0, σ)'dan FARKLI gürültü realizasyonuyla eğitilir "
+             "(kullanıcı isteği — '1 iterasyon orijinal, kalanı noise'lu'). Kapalı: tüm "
+             "iterasyonlar gürültülü (klasik). σ=0 ise etkisiz.",
+    )
+
+    st.session_state.train_noisy_episodes = st.sidebar.checkbox(
+        "Eğitimde her episode = noise'lu veri seti (anti-ezber)",
+        value=bool(st.session_state.get("train_noisy_episodes", True)),
+        help="Açık: her episode train verisinin UNIFORM-noise'lu YENİ versiyonu "
+             "(episode 0 orijinal); ajan her episode'da FARKLI veri üzerinde eğitilir. "
+             "Kapalı: getiri-seviyesi adım-noise (eski davranış). σ slider gürültü genişliği.",
+    )
+
     st.sidebar.divider()
     _algos = ["DQN", "PPO", "SAC", "TD3"]
     _cur = st.session_state.selected_algo if st.session_state.selected_algo in _algos else "DQN"
     algo = st.sidebar.radio("Ajan", _algos, index=_algos.index(_cur))
     st.session_state.selected_algo = algo
 
+    step_days = int(st.sidebar.number_input(
+        "Karar adimi (BIST seansi)", min_value=1, max_value=STEP_DAYS_MAX,
+        value=int(st.session_state.get("step_days", DEFAULTS.step_days)), step=1,
+        help="Ajan her N BIST seansinin donem-sonu kapanisinda karar verir ve rebalans yapar.",
+    ))
+    if step_days != int(st.session_state.get("step_days", DEFAULTS.step_days)):
+        st.session_state.step_days = step_days
+        st.session_state.data_loaded = False
+        st.session_state.trained_agents = {}
+        st.session_state.test_traces = {}
+        st.session_state.baselines = None
+        st.sidebar.warning("Adim uzunlugu degisti; veriyi yeniden yukleyin.")
+    else:
+        st.session_state.step_days = step_days
+    preset = HORIZON_PRESETS["medium"]  # legacy-equivalent reward defaults
+    st.sidebar.caption(f"Her {step_days} seansta karar + rebalans; episode = tum train araligi")
+
+    """LEGACY_UI_REMOVED
     horizon_label = st.sidebar.radio(
         "Vade (Yatırım Ufku)",
         ["Kısa", "Orta", "Uzun"],
@@ -4162,6 +6507,125 @@ def sidebar_controls():
         f"λ={preset['lam']} · τ={preset['tau']} · γ={preset['gamma']}"
     )
 
+    # ------------------------------------------------------------------
+    # Adım granülerliği seçici
+    # ------------------------------------------------------------------
+    _GRAN_LABELS = {"daily": "Gün (Daily)", "monthly": "Ay (Monthly)", "yearly": "Yıl (Yearly)"}
+    _GRAN_REVERSE = {v: k for k, v in _GRAN_LABELS.items()}
+    _cur_gran = st.session_state.get("granularity", "daily")
+    _cur_gran_label = _GRAN_LABELS.get(_cur_gran, "Gün (Daily)")
+    _sel_gran_label = st.sidebar.selectbox(
+        "Adım granülerliği",
+        options=[_GRAN_LABELS[g] for g in GRANULARITY_OPTIONS],
+        index=list(GRANULARITY_OPTIONS).index(_cur_gran),
+        key="ui_granularity",
+        help=(
+            "Veri adım büyüklüğü. **Gün**: ham BIST günlük fiyatlar (varsayılan, "
+            "golden-güvenli). **Ay**: aylık ortalama (~120 nokta/10 yıl). "
+            "**Yıl**: yıllık ortalama (~10 nokta/10 yıl — kaba sonuç). "
+            "Feature'lar her zaman günlük hesaplanır, sonra resample edilir."
+        ),
+    )
+    _new_gran = _GRAN_REVERSE[_sel_gran_label]
+
+    # Granülerlik değişince veriyi geçersiz kıl (kullanıcıya "Veriyi Yükle" uyarısı)
+    if _new_gran != st.session_state.get("granularity", "daily"):
+        st.session_state.granularity = _new_gran
+        if st.session_state.get("data_loaded"):
+            st.session_state.data_loaded = False
+            for k in ["prices", "px_tr", "px_te", "feats_tr", "feats_te", "scaler",
+                      "macro_tr", "macro_te", "regime_tr", "regime_te",
+                      "trained_agents", "test_traces", "baselines"]:
+                st.session_state[k] = (
+                    {} if k in ("trained_agents", "test_traces") else None
+                )
+            st.sidebar.warning(
+                "Granülerlik değişti — veriyi yeniden yükleyin ('Veriyi Yükle / İndir')."
+            )
+    else:
+        st.session_state.granularity = _new_gran
+
+    # Tahmini nokta sayısı + minimum nokta uyarısı
+    _n_pts = st.session_state.get("granularity_n_points")
+    _min_pts = GRANULARITY_MIN_POINTS.get(_new_gran, 0)
+    if _n_pts is not None:
+        _pts_caption = f"Mevcut veri: {_n_pts} {_sel_gran_label.lower()} noktası"
+        if _n_pts < _min_pts:
+            st.sidebar.warning(
+                f"{_pts_caption} — önerilen minimum {_min_pts}. "
+                "Yıllık granülerlikte sonuçlar kaba olabilir."
+            )
+        else:
+            st.sidebar.caption(_pts_caption)
+    else:
+        _approx = {"daily": "~2520", "monthly": "~120", "yearly": "~10"}.get(_new_gran, "?")
+        st.sidebar.caption(
+            f"Tahmini nokta sayısı (2015–2024, 10 yıl): {_approx} — "
+            f"{'yeterli' if _new_gran != 'yearly' else 'az nokta → kaba sonuç'}."
+        )
+
+    # ------------------------------------------------------------------
+    # Episode uzunlugu VADEDEN BAGIMSIZ: her zaman secili veri tarih
+    # araliginin TAMAMI (train env = len(px_tr); eval env = tam test donemi).
+    # Vade (kisa/orta/uzun) yalniz pencere/rebalans/odul preset'ini etkiler,
+    # episode uzunlugunu DEGIL. (Eski horizon-bazli slider kaldirildi.)
+    # ------------------------------------------------------------------
+    _max_d = preset["max_days"]                 # asagidaki rebalans araligi icin
+    _px_tr = st.session_state.get("px_tr")
+    _ep_txt = (f"≈{len(_px_tr)} adım (train aralığının tamamı)"
+               if _px_tr is not None else "tüm seçili tarih aralığı")
+    st.sidebar.caption(
+        f"📏 **Episode uzunluğu: {_ep_txt}** — vade (kısa/orta/uzun) bundan BAĞIMSIZ. "
+        "1 episode = seçili veri tarih aralığının TAMAMI; eval de tam test dönemini koşar."
+    )
+    st.session_state.train_max_steps = 10_000   # geriye-uyum (kullanilmiyor; egitim len(px_tr) kullanir)
+
+    # Parametrik rebalans frekansı — vade preset'ini override eder (default = preset).
+    # _make_env → build_env → env.rebalance_freq'e bağlanır; CLI/golden preset kullanır (golden-güvenli).
+    _default_reb = int(preset["rebalance"])
+    _reb_max = max(2, int(_max_d))
+    _cur_reb = int(st.session_state.get("train_rebalance") or _default_reb)
+    _cur_reb = max(1, min(_reb_max, _cur_reb))
+    st.session_state.train_rebalance = st.sidebar.number_input(
+        "Rebalans frekansı (gün)",
+        min_value=1, max_value=_reb_max,
+        value=_cur_reb, step=1,
+        help=(
+            f"Kaç günde bir ağırlıklar yeniden ayarlanır (al-sat). Preset ({st.session_state.horizon}): {_default_reb} gün. "
+            "1 = her gün; arada günlerde önceki ağırlık tutulur. "
+            "Eğitim & test envlerine uygulanır; CLI/golden preset'i kullanır."
+        ),
+    )
+    """
+    st.session_state.train_rebalance = 1
+    st.session_state.train_max_steps = 10_000
+
+    # ------------------------------------------------------------------
+    # N12: Nakit yıllık faiz oranı
+    # ------------------------------------------------------------------
+    _cur_annual = float(st.session_state.get("cash_annual_rate", EnvConfig.cash_annual_rate))
+    _new_annual = st.sidebar.number_input(
+        "Nakit yıllık faiz (risksiz) %",
+        min_value=0.0, max_value=1.0,
+        value=_cur_annual,
+        step=0.05, format="%.2f",
+        help=(
+            "Portföydeki nakit kısmının yıllık bileşik getirisi (risksiz faiz). "
+            "TR 2022-24 mevduat/repo ~ %40 → 0.40. "
+            "Günlük oran: (1+R)^(1/252)-1 formülüyle türetilir. "
+            "Eğitim & test envlerine uygulanır — 'hisse mi nakit mi daha karlı' kıyasını canlı gösterir."
+        ),
+        key="ui_cash_annual_rate",
+    )
+    st.session_state.cash_annual_rate = _new_annual
+    # Günlük oranı hesapla ve session'a yaz — _make_env buradan okur.
+    _daily = _cash_daily_rate(_new_annual, EnvConfig.trading_days)
+    st.session_state.cash_daily_rate = _daily
+    st.sidebar.caption(
+        f"Günlük nakit getirisi: {_daily*100:.5f}%  "
+        f"(yıllık %{_new_annual*100:.1f} → (1+R)^(1/252)-1)"
+    )
+
     _sidebar_reward_editor(preset)
 
     st.session_state.adaptive = st.sidebar.checkbox(
@@ -4171,14 +6635,86 @@ def sidebar_controls():
 
     st.sidebar.divider()
     st.sidebar.subheader("📊 Veri")
+
+    # ------------------------------------------------------------------
+    # Tarih seçici — train/test aralığı
+    # ------------------------------------------------------------------
+    with st.sidebar.expander("📅 Tarih Aralığı", expanded=False):
+        st.caption(
+            "Eğitim başlangıcı → Train/Test ayırım → Test bitişi. "
+            "Ayırım sonrası veriler test dönemi olarak kullanılır."
+        )
+        _start_val = datetime.date.fromisoformat(
+            st.session_state.get("data_start", _dc.start)
+        )
+        _split_val = datetime.date.fromisoformat(
+            st.session_state.get("data_split", _dc.train_end)
+        )
+        _end_val = datetime.date.fromisoformat(
+            st.session_state.get("data_end", _dc.end)
+        )
+
+        sel_start = st.date_input(
+            "Train başlangıcı",
+            value=_start_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_start",
+            help="Eğitim verisinin başlangıç tarihi (dahil).",
+        )
+        sel_split = st.date_input(
+            "Train/Test ayırım tarihi",
+            value=_split_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_split",
+            help="Bu tarihten itibaren test verisi başlar (dahil). "
+                 "Scaler/forecaster yalnız eğitim kısmında fit edilir (sızıntı yok).",
+        )
+        sel_end = st.date_input(
+            "Test bitişi",
+            value=_end_val,
+            min_value=_DATE_MIN,
+            max_value=_DATE_MAX,
+            key="ui_data_end",
+            help="Test verisinin bitiş tarihi (dahil).",
+        )
+
+        # Sızıntı / tutarlılık doğrulaması
+        _date_valid = (sel_start < sel_split <= sel_end)
+        if not _date_valid:
+            st.sidebar.error(
+                "Tarih hatası: Train başlangıcı < Ayırım tarihi ≤ Test bitişi "
+                "koşulu sağlanmalı. Veriyi yükleyemezsiniz."
+            )
+        else:
+            st.session_state.data_start = sel_start.isoformat()
+            st.session_state.data_split = sel_split.isoformat()
+            st.session_state.data_end   = sel_end.isoformat()
+            st.caption(
+                f"Eğitim: {sel_start} → {sel_split}  |  "
+                f"Test: {sel_split} → {sel_end}"
+            )
+
     if not st.session_state.data_loaded:
-        if st.sidebar.button("Veriyi Yükle / İndir", use_container_width=True):
+        _date_valid_outer = (
+            datetime.date.fromisoformat(st.session_state.get("data_start", _dc.start))
+            < datetime.date.fromisoformat(st.session_state.get("data_split", _dc.train_end))
+            <= datetime.date.fromisoformat(st.session_state.get("data_end", _dc.end))
+        )
+        if st.sidebar.button(
+            "Veriyi Yükle / İndir",
+            width='stretch',
+            disabled=not _date_valid_outer,
+        ):
             _load_data()
             st.rerun()
+        if not _date_valid_outer:
+            st.sidebar.caption("Tarih aralığı geçersiz — düzeltin.")
     else:
         st.sidebar.success(f"Veri yüklü: {st.session_state.prices.shape[0]} gün × "
                            f"{st.session_state.prices.shape[1]} hisse")
-        if st.sidebar.button("Veriyi yeniden yükle", use_container_width=True):
+        if st.sidebar.button("Veriyi yeniden yükle", width='stretch'):
             for k in ["data_loaded", "prices", "px_tr", "px_te",
                       "feats_tr", "feats_te", "scaler",
                       "trained_agents", "test_traces", "baselines"]:
@@ -4189,68 +6725,304 @@ def sidebar_controls():
     st.sidebar.divider()
     st.sidebar.subheader(f"🎛 Hiperparametreler ({algo})")
     hp = {}
+    # γ (discount): vade preset default'u; override edilirse hp üzerinden TÜM ajanlara uygulanır.
+    hp["gamma"] = st.sidebar.number_input(
+        "γ (discount / iskonto)", value=float(preset["gamma"]),
+        min_value=0.90, max_value=0.999, step=0.005, format="%.3f",
+        key=f"gamma_step_{step_days}",
+        help="İskonto faktörü. Vade preset default verir (Kısa 0.95 / Orta 0.99 / Uzun 0.995); "
+             "burada değiştirilebilir — DQN/PPO/SAC/TD3'ün hepsine uygulanır.",
+    )
+    # Gelişmiş expander'larda hidden seçeneği için ortak tuple listesi + format
+    _HIDDEN_OPTIONS = [(128, 64), (256, 128), (512, 256)]
+    _hidden_fmt = lambda t: f"{t[0]}×{t[1]}"
+
     if algo == "DQN":
         st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",
-            options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3)
-        hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000)
-        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
-        hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
+            options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3,
+            key=f"dqn_lr_{step_days}")
+        hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000,
+            key=f"dqn_eps_decay_{step_days}")
+        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64,
+            key=f"dqn_batch_{step_days}")
+        hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100,
+            key=f"dqn_target_update_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(DQNConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"dqn_hidden_{step_days}",
+                help="Politika ağının gizli katman nöron sayısı (1. katman × 2. katman). "
+                     "Büyük ağ kapasiteyi artırır ama daha yavaş eğitilir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=DQNConfig.buffer_size,
+                key=f"dqn_buffer_{step_days}",
+                help="Deneyim tekrar belleğinin maksimum kapasitesi. "
+                     "Büyük buffer çeşitlilik sağlar, bellek tüketimini artırır.",
+            )
+            hp["eps_start"] = st.slider(
+                "ε başlangıç (keşif)",
+                min_value=0.5, max_value=1.0,
+                value=DQNConfig.eps_start,
+                step=0.05,
+                key=f"dqn_eps_start_{step_days}",
+                help="Epsilon-greedy keşif oranının başlangıç değeri. "
+                     "1.0 = tamamen rastgele; eğitim ilerledikçe eps_end'e düşer.",
+            )
+            hp["eps_end"] = st.slider(
+                "ε bitiş (minimum keşif)",
+                min_value=0.01, max_value=0.20,
+                value=DQNConfig.eps_end,
+                step=0.01,
+                key=f"dqn_eps_end_{step_days}",
+                help="Epsilon'un ulaşacağı minimum değer. "
+                     "Küçük tutmak keşfi azaltır, sömürüyü artırır.",
+            )
+            hp["huber_delta"] = st.select_slider(
+                "Huber delta (kayıp eşiği)",
+                options=[0.5, 1.0, 2.0],
+                value=DQNConfig.huber_delta,
+                key=f"dqn_huber_delta_{step_days}",
+                help="Huber kaybının L1/L2 geçiş eşiği. "
+                     "Küçük delta aykırı değerlere karşı daha sağlam.",
+            )
     elif algo == "PPO":
-        st.sidebar.caption("Update sayısı **sınırsız** — istediğin noktada 'Eğitimi Durdur' butonuyla kes.")
-        hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
+        st.sidebar.caption(_EP_HINT.replace("episode", "update"))
+        hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64,
+            key=f"ppo_rollout_{step_days}")
         hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"ppo_lr_p_{step_days}")
         hp["lr_v"]       = st.sidebar.select_slider("Value LR",
-            options=[3e-4, 1e-3, 3e-3], value=1e-3)
-        hp["clip"]       = st.sidebar.slider("Clip ε", 0.05, 0.4, 0.2, step=0.05)
+            options=[3e-4, 1e-3, 3e-3], value=1e-3,
+            key=f"ppo_lr_v_{step_days}")
+        hp["clip"]       = st.sidebar.slider("Clip ε", 0.05, 0.4, 0.2, step=0.05,
+            key=f"ppo_clip_{step_days}")
         hp["ent_coef"]   = st.sidebar.select_slider("Entropi katsayısı",
-            options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128)
-        hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1)
+            options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005,
+            key=f"ppo_ent_coef_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128,
+            key=f"ppo_batch_{step_days}")
+        hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1,
+            key=f"ppo_n_epochs_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(PPOConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"ppo_hidden_{step_days}",
+                help="Actor ve Critic ağlarının gizli katman nöron sayısı. "
+                     "Büyük ağ karmaşık politikaları öğrenebilir.",
+            )
+            hp["lam"] = st.slider(
+                "GAE lambda (λ)",
+                min_value=0.90, max_value=0.99,
+                value=PPOConfig.lam,
+                step=0.01,
+                key=f"ppo_lam_{step_days}",
+                help="Generalized Advantage Estimation'ın varyans-bias dengesi. "
+                     "1.0 = tam MC (yüksek varyans); 0.0 = TD(0) (yüksek bias).",
+            )
+            hp["log_std_init"] = st.slider(
+                "log σ başlangıcı",
+                min_value=-1.0, max_value=0.0,
+                value=PPOConfig.log_std_init,
+                step=0.1,
+                key=f"ppo_log_std_init_{step_days}",
+                help="Politika dağılımının başlangıç log-standart sapması. "
+                     "Daha negatif = daha dar başlangıç dağılımı (daha az keşif).",
+            )
     elif algo == "SAC":
         st.sidebar.caption(_EP_HINT)
         hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"sac_lr_pi_{step_days}")
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
-            options=[3e-4, 5e-4, 1e-3], value=5e-4)
-        hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01)
+            options=[3e-4, 5e-4, 1e-3], value=5e-4,
+            key=f"sac_lr_q_{step_days}")
+        hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01,
+            key=f"sac_alpha_{step_days}")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
-            options=[0.005, 0.01, 0.05], value=0.01)
-        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+            options=[0.005, 0.01, 0.05], value=0.01,
+            key=f"sac_tau_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128,
+            key=f"sac_batch_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(SACConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"sac_hidden_{step_days}",
+                help="Actor ve Q-ağlarının gizli katman nöron sayısı. "
+                     "SAC sürekli eylem uzayında çalışır; kapasite önemlidir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=SACConfig.buffer_size,
+                key=f"sac_buffer_{step_days}",
+                help="Off-policy deneyim belleğinin maksimum kapasitesi. "
+                     "Büyük buffer örnek çeşitliliğini artırır.",
+            )
     else:  # TD3 — sürekli/deterministik politika (hocanın tavsiyesi)
         st.sidebar.caption(_EP_HINT)
         hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"td3_lr_pi_{step_days}")
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
-            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4,
+            key=f"td3_lr_q_{step_days}")
         hp["policy_noise"] = st.sidebar.slider("Hedef-politika gürültüsü", 0.0, 0.5, 0.2, step=0.05,
+            key=f"td3_policy_noise_{step_days}",
             help="Hedef aksiyona eklenen clamped Gauss gürültüsü (TD3 smoothing).")
         hp["expl_noise"] = st.sidebar.slider("Keşif gürültüsü", 0.0, 0.5, 0.1, step=0.05,
+            key=f"td3_expl_noise_{step_days}",
             help="Eğitimde aksiyona eklenen keşif gürültüsü (eval'de kapalı).")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
-            options=[0.005, 0.01, 0.05], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+            options=[0.005, 0.01, 0.05], value=0.005,
+            key=f"td3_tau_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128,
+            key=f"td3_batch_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(TD3Config.hidden),
+                format_func=_hidden_fmt,
+                key=f"td3_hidden_{step_days}",
+                help="Actor ve Critic ağlarının gizli katman nöron sayısı. "
+                     "TD3 deterministik politikayla çalışır; derin ağ stabil kalabilir.",
+            )
+            hp["noise_clip"] = st.slider(
+                "Gürültü kırpma (noise_clip)",
+                min_value=0.0, max_value=1.0,
+                value=TD3Config.noise_clip,
+                step=0.1,
+                key=f"td3_noise_clip_{step_days}",
+                help="Hedef-politika gürültüsünün kırpma sınırı. "
+                     "Büyük değer daha geniş hedef düzgünleştirme sağlar.",
+            )
+            hp["policy_delay"] = st.slider(
+                "Politika güncelleme gecikmesi",
+                min_value=1, max_value=4,
+                value=TD3Config.policy_delay,
+                step=1,
+                key=f"td3_policy_delay_{step_days}",
+                help="Actor her kaç Critic güncellemesinde bir güncellenir (TD3 gecikmeli politika). "
+                     "2 = varsayılan; artırmak eğitimi stabilleştirir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=TD3Config.buffer_size,
+                key=f"td3_buffer_{step_days}",
+                help="Off-policy deneyim belleğinin maksimum kapasitesi.",
+            )
 
-    # 💾 Model kalıcılığı (PDF §11): eğitilmiş modeli diske kaydet / diskten yükle.
+    # 💾 Model kalıcılığı (PDF §11 + N11): eğitilmiş modeli diske kaydet / diskten yükle.
+    # İsimli kayıt: kullanıcı ad girer → named_model_path(name).pt olarak kaydedilir.
+    # Geriye-uyumluluk: eski algo_{horizon}_{adaptive}.pt dosyaları listede görünmeye devam eder.
     st.sidebar.divider()
     st.sidebar.subheader("💾 Model (kaydet / yükle)")
-    cur_key = _agent_key(algo, st.session_state.horizon, st.session_state.adaptive)
+
+    cur_key = _agent_key(algo, step_days, st.session_state.adaptive)
     has_trained = (cur_key in st.session_state.trained_agents
                    and st.session_state.trained_agents[cur_key][0] is not None)
-    if has_trained and st.sidebar.button("💾 Eğitilmiş modeli kaydet", use_container_width=True):
-        p = save_trained_agent(algo, st.session_state.horizon, st.session_state.adaptive)
-        st.sidebar.success(f"Kaydedildi: {p}")
-    if model_path(algo).exists():
-        if st.sidebar.button(f"📂 Kaydedilmiş {algo} modelini yükle", use_container_width=True):
-            load_saved_agent(algo)
-            st.sidebar.success(f"{algo} modeli yüklendi — Test sekmesinde çalıştırılabilir.")
-            st.rerun()
-    else:
-        st.sidebar.caption(f"Kayıtlı {algo} modeli yok (CLI ile üret: python main.py).")
 
+    if has_trained:
+        _default_name = f"{algo}_step{step_days}"
+        _model_name = st.sidebar.text_input(
+            "Model adı (kaydetmek için)",
+            value=_default_name,
+            key="ui_model_name_input",
+            help="Kaydedilecek modelin adı. Harf/rakam/_ ve - kullanılabilir; "
+                 "diğer karakterler _ ile değiştirilir. Boş bırakılırsa "
+                 f"'{_default_name}' kullanılır.",
+        )
+        if st.sidebar.button("💾 Eğitilmiş modeli kaydet", width='stretch'):
+            p = save_trained_agent(
+                algo, step_days, st.session_state.adaptive,
+                name=_model_name,
+            )
+            if p:
+                from core.persistence import read_meta as _rm
+                from pathlib import Path as _P
+                _saved_meta = _rm(_P(p))
+                st.sidebar.success(
+                    f"Kaydedildi: **{_saved_meta['name']}** "
+                    f"({_saved_meta['saved_at']})  \n`{_P(p).name}`"
+                )
+            else:
+                st.sidebar.error("Kaydetme başarısız — önce modeli eğitin.")
+
+    # Kayıtlı model listesi: list_saved_models() meta okur, saved_at'e göre sıralı.
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _saved_models = list_saved_models()
+    if _saved_models:
+        st.sidebar.markdown("**Kayıtlı modeller**")
+
+        def _model_label(m: dict) -> str:
+            """"{name} · {saved_at} · {algo}/{horizon}/{adaptive}" formatı."""
+            _hor_tr = f"{m.get('step_days', 1)} seans" if not m.get("legacy") else f"legacy:{m['horizon']}"
+            _adp_tr = "adaptif" if m["adaptive"] else "sabit"
+            _name = m["name"] or "(isimsiz)"
+            _at = m["saved_at"] or "—"
+            _algo_s = m["algo"] or "?"
+            return f"{_name} · {_at} · {_algo_s}/{_hor_tr}/{_adp_tr}"
+
+        _labels = [_model_label(m) for m in _saved_models]
+        _selected_label = st.sidebar.selectbox(
+            "Model seç",
+            options=_labels,
+            key="ui_model_selectbox",
+            help="Kayıtlı modeller — isim · tarih · algo/vade/adaptif. "
+                 "Seçip 'Yükle' butonuna bas.",
+        )
+        _sel_idx = _labels.index(_selected_label) if _selected_label in _labels else 0
+        _sel_model = _saved_models[_sel_idx]
+        st.sidebar.caption(
+            f"Dosya: `{_sel_model['path'].split('/')[-1].split(chr(92))[-1]}`"
+        )
+
+        if st.sidebar.button("📂 Seçili modeli yükle", width='stretch'):
+            result = load_saved_agent_from_path(_sel_model["path"])
+            if result:
+                _lkey, _lmeta = result
+                # Yüklenen modelin algo/horizon/adaptive değerlerini session'a al
+                # → mevcut resume (G4 "Devam Et") akışı bu değerleri kullanır.
+                st.session_state.selected_algo = _lmeta["algo"]
+                if _lmeta.get("run_spec"):
+                    st.session_state.step_days = int(_lmeta["run_spec"].get("step_days", 1))
+                st.session_state.adaptive = _lmeta["adaptive"]
+                _hor_tr = (f"{_lmeta['run_spec'].get('step_days', 1)} seans"
+                           if _lmeta.get("run_spec") else f"legacy:{_lmeta['horizon']}")
+                st.sidebar.success(
+                    f"**{_sel_model['name']}** yüklendi  \n"
+                    f"{_lmeta['algo']} / {_hor_tr} / "
+                    f"{'adaptif' if _lmeta['adaptive'] else 'sabit'}  \n"
+                    "Test sekmesinde çalıştırılabilir; 'Devam Et' ile eğitime devam edilebilir."
+                )
+                st.rerun()
+            else:
+                st.sidebar.error("Model yüklenemedi.")
+    else:
+        st.sidebar.caption(
+            "Kayıtlı model yok. Eğit ve 'Kaydet' butonunu kullan "
+            "ya da CLI ile üret: python main.py"
+        )
+
+    st.session_state.gamma_daily = float(hp["gamma"])
+    set_active_run_spec(algo, step_days, st.session_state.adaptive, hp)
     st.sidebar.caption(f"Seed: {SEED} (sabit)")
-    return algo, st.session_state.horizon, st.session_state.adaptive, hp
+    return algo, step_days, st.session_state.adaptive, hp
 
 ```
 
@@ -4267,7 +7039,7 @@ import plotly.express as px
 import streamlit as st
 
 from data import BIST28, SPLIT, START, END
-from ui.charts import _horizon_preset_table
+from config import DEFAULTS
 
 
 def tab_mdp():
@@ -4288,7 +7060,7 @@ def tab_mdp():
             fig_px.update_layout(height=280, showlegend=False,
                                  margin=dict(t=40, b=20), xaxis_title="",
                                  yaxis_title="NAV (ilk gün = 1.0)")
-            st.plotly_chart(fig_px, use_container_width=True)
+            st.plotly_chart(fig_px, width='stretch', key="mdp_px")
 
     with col2:
         st.subheader("MDP Tuple (𝒮, 𝒜, 𝒫, r, γ)")
@@ -4298,16 +7070,22 @@ def tab_mdp():
             ("𝒜 Eylem Uzayı (PPO/SAC)", "ℝ²⁹ → softmax → portföy simpleksi"),
             ("𝒫 Geçiş", "Piyasa tarafından belirlenen stokastik süreç"),
             ("r Ödül", "log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)"),
-            ("γ İndirgeme", "0.95 / 0.99 / 0.995 (vadeye göre)"),
-            ("Sonlandırma", "veri sonu VEYA NAV<0.01 (iflas) VEYA 252 adım"),
+            ("γ İndirgeme", "gamma_daily ^ dönem_seans_sayısı"),
+            ("Sonlandırma", "veri sonu VEYA NAV<0.01 (iflas)"),
         ], columns=["Bileşen", "Tanım"])
-        st.dataframe(mdp, hide_index=True, use_container_width=True)
+        st.dataframe(mdp, hide_index=True, width='stretch')
 
     st.divider()
-    st.subheader("⏳ Vade Preset'leri & Adaptif Ödül")
+    st.subheader("N-Seans Adım Sözleşmesi & Adaptif Ödül")
     c1, c2 = st.columns([1.1, 1])
     with c1:
-        st.dataframe(_horizon_preset_table(), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame([{
+            "Seçili N": int(st.session_state.get("step_days", DEFAULTS.step_days)),
+            "Rebalans": "Her adım",
+            "Momentum (işlem günü)": DEFAULTS.mom_window,
+            "Min-vol (işlem günü)": DEFAULTS.minvol_window,
+            "γ günlük": DEFAULTS.gamma,
+        }]), hide_index=True, width='stretch')
     with c2:
         st.markdown("""
 **Adaptif şekillendirici** (`AdaptiveRewardShaper`):
@@ -4321,7 +7099,7 @@ EWMA ile rolling realized vol (`vol_ewma`) ve rolling turnover (`turnover_ewma`)
   — volatil rejimde eşik daralır → daha hassas DD cezası
 """)
         st.info(f"Adaptif mod: **{'Açık' if st.session_state.adaptive else 'Kapalı'}** · "
-                f"Seçili vade: **{st.session_state.horizon}**")
+                f"Seçili adım: **{st.session_state.get('step_days', 1)} BIST seansı**")
 
 ```
 
@@ -4334,6 +7112,7 @@ EWMA ile rolling realized vol (`vol_ewma`) ve rolling turnover (`turnover_ewma`)
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -4345,8 +7124,9 @@ from data import BIST28
 from env.portfolio_env import ACTION_NAMES
 from ui.services import train_generator
 from ui.state import _agent_key
+from utils.metrics import training_diagnostics
 from utils.portfolio_tl import (
-    build_portfolio_table, compute_tl_series, step_rows_for_training,
+    build_portfolio_table, build_trade_log, compute_tl_series, step_rows_for_training,
 )
 
 # Grafik/tablo serilestirme her N iterde bir (performans — kesif bulgusu:
@@ -4356,15 +7136,15 @@ from utils.portfolio_tl import (
 RENDER_EVERY = 5
 
 
-def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
-    st.header(f"🎓 Eğitim — {algo} · {horizon.upper()} · "
+def tab_train(algo: str, step_days: int, adaptive: bool, hp: dict):
+    st.header(f"🎓 Eğitim — {algo} · {step_days} seans/adım · "
               f"Adaptif: {'Açık' if adaptive else 'Kapalı'}")
 
     if not st.session_state.data_loaded:
         st.warning("Önce sidebar'dan 'Veriyi Yükle' butonuna basın.")
         return
 
-    key = _agent_key(algo, horizon, adaptive)
+    key = _agent_key(algo, step_days, adaptive)
     already = key in st.session_state.trained_agents
     if already:
         st.success(f"Bu konfigürasyon daha önce eğitildi. "
@@ -4392,6 +7172,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     if not (run or resume):
         if already:
             _render_training_curves(st.session_state.trained_agents[key][1], algo)
+            _render_episode_browser(key, algo, float(st.session_state.initial_capital))
         return
 
     # --- CANLI EĞİTİM (sınırsız) ---
@@ -4433,16 +7214,24 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     resume_agent = st.session_state.trained_agents[key][0] if resume else None
     curve = list(st.session_state.trained_agents[key][1]) if resume else []
     iter_offset = len(curve)
-    gen = train_generator(algo, horizon, adaptive, hp,
+    n_episodes = int(st.session_state.get("n_episodes", 12))
+    gen = train_generator(algo, step_days, adaptive, hp,
                           rollout_len=int(hp.get("rollout_len", 400)),
-                          resume_agent=resume_agent)
+                          resume_agent=resume_agent,
+                          n_episodes=n_episodes)
     t0 = time.time()
     iter_times = []  # son N iter süresi (iter/sn için)
     trained_agent = None
     stopped_early = False
     initial_capital = float(st.session_state.initial_capital)
 
+    # İlerleme çubuğu: N episode'a göre doldurulur
+    progress_bar = st.progress(0.0, text=f"Episode 0 / {n_episodes}")
+
     last_rec = None
+    # Per-episode telemetri (episode seçici için): her episode'un TL izini sakla (UI-only).
+    ep_snaps: list = []
+    ep_shared: dict = {"prices": None, "dates": None}
     for rec in gen:
         iter_start_elapsed = time.time() - t0
         trained_agent = rec["agent"]
@@ -4454,11 +7243,30 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         # Her iter sonunda session'a yaz → kullanıcı durdurursa veya refresh etse bile son hali kalır
         st.session_state.trained_agents[key] = (trained_agent, list(curve))
 
+        # Per-episode snapshot — selectbox ile sonradan incelemek için (UI-only, golden-etkisiz).
+        if ep_shared["prices"] is None:
+            ep_shared["prices"] = env.prices
+            ep_shared["dates"] = env.dates
+        ep_snaps.append({
+            "iter": int(d["iter"]),
+            "reward": float(rec["reward"]), "nav": float(rec["nav"]),
+            "gain": float(rec.get("gain", rec["nav"] - 1.0)),
+            "loss": float(rec.get("loss", 0.0)),
+            "success": int(rec.get("success", 0)),
+            "nav_history": list(env.nav_history),
+            "weight_history": [np.asarray(w, dtype=np.float32) for w in env.weight_history],
+            "reward_terms_history": [dict(rt) for rt in env.reward_terms_history],
+            "t": int(env.t), "step_count": int(env.step_count),
+            "actions": list(rec.get("actions") or []),
+        })
+        st.session_state.setdefault("episode_snaps", {})[key] = ep_snaps
+        st.session_state.setdefault("episode_shared", {})[key] = ep_shared
+
         # Agir serilestirme (4 egri + TL paneli) yalniz her RENDER_EVERY iterde
         render_now = (len(curve) == 1) or (len(curve) % RENDER_EVERY == 0)
         if render_now:
             _render_live_curves(pd.DataFrame(curve),
-                                ph_reward, ph_gain, ph_success, ph_loss)
+                                ph_reward, ph_gain, ph_success, ph_loss, seq=d["iter"])
 
         # --- Throughput metrikleri ---
         iter_end_elapsed = time.time() - t0
@@ -4466,11 +7274,16 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         recent = iter_times[-5:]
         rate = (len(recent) / sum(recent)) if sum(recent) > 0 else 0.0
         avg = sum(iter_times) / len(iter_times)
-        ph_iter.metric("Iter", iter_offset + rec["iter"] + 1)
+        cur_ep = iter_offset + rec["iter"] + 1
+        ph_iter.metric("Episode", f"{cur_ep} / {n_episodes}")
         ph_rate.metric("Iter/sn", f"{rate:.2f}")
         ph_avg.metric("Ort. iter süresi", f"{avg:.2f}s")
         mm = int(iter_end_elapsed // 60); ss = int(iter_end_elapsed % 60)
         ph_elapsed.metric("Toplam elapsed", f"{mm:02d}:{ss:02d}")
+
+        # İlerleme çubuğu: Episode i/N
+        _prog = min(cur_ep / n_episodes, 1.0)
+        progress_bar.progress(_prog, text=f"Episode {cur_ep} / {n_episodes}")
 
         # --- Canlı TL paneli (son episod için env.nav_history / weight_history kullan) ---
         if render_now:
@@ -4480,12 +7293,12 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
                 ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
                 ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
                 ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-                ph_bankrupt=ph_bankrupt,
+                ph_bankrupt=ph_bankrupt, seq=d["iter"],
             )
 
-        status.info(f"Iter {iter_offset + rec['iter'] + 1} · NAV={rec['nav']:.3f} · "
+        status.info(f"Episode {cur_ep}/{n_episodes} · NAV={rec['nav']:.3f} · "
                     f"elapsed {iter_end_elapsed:.1f}s — "
-                    f"istediğin yerde 'Eğitimi Durdur' butonuna basabilirsin")
+                    f"'Eğitimi Durdur' ile erken kesilebilir")
 
         # Kullanıcı ayarladığı gecikmeyi iter arası uygula (slider canlı okunur).
         delay = float(st.session_state.get("train_delay", 0.0))
@@ -4501,9 +7314,13 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     st.session_state.trained_agents[key] = (trained_agent, curve)
     elapsed = time.time() - t0
     stop_slot.empty()
-    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir)
+    progress_bar.progress(1.0, text=f"Tamamlandı — {len(curve)} episode")
+    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir).
+    # seq="final": dongu-ici render'larin (seq=iter no) HICBIRIYLE cakismaz -> ayni
+    # st.empty() slot'una son kez yazar, benzersiz key (StreamlitDuplicateElementKey yok).
     if curve:
-        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss)
+        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss,
+                            seq="final")
     if last_rec is not None:
         _render_train_tl_panel(
             env=last_rec["env"], algo=algo, rec=last_rec, initial_capital=initial_capital,
@@ -4511,7 +7328,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
             ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
             ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
             ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-            ph_bankrupt=ph_bankrupt,
+            ph_bankrupt=ph_bankrupt, seq="final",
         )
     if stopped_early:
         status.warning(f"{algo} eğitimi {len(curve)}. iter sonunda durduruldu "
@@ -4520,39 +7337,87 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         status.success(f"{algo} eğitildi ({len(curve)} iter, {elapsed:.1f}s) "
                        f"ve session'a kaydedildi. Tab 3'te test edebilirsiniz.")
 
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri ---
+    if curve:
+        rt_hist = list(last_rec["env"].reward_terms_history) if last_rec is not None else None
+        diag = training_diagnostics(curve, reward_terms_history=rt_hist)
+        st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+        d_cols = st.columns(5)
+        d_cols[0].metric(
+            "Hareketli Ort. Return",
+            f"{diag.get('ma_return_last', 0.0):.4f}",
+            help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+        )
+        d_cols[1].metric(
+            "Başarı Oranı",
+            f"{diag.get('success_rate', 0.0):.1%}",
+            help="EW benchmark'ı geçen episod oranı",
+        )
+        if "avg_steps" in diag:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                f"{diag['avg_steps']:.1f}",
+                help="Trainer 'steps' alanından hesaplandı",
+            )
+        else:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                "—",
+                help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+            )
+        d_cols[3].metric(
+            "Drawdown Ceza Adımı",
+            str(diag.get("drawdown_penalty_steps", "—")),
+            help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı",
+        )
+        d_cols[4].metric(
+            "Ort. İşlem Maliyeti",
+            f"{diag.get('mean_tx_cost', 0.0):.5f}",
+            help="reward_terms_history'den: adım başı ortalama tx_cost",
+        )
 
-def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
-    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri)."""
+    # Episode seçici — eğitilen her episode'un detayını (TL izi/grafik/değerler) incele.
+    _render_episode_browser(key, algo, initial_capital)
+
+
+def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss, seq=0):
+    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri).
+
+    seq: render sirasi (iter no). Streamlit 1.5x st.empty() slot'una DONGU icinde
+    tekrar cizimde ELEMAN ID'sini her seferinde yeniden kaydeder; sabit key ->
+    StreamlitDuplicateElementKey. Render-basina BENZERSIZ key (seq) -> her cizim
+    benzersiz; empty() slot yine yalniz son grafigi gosterir (yerinde gunceller).
+    """
     fig_r = px.line(df, x="iter", y="reward",
                     title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
                     markers=True)
     fig_r.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_reward.plotly_chart(fig_r, use_container_width=True)
+    ph_reward.plotly_chart(fig_r, width='stretch', key=f"train_live_reward_{seq}")
 
     fig_g = px.line(df, x="iter", y="gain",
                     title="Kazanç (nihai NAV − 1.0)",
                     markers=True)
     fig_g.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_gain.plotly_chart(fig_g, use_container_width=True)
+    ph_gain.plotly_chart(fig_g, width='stretch', key=f"train_live_gain_{seq}")
 
     fig_s = px.bar(df, x="iter", y="success",
                    title="Başarı (EW benchmark'a göre 0/1)")
     fig_s.update_layout(height=260, margin=dict(t=40, b=20),
                         yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
-    ph_success.plotly_chart(fig_s, use_container_width=True)
+    ph_success.plotly_chart(fig_s, width='stretch', key=f"train_live_success_{seq}")
 
     if "loss" in df.columns:
         fig_l = px.line(df, x="iter", y="loss",
                         title="Ortalama loss (düşüş beklenir)",
                         markers=True)
         fig_l.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_loss.plotly_chart(fig_l, use_container_width=True)
+        ph_loss.plotly_chart(fig_l, width='stretch', key=f"train_live_loss_{seq}")
 
 
 def _render_train_tl_panel(env, algo, rec, initial_capital,
                             ph_tl_start, ph_tl_end, ph_tl_net, ph_tl_min, ph_tl_max, ph_tl_dd,
                             ph_tl_line, ph_tl_bar, ph_tl_table, ph_tl_port,
-                            ph_bankrupt=None):
+                            ph_bankrupt=None, seq=0):
     """Son episod/iter için TL türevlerini hesapla ve placeholder'ları güncelle."""
     nav_hist = list(env.nav_history)
     weight_hist = list(env.weight_history)
@@ -4600,7 +7465,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_tl.update_layout(title="Portföy Değeri (TL)", height=280,
                          margin=dict(t=40, b=30), xaxis_title="Gün",
                          yaxis_title="TL")
-    ph_tl_line.plotly_chart(fig_tl, use_container_width=True)
+    ph_tl_line.plotly_chart(fig_tl, width='stretch', key=f"train_tl_line_{seq}")
 
     # Adım P&L bar chart (yeşil/kırmızı)
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_pnl_arr]
@@ -4608,7 +7473,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_bar.update_layout(title="Adım P&L (TL)", height=280,
                           margin=dict(t=40, b=30), xaxis_title="Gün",
                           yaxis_title="TL")
-    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True)
+    ph_tl_bar.plotly_chart(fig_bar, width='stretch', key=f"train_tl_bar_{seq}")
 
     # Tam adım tablosu
     dates_slice = env.dates[t_start + 1 : t_start + 1 + steps_done]
@@ -4627,13 +7492,15 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
         action_names=action_names, action_indices=action_indices,
         reward_terms_list=rt_hist, initial_capital=initial_capital,
     )
-    ph_tl_table.dataframe(df_rows, hide_index=True, use_container_width=True, height=500)
+    ph_tl_table.dataframe(df_rows, hide_index=True, width='stretch', height=500,
+                          key=f"train_tl_table_{seq}")
 
     # Episod sonu portföy panosu (w_prev = sondan bir önceki adım)
     last = snaps[-1]
     w_prev = weight_hist[-2] if len(weight_hist) >= 2 else None
     df_port = build_portfolio_table(BIST28, last, include_cash=True, w_prev=w_prev)
-    ph_tl_port.dataframe(df_port, hide_index=True, use_container_width=True)
+    ph_tl_port.dataframe(df_port, hide_index=True, width='stretch',
+                         key=f"train_tl_port_{seq}")
 
     # İflas olduysa eğitim panelinin altında uyarı göster
     last_rt = rt_hist[-1] if rt_hist else {}
@@ -4656,14 +7523,169 @@ def _render_training_curves(curve: list, algo: str):
     c1, c2 = st.columns(2)
     c3, c4 = st.columns(2)
     c1.plotly_chart(px.line(df, x="iter", y="reward", markers=True,
-                            title="Kümülatif Ödül"), use_container_width=True)
+                            title="Kümülatif Ödül"), width='stretch',
+                    key="train_curve_reward")
     c2.plotly_chart(px.line(df, x="iter", y="gain", markers=True,
-                            title="Kazanç (NAV − 1)"), use_container_width=True)
+                            title="Kazanç (NAV − 1)"), width='stretch',
+                    key="train_curve_gain")
     c3.plotly_chart(px.bar(df, x="iter", y="success", title="Başarı (0/1)"),
-                    use_container_width=True)
+                    width='stretch', key="train_curve_success")
     if "loss" in df.columns:
         c4.plotly_chart(px.line(df, x="iter", y="loss", markers=True,
-                                title="Loss"), use_container_width=True)
+                                title="Loss"), width='stretch',
+                        key="train_curve_loss")
+
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri (statik görüntüleme) ---
+    diag = training_diagnostics(curve)
+    st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+    d_cols = st.columns(5)
+    d_cols[0].metric(
+        "Hareketli Ort. Return",
+        f"{diag.get('ma_return_last', 0.0):.4f}",
+        help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+    )
+    d_cols[1].metric(
+        "Başarı Oranı",
+        f"{diag.get('success_rate', 0.0):.1%}",
+        help="EW benchmark'ı geçen episod oranı",
+    )
+    if "avg_steps" in diag:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            f"{diag['avg_steps']:.1f}",
+            help="Trainer 'steps' alanından hesaplandı",
+        )
+    else:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            "—",
+            help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+        )
+    d_cols[3].metric(
+        "Drawdown Ceza Adımı",
+        str(diag.get("drawdown_penalty_steps", "—")),
+        help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı (yeniden eğitimde mevcut)",
+    )
+    d_cols[4].metric(
+        "Ort. İşlem Maliyeti",
+        f"{diag.get('mean_tx_cost', 0.0):.5f}",
+        help="reward_terms_history'den: adım başı ortalama tx_cost (yeniden eğitimde mevcut)",
+    )
+
+
+def _render_episode_browser(key, algo, initial_capital):
+    """Saklanan her episode'un TL grafiklerini + değerlerini selectbox ile gösterir.
+
+    Eğitim sırasında `episode_snaps[key]`'e yazılan her episode'un telemetrisi
+    (nav/weight/reward_terms history + t/step_count + actions) buradan replay edilir.
+    `_render_train_tl_panel` env attribute'larını okuduğundan, snapshot bir
+    SimpleNamespace (sahte env) olarak ona geçirilir. UI-only — golden etkisiz.
+    """
+    if key is None:
+        return
+    snaps = st.session_state.get("episode_snaps", {}).get(key)
+    shared = st.session_state.get("episode_shared", {}).get(key)
+    if not snaps or not shared or shared.get("prices") is None:
+        return
+    st.markdown("---")
+    st.markdown("### 🔎 Episode incele (her iterasyonun detayı)")
+    _noisy_mode = st.session_state.get("train_noisy_episodes", True)
+    if _noisy_mode:
+        st.caption(
+            "Her episode = train verisinin noise'lu YENİ versiyonu (anti-ezber modu açık). "
+            "Episode 0 = orijinal veri; Episode 1..N = farklı tohumlu UNIFORM-noise'lu veri setleri. "
+            "Adım = bir BIST seansı (karar günü)."
+        )
+    else:
+        st.caption(
+            "Anti-ezber modu kapalı — tüm episodlar aynı veri üzerinde getiri-seviyesi "
+            "adım-noise ile eğitildi. Adım = bir BIST seansı (karar günü)."
+        )
+    n = len(snaps)
+
+    def _label(i):
+        s = snaps[i]
+        return f"Episode {s['iter'] + 1} / {n}  ·  ödül {s['reward']:.2f} · NAV {s['nav']:.3f}"
+
+    sel = st.selectbox("Hangi episode?", list(range(n)), index=n - 1,
+                       format_func=_label, key=f"ep_browse_sel_{key}")
+    s = snaps[sel]
+    c = st.columns(4)
+    c[0].metric("Episode", f"{s['iter'] + 1} / {n}")
+    c[1].metric("Kümülatif Ödül (Σr)", f"{s['reward']:.3f}")
+    c[2].metric("Kazanç (NAV−1)", f"{s['gain']:+.3f}")
+    c[3].metric("Başarı (EW)", "✅" if s["success"] else "—")
+
+    # Canlı TL panelle aynı placeholder yapısı (6 metrik + 2 grafik + tablo + porto)
+    mcols = st.columns(6)
+    pm = [mcols[i].empty() for i in range(6)]
+    ccols = st.columns(2)
+    ph_line, ph_bar = ccols[0].empty(), ccols[1].empty()
+    ph_table, ph_port, ph_bank = st.empty(), st.empty(), st.empty()
+
+    fake_env = SimpleNamespace(
+        nav_history=s["nav_history"], weight_history=s["weight_history"],
+        reward_terms_history=s["reward_terms_history"],
+        prices=shared["prices"], dates=shared["dates"],
+        t=s["t"], step_count=s["step_count"],
+    )
+    fake_rec = {"actions": s["actions"]}
+    _render_train_tl_panel(
+        env=fake_env, algo=algo, rec=fake_rec, initial_capital=initial_capital,
+        ph_tl_start=pm[0], ph_tl_end=pm[1], ph_tl_net=pm[2],
+        ph_tl_min=pm[3], ph_tl_max=pm[4], ph_tl_dd=pm[5],
+        ph_tl_line=ph_line, ph_tl_bar=ph_bar,
+        ph_tl_table=ph_table, ph_tl_port=ph_port, ph_bankrupt=ph_bank,
+        seq=f"browse_{key}_{sel}",
+    )
+
+    # ---- Adım kaydırıcısı: seçilen episode'da HER adımdaki aksiyon/holdings/nakit ----
+    if int(s["step_count"]) > 1:
+        st.markdown("**📋 Adım-adım detay** — bu episode'da seçilen adımda hangi aksiyon, "
+                    "hangi hisseler tutuluyor, portföy ve nakit durumu:")
+        _t_start = int(s["t"]) - int(s["step_count"])
+        _tx = [float(rt.get("tx_cost", 0.0)) for rt in s["reward_terms_history"]]
+        _ep_tl = compute_tl_series(
+            nav_hist=s["nav_history"], weight_hist=s["weight_history"],
+            prices_matrix=shared["prices"], initial_capital=initial_capital,
+            tx_cost_rates=_tx, t_start=_t_start,
+        )
+        if _ep_tl:
+            _maxk = len(_ep_tl) - 1
+            step_k = st.slider("Adım seç", 0, _maxk, _maxk, key=f"ep_browse_step_{key}_{sel}")
+            snap_k = _ep_tl[step_k]
+            _acts = s["actions"]
+            if algo == "DQN" and step_k < len(_acts):
+                _a = int(_acts[step_k])
+                act_name = ACTION_NAMES[_a] if 0 <= _a < len(ACTION_NAMES) else str(_a)
+            elif algo in ("PPO", "SAC", "TD3"):
+                act_name = f"{algo} (sürekli aksiyon)"
+            else:
+                act_name = "—"
+            _di = _t_start + 1 + step_k
+            dstr = (str(pd.Timestamp(shared["dates"][_di]).date())
+                    if 0 <= _di < len(shared["dates"]) else "")
+            sc = st.columns(6)
+            sc[0].metric("Adım", f"{step_k + 1} / {int(s['step_count'])}")
+            sc[1].metric("Tarih", dstr)
+            sc[2].metric("Aksiyon", act_name)
+            sc[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+            sc[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+            sc[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+            # w_prev = adımdan ÖNCEKİ ağırlık (weight_history[step_k]); 0'da başlangıç=nakit.
+            w_prev_k = s["weight_history"][step_k] if step_k < len(s["weight_history"]) else None
+            df_port_k = build_portfolio_table(BIST28, snap_k, include_cash=True, w_prev=w_prev_k)
+            df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+            pcol, tcol = st.columns([1.4, 1])
+            with pcol:
+                st.caption("Portföy — bu adımda tutulan hisseler (ağırlık / lot / TL)")
+                st.dataframe(df_port_k, hide_index=True, width='stretch', height=320)
+            with tcol:
+                st.caption("Bu adımın işlemleri (al / sat)")
+                if df_trade_k.empty:
+                    st.info("Bu adımda işlem yok (ağırlıklar korunmuş).")
+                else:
+                    st.dataframe(df_trade_k, hide_index=True, width='stretch', height=280)
 
 ```
 
@@ -4685,18 +7707,22 @@ import streamlit as st
 
 from data import BIST28
 from ui.charts import _q_bar, _reward_bar, _state_top_features, _weights_pie
-from ui.services import _compute_test_tl_snaps, evaluate_with_trace
+from ui.services import (
+    _compute_test_tl_snaps, evaluate_noise_episodes_ui, evaluate_with_trace,
+)
+from core.episodes import summarize_episodes
 from ui.state import _agent_key, env_rebalance_hint
 from utils.portfolio_tl import (
     build_cumulative_trade_log, build_portfolio_table, build_trade_log,
+    step_rows_for_training,
 )
 
 
-def tab_test(algo: str, horizon: str, adaptive: bool):
-    st.header(f"🎬 Test — {algo} · {horizon.upper()} · "
+def tab_test(algo: str, step_days: int, adaptive: bool):
+    st.header(f"🎬 Test — {algo} · {step_days} seans/adım · "
               f"Adaptif: {'Açık' if adaptive else 'Kapalı'}")
 
-    key = _agent_key(algo, horizon, adaptive)
+    key = _agent_key(algo, step_days, adaptive)
     if key not in st.session_state.trained_agents:
         st.warning("Bu konfigürasyon henüz eğitilmedi. Tab 2'ye git ve 'Eğit' butonuna bas.")
         return
@@ -4704,7 +7730,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     if st.button("Test dönemini çalıştır (rollout + trajectory)", type="primary"):
         agent = st.session_state.trained_agents[key][0]
         with st.spinner("Ajan test döneminde adım adım çalıştırılıyor..."):
-            trace = evaluate_with_trace(agent, algo, horizon, adaptive)
+            trace = evaluate_with_trace(agent, algo, step_days, adaptive)
         st.session_state.test_traces[key] = trace
         st.session_state.step_idx = 0
         st.success(f"{len(trace)} adım yakalandı.")
@@ -4713,6 +7739,124 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     if not trace:
         st.info("Henüz trajectory yok. Yukarıdaki butona basın.")
         return
+
+    # =================================================================
+    # Gürültü-artırımlı çoklu episode (robustluk / anti-ezber)
+    # =================================================================
+    st.session_state.setdefault("noise_episodes", {})
+    with st.expander("🎲 Gürültü-artırımlı çoklu episode (robustluk testi)", expanded=False):
+        st.caption(
+            "Episode'lar orijinal fiyatlara **UNIFORM noise** eklenmiş YENİ serilerdir "
+            "(1. episode orijinal); ajan farklı veri görür (anti-ezber). "
+            "Feature'lar noisy fiyat üzerinden yeniden hesaplanır — ajan gerçekten farklı "
+            "durum vektörü alır (getiri-seviyesi Gauss'tan farklı: fiyat-seviyesi uniform). "
+            "Adım kaydırıcısıyla her episode'da her adımdaki aksiyon/holdings/nakit görülür. "
+            "Düşük dağılım = ajan dayanıklı; yüksek dağılım = tek tarihsel yola aşırı uyum riski."
+        )
+        cc = st.columns(3)
+        n_ep = cc[0].slider("Episode sayısı", 2, 30, 6, key="noise_n_ep")
+        nstd = cc[1].slider("Gürültü σ (günlük log-getiri)", 0.0, 0.05, 0.01,
+                            step=0.005, key="noise_std_ep")
+        run_noise = cc[2].button("▶ Episode'ları sırayla çalıştır", key="run_noise_eps")
+        if run_noise:
+            ag = st.session_state.trained_agents[key][0]
+            with st.spinner(f"{n_ep} episode test aralığı boyunca çalıştırılıyor..."):
+                st.session_state.noise_episodes[key] = evaluate_noise_episodes_ui(
+                    ag, algo, step_days, adaptive,
+                    n_episodes=int(n_ep), noise_std=float(nstd))
+        eps = st.session_state.noise_episodes.get(key)
+        if eps:
+            cap = float(st.session_state.initial_capital)
+            fig_eps = go.Figure()
+            for r in eps:
+                nav = np.asarray(r["nav"], dtype=float)
+                is_orig = (r["episode"] == 0)
+                fig_eps.add_trace(go.Scatter(
+                    x=list(range(len(nav))), y=nav * cap, mode="lines",
+                    name=("Orijinal" if is_orig else f"Ep{r['episode']} (σ={r['noise_std']:.3f})"),
+                    line=dict(width=3 if is_orig else 1,
+                              color="#1f77b4" if is_orig else None),
+                    opacity=1.0 if is_orig else 0.55))
+            fig_eps.add_hline(y=cap, line_dash="dot", line_color="#888")
+            fig_eps.update_layout(title="Portföy Değeri (TL) — episode başına",
+                                  height=380, xaxis_title="Adım (gün)",
+                                  yaxis_title="TL", margin=dict(t=40, b=30))
+            st.plotly_chart(fig_eps, use_container_width=True, key="noise_eps_chart")
+
+            df_eps = pd.DataFrame([{
+                "Episode": ("Orijinal" if r["episode"] == 0 else r["episode"]),
+                "Gürültü σ": round(r["noise_std"], 3),
+                "Adım": r["steps"],
+                "Final NAV": round(r["final_nav"], 4),
+                "Getiri %": round(r["total_return"] * 100, 2),
+                "Final TL": round(r["final_nav"] * cap, 0),
+                "Max DD %": round(r["max_drawdown"] * 100, 1),
+                "Sharpe": round(r["sharpe"], 2),
+            } for r in eps])
+            st.dataframe(df_eps, hide_index=True, use_container_width=True)
+
+            summ = summarize_episodes(eps)
+            mc = st.columns(4)
+            mc[0].metric("Final NAV ort.", f"{summ['final_nav_mean']:.4f}")
+            mc[1].metric("Final NAV std", f"{summ['final_nav_std']:.4f}")
+            mc[2].metric("Ort. getiri", f"{summ['total_return_mean'] * 100:+.2f}%")
+            mc[3].metric("Zarar olasılığı", f"{summ['prob_loss'] * 100:.0f}%")
+
+            # ---- Per-episode adım-adım detay tablosu (ekrandaki tam tablo) ----
+            st.markdown("**📋 Episode detay tablosu (adım-adım)** — episode'lar SIRAYLA "
+                        "koşar; biri tam bitmeden (N gün → N adım) diğeri başlamaz.")
+            _ep_lbl = [("Orijinal (gürültüsüz)" if r["episode"] == 0
+                        else f"Episode {r['episode']} · σ={r['noise_std']:.3f}") for r in eps]
+            sel = st.selectbox("Episode seç (detay tablosu)", range(len(eps)),
+                               format_func=lambda i: _ep_lbl[i], key="noise_ep_detail_sel")
+            ep_tr = eps[sel].get("trace") or []
+            if ep_tr:
+                snaps = _compute_test_tl_snaps(ep_tr, cap)
+                df_detail = step_rows_for_training(
+                    snaps, [t["date"] for t in ep_tr],   # düz list (str); np.array -> numpy.str_ pd.Timestamp hatasi
+                    action_names=[t["action_name"] for t in ep_tr],
+                    action_indices=[t["action_idx"] for t in ep_tr],
+                    reward_terms_list=[t["reward_terms"] for t in ep_tr],
+                    initial_capital=cap)
+                st.caption(f"{_ep_lbl[sel]} — {len(df_detail)} adım (tüm veri tarih aralığı)")
+                st.dataframe(df_detail, hide_index=True, use_container_width=True, height=420)
+
+                # ---- Adım kaydırıcısı: seçilen episode'da per-step detay ----
+                st.markdown("---")
+                st.markdown("**Adım kaydırıcısı** — seçilen episode'da her adımdaki "
+                            "aksiyon / holdings / nakit detayı:")
+                ep_max_step = len(ep_tr) - 1
+                step_k = st.slider(
+                    "Adım seç", 0, ep_max_step, 0,
+                    key=f"noise_ep_step_slider_{sel}_{_ep_lbl[sel][:20]}"
+                )
+                snap_k = snaps[step_k]
+                step_cols = st.columns(6)
+                step_cols[0].metric("Adım", f"{step_k + 1} / {ep_max_step + 1}")
+                step_cols[1].metric("Tarih", ep_tr[step_k]["date"])
+                step_cols[2].metric("Aksiyon", ep_tr[step_k]["action_name"])
+                step_cols[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+                step_cols[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+                step_cols[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+
+                # Holdings tablosu
+                w_prev_k = ep_tr[step_k - 1]["weights_before"] if step_k > 0 else None
+                df_port_k = build_portfolio_table(
+                    BIST28, snap_k, include_cash=True, w_prev=w_prev_k
+                )
+                port_col, trade_col = st.columns([1.3, 1])
+                with port_col:
+                    st.caption("Portföy (hisse / durum / agirlik / TL)")
+                    st.dataframe(df_port_k, hide_index=True,
+                                 use_container_width=True, height=320)
+                with trade_col:
+                    st.caption("Bu adimin islemleri (alim/satim)")
+                    df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+                    if df_trade_k.empty:
+                        st.info("Bu adımda işlem yok.")
+                    else:
+                        st.dataframe(df_trade_k, hide_index=True,
+                                     use_container_width=True, height=280)
 
     max_step = len(trace) - 1
     # ---- Oynatma kontrolleri ----
@@ -4756,17 +7900,17 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     with left:
         st.subheader("📊 Durum vektöründen top-8 öznitelik (z-score)")
         df_state = _state_top_features(snap["state"], top_k=8)
-        st.dataframe(df_state, hide_index=True, use_container_width=True, height=310)
+        st.dataframe(df_state, hide_index=True, width='stretch', height=310)
 
         if snap["q_values"] is not None:
             st.plotly_chart(_q_bar(snap["q_values"], snap["action_idx"]),
-                            use_container_width=True)
+                            width='stretch', key="test_q_bar")
 
     with right:
         st.plotly_chart(_weights_pie(snap["weights_after"]),
-                        use_container_width=True)
+                        width='stretch', key="test_weights_pie")
         st.plotly_chart(_reward_bar(snap["reward_terms"]),
-                        use_container_width=True)
+                        width='stretch', key="test_reward_bar")
 
     # --- İflas uyarısı (eğer bu adım bankrupt ise) ---
     if snap["reward_terms"].get("bankrupt"):
@@ -4786,15 +7930,15 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         st.caption("Durum: **YENİ** = bu adımda alındı · **TUTULUYOR** = pozisyon devam ediyor · "
                    "**ÇIKIŞ** = bu adımda satıldı")
         df_port = build_portfolio_table(BIST28, tl_now, include_cash=True, w_prev=w_prev)
-        st.dataframe(df_port, hide_index=True, use_container_width=True, height=360)
+        st.dataframe(df_port, hide_index=True, width='stretch', height=360)
     with tl_right:
         st.subheader("🧾 Bu adımın işlem logu")
         df_trade = build_trade_log(BIST28, tl_now, threshold_tl=1.0)
         if df_trade.empty:
-            rebal = env_rebalance_hint(horizon)
+            rebal = env_rebalance_hint(step_days)
             st.info(f"Bu adımda işlem yok (rebalans her {rebal} günde bir).")
         else:
-            st.dataframe(df_trade, hide_index=True, use_container_width=True, height=280)
+            st.dataframe(df_trade, hide_index=True, width='stretch', height=280)
         commission_tl = float(tl_now["commission_tl"])
         st.caption(f"Bu adımda komisyon: **{commission_tl:,.2f} ₺** "
                    f"(tx_cost oranı × portföy TL)")
@@ -4815,7 +7959,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         hc[2].metric("Toplam SATIŞ TL", f"{total_sells:,.0f} ₺")
         # En yeni işlemler üstte
         st.dataframe(df_hist.iloc[::-1].reset_index(drop=True),
-                     hide_index=True, use_container_width=True, height=320)
+                     hide_index=True, width='stretch', height=320)
 
     # --- Kümülatif/Step PnL grafikleri (başlangıçtan bu adıma) ---
     st.subheader("📈 TL Kazanç Zaman Serisi (başlangıçtan bu adıma)")
@@ -4831,14 +7975,14 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         fig_cum.update_layout(title="Kümülatif Kâr/Zarar (TL)", height=300,
                               margin=dict(t=40, b=30), xaxis_title="Adım",
                               yaxis_title="TL")
-        st.plotly_chart(fig_cum, use_container_width=True)
+        st.plotly_chart(fig_cum, width='stretch', key="test_cum_pnl")
     with pnl_right:
         colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_arr]
         fig_step = go.Figure(go.Bar(x=steps_idx, y=step_arr, marker_color=colors))
         fig_step.update_layout(title="Adım P&L (TL)", height=300,
                                margin=dict(t=40, b=30), xaxis_title="Adım",
                                yaxis_title="TL")
-        st.plotly_chart(fig_step, use_container_width=True)
+        st.plotly_chart(fig_step, width='stretch', key="test_step_pnl")
 
     # Adaptif katsayı zaman serisi (o ana kadar)
     st.subheader("📈 Adaptif katsayılar (baştan bu adıma kadar)")
@@ -4847,13 +7991,13 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     cc = st.columns(3)
     cc[0].plotly_chart(
         px.line(rt_hist, x="step", y="eta_t", title="η_t (tx cost katsayısı)"),
-        use_container_width=True)
+        width='stretch', key="test_eta_t")
     cc[1].plotly_chart(
         px.line(rt_hist, x="step", y="lambda_t", title="λ_t (DD penalty katsayısı)"),
-        use_container_width=True)
+        width='stretch', key="test_lambda_t")
     cc[2].plotly_chart(
         px.line(rt_hist, x="step", y="tau_t", title="τ_t (DD eşiği)"),
-        use_container_width=True)
+        width='stretch', key="test_tau_t")
 
     # Oynatma döngüsü — session_state.playing true iken otomatik ilerle
     if st.session_state.playing and idx < max_step:
@@ -4915,20 +8059,26 @@ def tab_compare():
     nav_map = {}
 
     for key, (agent, _curve) in trained.items():
-        algo, horizon, adaptive = key
+        algo, step_days, adaptive = key[:3]
         if key not in traces:
             continue
         tr = traces[key]
-        nav = np.array([t["nav"] for t in tr])
-        rets = np.array([t["reward_terms"]["gross_port_r"] for t in tr])
-        W = np.array([t["weights_after"] for t in tr])
-        m = summary(nav, rets, W)
-        name = f"{algo}-{horizon}{'·A' if adaptive else ''}"
+        initial_w = np.zeros_like(tr[0]["weights_before"])
+        initial_w[-1] = 1.0
+        nav = np.concatenate([[1.0], [t["nav"] for t in tr]])
+        rets = np.concatenate([[0.0], [
+            t["reward_terms"]["gross_port_r"] - t["reward_terms"]["tx_cost"] for t in tr]])
+        W = np.vstack([initial_w, [t["weights_after"] for t in tr]])
+        dates = pd.to_datetime([tr[0]["decision_date"]] + [t["date"] for t in tr])
+        turns = np.concatenate([[0.0], [t["reward_terms"]["delta_w_l1"] for t in tr]])
+        m = summary(nav, rets, W, dates=dates, turnover_values=turns)
+        name = f"{algo}-{step_days}g{'·A' if adaptive else ''}"
         rows[name] = m
         nav_map[name] = nav
 
     for bn, bd in baselines.items():
-        m = summary(bd["nav"], bd["rets"], bd.get("weights"))
+        m = summary(bd["nav"], bd["rets"], bd.get("weights"), dates=bd.get("dates"),
+                    turnover_values=bd.get("turnover"))
         rows[bn] = m
         nav_map[bn] = bd["nav"]
 
@@ -4937,21 +8087,29 @@ def tab_compare():
         return
 
     met_df = pd.DataFrame(rows).T.round(4)
-    st.dataframe(met_df, use_container_width=True)
+    st.dataframe(met_df, width='stretch')
     st.download_button("metrics.csv olarak indir",
                        data=met_df.to_csv().encode("utf-8"),
                        file_name="metrics.csv", mime="text/csv")
 
     # Hizalanmış NAV eğrileri
-    min_len = min(len(v) for v in nav_map.values())
-    nav_df = pd.DataFrame({k: v[-min_len:] for k, v in nav_map.items()})
-    nav_df.index = st.session_state.px_te.index[-min_len:]
+    nav_series = {}
+    for name, values in nav_map.items():
+        if name in rows and name.split("-")[0] in {"DQN", "PPO", "SAC", "TD3"}:
+            matching = next((traces[k] for k in trained if k in traces and
+                             f"{k[0]}-{k[1]}g{'·A' if k[2] else ''}" == name), None)
+            idx = (pd.to_datetime([matching[0]["decision_date"]] + [t["date"] for t in matching])
+                   if matching else st.session_state.px_te.index[-len(values):])
+        else:
+            idx = pd.DatetimeIndex(baselines[name].get("dates", st.session_state.px_te.index[:len(values)]))
+        nav_series[name] = pd.Series(values, index=idx)
+    nav_df = pd.concat(nav_series, axis=1, join="inner").sort_index()
     fig = go.Figure()
     for c in nav_df.columns:
         fig.add_trace(go.Scatter(x=nav_df.index, y=nav_df[c], name=c, mode="lines"))
     fig.update_layout(title="Test dönemi NAV (başlangıç = 1.0)",
                       height=440, yaxis_title="NAV", xaxis_title="Tarih")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch', key="compare_nav")
 
     # Ağırlık heatmap (seçilebilir)
     st.subheader("🔥 Ağırlık Isı Haritası")
@@ -4960,7 +8118,7 @@ def tab_compare():
         chosen = st.selectbox(
             "Ajan seç",
             agent_keys_with_traces,
-            format_func=lambda k: f"{k[0]}-{k[1]}{'·A' if k[2] else ''}"
+            format_func=lambda k: f"{k[0]}-{k[1]}g{'·A' if k[2] else ''}"
         )
         tr = traces[chosen]
         W = np.array([t["weights_after"] for t in tr])
@@ -4978,7 +8136,7 @@ def tab_compare():
         fig_hm.update_yaxes(ticktext=ASSET_NAMES,
                             tickvals=list(range(len(ASSET_NAMES))))
         fig_hm.update_layout(height=520, title=f"{chosen[0]} ağırlıkları")
-        st.plotly_chart(fig_hm, use_container_width=True)
+        st.plotly_chart(fig_hm, width='stretch', key="compare_heatmap")
 
         # DQN → aksiyon dağılımı
         if chosen[0] == "DQN":
@@ -4989,7 +8147,7 @@ def tab_compare():
             fig_a = px.bar(action_counts, title="DQN — aksiyon dağılımı (gün sayısı)")
             fig_a.update_layout(height=320, showlegend=False,
                                 yaxis_title="Gün sayısı", xaxis_title="Şablon")
-            st.plotly_chart(fig_a, use_container_width=True)
+            st.plotly_chart(fig_a, width='stretch', key="compare_dqn_actions")
 
         # Adaptif katsayılar — zaman serisi
         st.subheader("📐 Seçili ajanın adaptif katsayıları (test dönemi)")
@@ -4997,10 +8155,10 @@ def tab_compare():
         rt_df["date"] = [t["date"] for t in tr]
         sub = st.columns(3)
         sub[0].plotly_chart(px.line(rt_df, x="date", y="eta_t", title="η_t"),
-                            use_container_width=True)
+                            width='stretch', key="compare_eta_t")
         sub[1].plotly_chart(px.line(rt_df, x="date", y="lambda_t", title="λ_t"),
-                            use_container_width=True)
+                            width='stretch', key="compare_lambda_t")
         sub[2].plotly_chart(px.line(rt_df, x="date", y="tau_t", title="τ_t"),
-                            use_container_width=True)
+                            width='stretch', key="compare_tau_t")
 
 ```

@@ -23,7 +23,8 @@ determinizmi garanti edersin. Mümkün olduğunda **önce test** (TDD) yaklaşı
 - **Kritik test sınıfları**: leak-safety (`test_features.py`, `test_price_noise.py`),
   determinizm/golden (`test_golden_regression.py`), algoritma (`test_agents.py`, `test_env.py`),
   rigor (`test_deflated_sharpe.py`, `test_stress_mc.py`), config (`test_config_wiring.py`),
-  walk-forward (`test_walkforward.py`), persistence, app smoke (`test_app_smoke.py`).
+  walk-forward (`test_walkforward.py`), persistence, app smoke (`test_app_smoke.py`),
+  **drift guard** (`test_agent_roster.py` ajan-tanımı tutarlılığı; `test_config_single_source.py` doc⟂config).
 
 ## Çalışma Kuralları
 - Çalıştır: `.venv\Scripts\python.exe -m pytest -q` (tümü) veya hedefli modül.

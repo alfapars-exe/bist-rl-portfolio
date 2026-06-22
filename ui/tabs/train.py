@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -13,8 +14,9 @@ from data import BIST28
 from env.portfolio_env import ACTION_NAMES
 from ui.services import train_generator
 from ui.state import _agent_key
+from utils.metrics import training_diagnostics
 from utils.portfolio_tl import (
-    build_portfolio_table, compute_tl_series, step_rows_for_training,
+    build_portfolio_table, build_trade_log, compute_tl_series, step_rows_for_training,
 )
 
 # Grafik/tablo serilestirme her N iterde bir (performans — kesif bulgusu:
@@ -24,15 +26,15 @@ from utils.portfolio_tl import (
 RENDER_EVERY = 5
 
 
-def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
-    st.header(f"🎓 Eğitim — {algo} · {horizon.upper()} · "
+def tab_train(algo: str, step_days: int, adaptive: bool, hp: dict):
+    st.header(f"🎓 Eğitim — {algo} · {step_days} seans/adım · "
               f"Adaptif: {'Açık' if adaptive else 'Kapalı'}")
 
     if not st.session_state.data_loaded:
         st.warning("Önce sidebar'dan 'Veriyi Yükle' butonuna basın.")
         return
 
-    key = _agent_key(algo, horizon, adaptive)
+    key = _agent_key(algo, step_days, adaptive)
     already = key in st.session_state.trained_agents
     if already:
         st.success(f"Bu konfigürasyon daha önce eğitildi. "
@@ -60,6 +62,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     if not (run or resume):
         if already:
             _render_training_curves(st.session_state.trained_agents[key][1], algo)
+            _render_episode_browser(key, algo, float(st.session_state.initial_capital))
         return
 
     # --- CANLI EĞİTİM (sınırsız) ---
@@ -101,16 +104,24 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     resume_agent = st.session_state.trained_agents[key][0] if resume else None
     curve = list(st.session_state.trained_agents[key][1]) if resume else []
     iter_offset = len(curve)
-    gen = train_generator(algo, horizon, adaptive, hp,
+    n_episodes = int(st.session_state.get("n_episodes", 12))
+    gen = train_generator(algo, step_days, adaptive, hp,
                           rollout_len=int(hp.get("rollout_len", 400)),
-                          resume_agent=resume_agent)
+                          resume_agent=resume_agent,
+                          n_episodes=n_episodes)
     t0 = time.time()
     iter_times = []  # son N iter süresi (iter/sn için)
     trained_agent = None
     stopped_early = False
     initial_capital = float(st.session_state.initial_capital)
 
+    # İlerleme çubuğu: N episode'a göre doldurulur
+    progress_bar = st.progress(0.0, text=f"Episode 0 / {n_episodes}")
+
     last_rec = None
+    # Per-episode telemetri (episode seçici için): her episode'un TL izini sakla (UI-only).
+    ep_snaps: list = []
+    ep_shared: dict = {"prices": None, "dates": None}
     for rec in gen:
         iter_start_elapsed = time.time() - t0
         trained_agent = rec["agent"]
@@ -122,11 +133,30 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         # Her iter sonunda session'a yaz → kullanıcı durdurursa veya refresh etse bile son hali kalır
         st.session_state.trained_agents[key] = (trained_agent, list(curve))
 
+        # Per-episode snapshot — selectbox ile sonradan incelemek için (UI-only, golden-etkisiz).
+        if ep_shared["prices"] is None:
+            ep_shared["prices"] = env.prices
+            ep_shared["dates"] = env.dates
+        ep_snaps.append({
+            "iter": int(d["iter"]),
+            "reward": float(rec["reward"]), "nav": float(rec["nav"]),
+            "gain": float(rec.get("gain", rec["nav"] - 1.0)),
+            "loss": float(rec.get("loss", 0.0)),
+            "success": int(rec.get("success", 0)),
+            "nav_history": list(env.nav_history),
+            "weight_history": [np.asarray(w, dtype=np.float32) for w in env.weight_history],
+            "reward_terms_history": [dict(rt) for rt in env.reward_terms_history],
+            "t": int(env.t), "step_count": int(env.step_count),
+            "actions": list(rec.get("actions") or []),
+        })
+        st.session_state.setdefault("episode_snaps", {})[key] = ep_snaps
+        st.session_state.setdefault("episode_shared", {})[key] = ep_shared
+
         # Agir serilestirme (4 egri + TL paneli) yalniz her RENDER_EVERY iterde
         render_now = (len(curve) == 1) or (len(curve) % RENDER_EVERY == 0)
         if render_now:
             _render_live_curves(pd.DataFrame(curve),
-                                ph_reward, ph_gain, ph_success, ph_loss)
+                                ph_reward, ph_gain, ph_success, ph_loss, seq=d["iter"])
 
         # --- Throughput metrikleri ---
         iter_end_elapsed = time.time() - t0
@@ -134,11 +164,16 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         recent = iter_times[-5:]
         rate = (len(recent) / sum(recent)) if sum(recent) > 0 else 0.0
         avg = sum(iter_times) / len(iter_times)
-        ph_iter.metric("Iter", iter_offset + rec["iter"] + 1)
+        cur_ep = iter_offset + rec["iter"] + 1
+        ph_iter.metric("Episode", f"{cur_ep} / {n_episodes}")
         ph_rate.metric("Iter/sn", f"{rate:.2f}")
         ph_avg.metric("Ort. iter süresi", f"{avg:.2f}s")
         mm = int(iter_end_elapsed // 60); ss = int(iter_end_elapsed % 60)
         ph_elapsed.metric("Toplam elapsed", f"{mm:02d}:{ss:02d}")
+
+        # İlerleme çubuğu: Episode i/N
+        _prog = min(cur_ep / n_episodes, 1.0)
+        progress_bar.progress(_prog, text=f"Episode {cur_ep} / {n_episodes}")
 
         # --- Canlı TL paneli (son episod için env.nav_history / weight_history kullan) ---
         if render_now:
@@ -148,12 +183,12 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
                 ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
                 ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
                 ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-                ph_bankrupt=ph_bankrupt,
+                ph_bankrupt=ph_bankrupt, seq=d["iter"],
             )
 
-        status.info(f"Iter {iter_offset + rec['iter'] + 1} · NAV={rec['nav']:.3f} · "
+        status.info(f"Episode {cur_ep}/{n_episodes} · NAV={rec['nav']:.3f} · "
                     f"elapsed {iter_end_elapsed:.1f}s — "
-                    f"istediğin yerde 'Eğitimi Durdur' butonuna basabilirsin")
+                    f"'Eğitimi Durdur' ile erken kesilebilir")
 
         # Kullanıcı ayarladığı gecikmeyi iter arası uygula (slider canlı okunur).
         delay = float(st.session_state.get("train_delay", 0.0))
@@ -169,9 +204,13 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     st.session_state.trained_agents[key] = (trained_agent, curve)
     elapsed = time.time() - t0
     stop_slot.empty()
-    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir)
+    progress_bar.progress(1.0, text=f"Tamamlandı — {len(curve)} episode")
+    # Son durumu HER ZAMAN render et (throttle yuzunden son iterler atlanmis olabilir).
+    # seq="final": dongu-ici render'larin (seq=iter no) HICBIRIYLE cakismaz -> ayni
+    # st.empty() slot'una son kez yazar, benzersiz key (StreamlitDuplicateElementKey yok).
     if curve:
-        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss)
+        _render_live_curves(pd.DataFrame(curve), ph_reward, ph_gain, ph_success, ph_loss,
+                            seq="final")
     if last_rec is not None:
         _render_train_tl_panel(
             env=last_rec["env"], algo=algo, rec=last_rec, initial_capital=initial_capital,
@@ -179,7 +218,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
             ph_tl_min=ph_tl_min, ph_tl_max=ph_tl_max, ph_tl_dd=ph_tl_dd,
             ph_tl_line=ph_tl_line, ph_tl_bar=ph_tl_bar,
             ph_tl_table=ph_tl_table, ph_tl_port=ph_tl_port,
-            ph_bankrupt=ph_bankrupt,
+            ph_bankrupt=ph_bankrupt, seq="final",
         )
     if stopped_early:
         status.warning(f"{algo} eğitimi {len(curve)}. iter sonunda durduruldu "
@@ -188,39 +227,87 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
         status.success(f"{algo} eğitildi ({len(curve)} iter, {elapsed:.1f}s) "
                        f"ve session'a kaydedildi. Tab 3'te test edebilirsiniz.")
 
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri ---
+    if curve:
+        rt_hist = list(last_rec["env"].reward_terms_history) if last_rec is not None else None
+        diag = training_diagnostics(curve, reward_terms_history=rt_hist)
+        st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+        d_cols = st.columns(5)
+        d_cols[0].metric(
+            "Hareketli Ort. Return",
+            f"{diag.get('ma_return_last', 0.0):.4f}",
+            help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+        )
+        d_cols[1].metric(
+            "Başarı Oranı",
+            f"{diag.get('success_rate', 0.0):.1%}",
+            help="EW benchmark'ı geçen episod oranı",
+        )
+        if "avg_steps" in diag:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                f"{diag['avg_steps']:.1f}",
+                help="Trainer 'steps' alanından hesaplandı",
+            )
+        else:
+            d_cols[2].metric(
+                "Ort. Adım/Episod",
+                "—",
+                help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+            )
+        d_cols[3].metric(
+            "Drawdown Ceza Adımı",
+            str(diag.get("drawdown_penalty_steps", "—")),
+            help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı",
+        )
+        d_cols[4].metric(
+            "Ort. İşlem Maliyeti",
+            f"{diag.get('mean_tx_cost', 0.0):.5f}",
+            help="reward_terms_history'den: adım başı ortalama tx_cost",
+        )
 
-def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss):
-    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri)."""
+    # Episode seçici — eğitilen her episode'un detayını (TL izi/grafik/değerler) incele.
+    _render_episode_browser(key, algo, initial_capital)
+
+
+def _render_live_curves(df, ph_reward, ph_gain, ph_success, ph_loss, seq=0):
+    """4 canli egitim egrisini placeholder'lara cizer (throttle edilmis cagri).
+
+    seq: render sirasi (iter no). Streamlit 1.5x st.empty() slot'una DONGU icinde
+    tekrar cizimde ELEMAN ID'sini her seferinde yeniden kaydeder; sabit key ->
+    StreamlitDuplicateElementKey. Render-basina BENZERSIZ key (seq) -> her cizim
+    benzersiz; empty() slot yine yalniz son grafigi gosterir (yerinde gunceller).
+    """
     fig_r = px.line(df, x="iter", y="reward",
                     title="Kümülatif Ödül (iterasyon başına — çevre ödülü Σr)",
                     markers=True)
     fig_r.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_reward.plotly_chart(fig_r, use_container_width=True)
+    ph_reward.plotly_chart(fig_r, width='stretch', key=f"train_live_reward_{seq}")
 
     fig_g = px.line(df, x="iter", y="gain",
                     title="Kazanç (nihai NAV − 1.0)",
                     markers=True)
     fig_g.update_layout(height=260, margin=dict(t=40, b=20))
-    ph_gain.plotly_chart(fig_g, use_container_width=True)
+    ph_gain.plotly_chart(fig_g, width='stretch', key=f"train_live_gain_{seq}")
 
     fig_s = px.bar(df, x="iter", y="success",
                    title="Başarı (EW benchmark'a göre 0/1)")
     fig_s.update_layout(height=260, margin=dict(t=40, b=20),
                         yaxis=dict(range=[0, 1.2], tickvals=[0, 1]))
-    ph_success.plotly_chart(fig_s, use_container_width=True)
+    ph_success.plotly_chart(fig_s, width='stretch', key=f"train_live_success_{seq}")
 
     if "loss" in df.columns:
         fig_l = px.line(df, x="iter", y="loss",
                         title="Ortalama loss (düşüş beklenir)",
                         markers=True)
         fig_l.update_layout(height=260, margin=dict(t=40, b=20))
-        ph_loss.plotly_chart(fig_l, use_container_width=True)
+        ph_loss.plotly_chart(fig_l, width='stretch', key=f"train_live_loss_{seq}")
 
 
 def _render_train_tl_panel(env, algo, rec, initial_capital,
                             ph_tl_start, ph_tl_end, ph_tl_net, ph_tl_min, ph_tl_max, ph_tl_dd,
                             ph_tl_line, ph_tl_bar, ph_tl_table, ph_tl_port,
-                            ph_bankrupt=None):
+                            ph_bankrupt=None, seq=0):
     """Son episod/iter için TL türevlerini hesapla ve placeholder'ları güncelle."""
     nav_hist = list(env.nav_history)
     weight_hist = list(env.weight_history)
@@ -268,7 +355,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_tl.update_layout(title="Portföy Değeri (TL)", height=280,
                          margin=dict(t=40, b=30), xaxis_title="Gün",
                          yaxis_title="TL")
-    ph_tl_line.plotly_chart(fig_tl, use_container_width=True)
+    ph_tl_line.plotly_chart(fig_tl, width='stretch', key=f"train_tl_line_{seq}")
 
     # Adım P&L bar chart (yeşil/kırmızı)
     colors = ["#2ca02c" if v >= 0 else "#d62728" for v in step_pnl_arr]
@@ -276,7 +363,7 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
     fig_bar.update_layout(title="Adım P&L (TL)", height=280,
                           margin=dict(t=40, b=30), xaxis_title="Gün",
                           yaxis_title="TL")
-    ph_tl_bar.plotly_chart(fig_bar, use_container_width=True)
+    ph_tl_bar.plotly_chart(fig_bar, width='stretch', key=f"train_tl_bar_{seq}")
 
     # Tam adım tablosu
     dates_slice = env.dates[t_start + 1 : t_start + 1 + steps_done]
@@ -295,13 +382,15 @@ def _render_train_tl_panel(env, algo, rec, initial_capital,
         action_names=action_names, action_indices=action_indices,
         reward_terms_list=rt_hist, initial_capital=initial_capital,
     )
-    ph_tl_table.dataframe(df_rows, hide_index=True, use_container_width=True, height=500)
+    ph_tl_table.dataframe(df_rows, hide_index=True, width='stretch', height=500,
+                          key=f"train_tl_table_{seq}")
 
     # Episod sonu portföy panosu (w_prev = sondan bir önceki adım)
     last = snaps[-1]
     w_prev = weight_hist[-2] if len(weight_hist) >= 2 else None
     df_port = build_portfolio_table(BIST28, last, include_cash=True, w_prev=w_prev)
-    ph_tl_port.dataframe(df_port, hide_index=True, use_container_width=True)
+    ph_tl_port.dataframe(df_port, hide_index=True, width='stretch',
+                         key=f"train_tl_port_{seq}")
 
     # İflas olduysa eğitim panelinin altında uyarı göster
     last_rt = rt_hist[-1] if rt_hist else {}
@@ -324,11 +413,166 @@ def _render_training_curves(curve: list, algo: str):
     c1, c2 = st.columns(2)
     c3, c4 = st.columns(2)
     c1.plotly_chart(px.line(df, x="iter", y="reward", markers=True,
-                            title="Kümülatif Ödül"), use_container_width=True)
+                            title="Kümülatif Ödül"), width='stretch',
+                    key="train_curve_reward")
     c2.plotly_chart(px.line(df, x="iter", y="gain", markers=True,
-                            title="Kazanç (NAV − 1)"), use_container_width=True)
+                            title="Kazanç (NAV − 1)"), width='stretch',
+                    key="train_curve_gain")
     c3.plotly_chart(px.bar(df, x="iter", y="success", title="Başarı (0/1)"),
-                    use_container_width=True)
+                    width='stretch', key="train_curve_success")
     if "loss" in df.columns:
         c4.plotly_chart(px.line(df, x="iter", y="loss", markers=True,
-                                title="Loss"), use_container_width=True)
+                                title="Loss"), width='stretch',
+                        key="train_curve_loss")
+
+    # --- PDF §9.7 Pedagojik Eğitim Metrikleri (statik görüntüleme) ---
+    diag = training_diagnostics(curve)
+    st.markdown("#### §9.7 Eğitim Tanılama Metrikleri")
+    d_cols = st.columns(5)
+    d_cols[0].metric(
+        "Hareketli Ort. Return",
+        f"{diag.get('ma_return_last', 0.0):.4f}",
+        help="Son 5 episod ödülünün hareketli ortalaması (öğrenme eğilimi)",
+    )
+    d_cols[1].metric(
+        "Başarı Oranı",
+        f"{diag.get('success_rate', 0.0):.1%}",
+        help="EW benchmark'ı geçen episod oranı",
+    )
+    if "avg_steps" in diag:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            f"{diag['avg_steps']:.1f}",
+            help="Trainer 'steps' alanından hesaplandı",
+        )
+    else:
+        d_cols[2].metric(
+            "Ort. Adım/Episod",
+            "—",
+            help="Trainer kayıtlarında 'steps' alanı yok — trainer'a dokunulmadan atlandı",
+        )
+    d_cols[3].metric(
+        "Drawdown Ceza Adımı",
+        str(diag.get("drawdown_penalty_steps", "—")),
+        help="reward_terms_history'den: drawdown_penalty > 0 olan adım sayısı (yeniden eğitimde mevcut)",
+    )
+    d_cols[4].metric(
+        "Ort. İşlem Maliyeti",
+        f"{diag.get('mean_tx_cost', 0.0):.5f}",
+        help="reward_terms_history'den: adım başı ortalama tx_cost (yeniden eğitimde mevcut)",
+    )
+
+
+def _render_episode_browser(key, algo, initial_capital):
+    """Saklanan her episode'un TL grafiklerini + değerlerini selectbox ile gösterir.
+
+    Eğitim sırasında `episode_snaps[key]`'e yazılan her episode'un telemetrisi
+    (nav/weight/reward_terms history + t/step_count + actions) buradan replay edilir.
+    `_render_train_tl_panel` env attribute'larını okuduğundan, snapshot bir
+    SimpleNamespace (sahte env) olarak ona geçirilir. UI-only — golden etkisiz.
+    """
+    if key is None:
+        return
+    snaps = st.session_state.get("episode_snaps", {}).get(key)
+    shared = st.session_state.get("episode_shared", {}).get(key)
+    if not snaps or not shared or shared.get("prices") is None:
+        return
+    st.markdown("---")
+    st.markdown("### 🔎 Episode incele (her iterasyonun detayı)")
+    _noisy_mode = st.session_state.get("train_noisy_episodes", True)
+    if _noisy_mode:
+        st.caption(
+            "Her episode = train verisinin noise'lu YENİ versiyonu (anti-ezber modu açık). "
+            "Episode 0 = orijinal veri; Episode 1..N = farklı tohumlu UNIFORM-noise'lu veri setleri. "
+            "Adım = bir BIST seansı (karar günü)."
+        )
+    else:
+        st.caption(
+            "Anti-ezber modu kapalı — tüm episodlar aynı veri üzerinde getiri-seviyesi "
+            "adım-noise ile eğitildi. Adım = bir BIST seansı (karar günü)."
+        )
+    n = len(snaps)
+
+    def _label(i):
+        s = snaps[i]
+        return f"Episode {s['iter'] + 1} / {n}  ·  ödül {s['reward']:.2f} · NAV {s['nav']:.3f}"
+
+    sel = st.selectbox("Hangi episode?", list(range(n)), index=n - 1,
+                       format_func=_label, key=f"ep_browse_sel_{key}")
+    s = snaps[sel]
+    c = st.columns(4)
+    c[0].metric("Episode", f"{s['iter'] + 1} / {n}")
+    c[1].metric("Kümülatif Ödül (Σr)", f"{s['reward']:.3f}")
+    c[2].metric("Kazanç (NAV−1)", f"{s['gain']:+.3f}")
+    c[3].metric("Başarı (EW)", "✅" if s["success"] else "—")
+
+    # Canlı TL panelle aynı placeholder yapısı (6 metrik + 2 grafik + tablo + porto)
+    mcols = st.columns(6)
+    pm = [mcols[i].empty() for i in range(6)]
+    ccols = st.columns(2)
+    ph_line, ph_bar = ccols[0].empty(), ccols[1].empty()
+    ph_table, ph_port, ph_bank = st.empty(), st.empty(), st.empty()
+
+    fake_env = SimpleNamespace(
+        nav_history=s["nav_history"], weight_history=s["weight_history"],
+        reward_terms_history=s["reward_terms_history"],
+        prices=shared["prices"], dates=shared["dates"],
+        t=s["t"], step_count=s["step_count"],
+    )
+    fake_rec = {"actions": s["actions"]}
+    _render_train_tl_panel(
+        env=fake_env, algo=algo, rec=fake_rec, initial_capital=initial_capital,
+        ph_tl_start=pm[0], ph_tl_end=pm[1], ph_tl_net=pm[2],
+        ph_tl_min=pm[3], ph_tl_max=pm[4], ph_tl_dd=pm[5],
+        ph_tl_line=ph_line, ph_tl_bar=ph_bar,
+        ph_tl_table=ph_table, ph_tl_port=ph_port, ph_bankrupt=ph_bank,
+        seq=f"browse_{key}_{sel}",
+    )
+
+    # ---- Adım kaydırıcısı: seçilen episode'da HER adımdaki aksiyon/holdings/nakit ----
+    if int(s["step_count"]) > 1:
+        st.markdown("**📋 Adım-adım detay** — bu episode'da seçilen adımda hangi aksiyon, "
+                    "hangi hisseler tutuluyor, portföy ve nakit durumu:")
+        _t_start = int(s["t"]) - int(s["step_count"])
+        _tx = [float(rt.get("tx_cost", 0.0)) for rt in s["reward_terms_history"]]
+        _ep_tl = compute_tl_series(
+            nav_hist=s["nav_history"], weight_hist=s["weight_history"],
+            prices_matrix=shared["prices"], initial_capital=initial_capital,
+            tx_cost_rates=_tx, t_start=_t_start,
+        )
+        if _ep_tl:
+            _maxk = len(_ep_tl) - 1
+            step_k = st.slider("Adım seç", 0, _maxk, _maxk, key=f"ep_browse_step_{key}_{sel}")
+            snap_k = _ep_tl[step_k]
+            _acts = s["actions"]
+            if algo == "DQN" and step_k < len(_acts):
+                _a = int(_acts[step_k])
+                act_name = ACTION_NAMES[_a] if 0 <= _a < len(ACTION_NAMES) else str(_a)
+            elif algo in ("PPO", "SAC", "TD3"):
+                act_name = f"{algo} (sürekli aksiyon)"
+            else:
+                act_name = "—"
+            _di = _t_start + 1 + step_k
+            dstr = (str(pd.Timestamp(shared["dates"][_di]).date())
+                    if 0 <= _di < len(shared["dates"]) else "")
+            sc = st.columns(6)
+            sc[0].metric("Adım", f"{step_k + 1} / {int(s['step_count'])}")
+            sc[1].metric("Tarih", dstr)
+            sc[2].metric("Aksiyon", act_name)
+            sc[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+            sc[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+            sc[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+            # w_prev = adımdan ÖNCEKİ ağırlık (weight_history[step_k]); 0'da başlangıç=nakit.
+            w_prev_k = s["weight_history"][step_k] if step_k < len(s["weight_history"]) else None
+            df_port_k = build_portfolio_table(BIST28, snap_k, include_cash=True, w_prev=w_prev_k)
+            df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+            pcol, tcol = st.columns([1.4, 1])
+            with pcol:
+                st.caption("Portföy — bu adımda tutulan hisseler (ağırlık / lot / TL)")
+                st.dataframe(df_port_k, hide_index=True, width='stretch', height=320)
+            with tcol:
+                st.caption("Bu adımın işlemleri (al / sat)")
+                if df_trade_k.empty:
+                    st.info("Bu adımda işlem yok (ağırlıklar korunmuş).")
+                else:
+                    st.dataframe(df_trade_k, hide_index=True, width='stretch', height=280)

@@ -62,12 +62,16 @@ def test_sortino_uniform_losses_not_inflated():
     assert s < 0  # ortalama negatif -> oran negatif olmali
 
 
-def test_sortino_no_downside_is_inf_not_nan():
-    """Hic negatif getiri yokken eski surum NaN donuyordu (np.std bos dizi)."""
+def test_sortino_no_downside_is_nan_positive_mean():
+    """v10 NaN-guard: hic asagi-yonlu sapma yok VE pozitif ortalama -> Sortino NaN.
+    (Onceki surum inf donuyordu; NaN-guard matematiksel 'tanimsiz' semantigini uygular:
+    sifir downside dev ile oran tanimlanamaz, sonsuz degil NaN.) Sifir-ortalamada 0.0."""
     s = sortino(np.array([0.01, 0.02, 0.005]))
-    assert not np.isnan(s)
-    assert np.isinf(s) and s > 0          # pozitif sonsuz (float == yerine np.isinf)
-    assert abs(sortino(np.zeros(5))) < 1e-12   # tum-sifir -> tam 0.0
+    # downside_dev = 0, mu > 0 -> NaN (sifir bolen ile tanimlanamaz oran)
+    assert np.isnan(s), (
+        f"Pozitif sabit getiri -> Sortino NaN beklenir (NaN-guard); bulunan {s}")
+    # tum-sifir: mu=0, downside_dev=0 -> mu<=0 -> 0.0
+    assert abs(sortino(np.zeros(5))) < 1e-12, "Tum-sifir getiri -> Sortino 0.0"
 
 
 def test_max_drawdown_known():
@@ -97,10 +101,18 @@ def test_sharpe_zero_mean_is_zero():
     assert abs(sharpe(rets)) < 1e-9
 
 
-def test_calmar_finite_when_no_drawdown():
+def test_calmar_nan_when_no_drawdown():
+    """v10 NaN-guard: MaxDD=0 (dususuz seri) -> Calmar NaN (tanimsiz, 1e-9 korumasi kaldirildi).
+    Matematiksel anlam: sifir cekiliste Calmar orani tanimlanamaz (CashRiskFree gibi).
+    Cekilis iceren normal seride Calmar sonlu olmali."""
     nav = np.ones(252)
-    nav[-1] = 2.0  # mdd = 0 -> 1e-9 korumasi sayesinde sonlu kalmali
-    assert np.isfinite(calmar(nav))
+    nav[-1] = 2.0   # MaxDD=0 (monoton artan) -> NaN
+    assert np.isnan(calmar(nav)), (
+        f"MaxDD=0 -> Calmar NaN beklenir (NaN-guard); bulunan {calmar(nav)}")
+    # Cekilis iceren seri -> sonlu
+    rets = np.random.default_rng(0).normal(0.0003, 0.012, 252)
+    nav2 = np.cumprod(1 + rets)
+    assert np.isfinite(calmar(nav2)), "Cekilis var -> Calmar sonlu olmali"
 
 
 def test_success_vs_benchmark():

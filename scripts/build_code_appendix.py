@@ -15,12 +15,13 @@ OUT = ROOT / "KOD_EKI.md"
 # -> cekirdek -> CLI -> arayuz.
 ORDER = [
     "config.py", "data.py",
-    "utils/features.py", "utils/metrics.py", "utils/baselines.py",
+    "utils/features.py", "utils/macro.py", "utils/metrics.py", "utils/baselines.py",
+    "utils/deflated_sharpe.py", "utils/stress_mc.py",
     "utils/portfolio_tl.py", "utils/torch_utils.py",
     "forecast/forecaster.py",
     "env/portfolio_env.py", "env/reward.py",
-    "agents/base.py", "agents/common.py", "agents/dqn.py", "agents/ppo.py", "agents/sac.py",
-    "core/features.py", "core/factory.py", "core/trainer.py", "core/rollout.py",
+    "agents/base.py", "agents/common.py", "agents/dqn.py", "agents/ppo.py", "agents/sac.py", "agents/td3.py",
+    "core/contracts.py", "core/features.py", "core/factory.py", "core/trainer.py", "core/rollout.py",
     "core/walkforward.py", "core/persistence.py",
     "train.py", "main.py", "plots.py",
     "app.py",

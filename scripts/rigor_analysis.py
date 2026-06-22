@@ -112,7 +112,7 @@ def _load_market():
         if MacroConfig.enabled:
             m = align_macro(download_macro(), px.index)
             if "USDTRY=X" in m.columns:
-                usdtry = m["USDTRY=X"].loc[px_te.index].to_numpy(np.float64)
+                usdtry = m["USDTRY=X"].loc[px_te.index].astype(float)
         return asset_rets, usdtry
     except Exception as exc:                              # veri yoksa MC/reel-NAV atla
         print(f"[rigor] piyasa verisi yuklenemedi ({exc!r}); MC + reel-NAV atlandi")
@@ -128,6 +128,13 @@ def run():
     weights = {a: pd.read_csv(RES / f"weights_{a}.csv")
                for a in RL_AGENTS if (RES / f"weights_{a}.csv").exists()}
     asset_rets, usdtry = _load_market()
+    if usdtry is not None:
+        usdtry = usdtry.reindex(navs.index).ffill()
+        if usdtry.isna().any():
+            print("[rigor] USDTRY nav tarihlerini kapsamiyor; reel-NAV atlandi")
+            usdtry = None
+        else:
+            usdtry = usdtry.to_numpy(np.float64)
 
     out = compute_rigor(navs, weights, asset_rets, usdtry)
 

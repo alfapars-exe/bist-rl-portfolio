@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from core.contracts import BacktestResult
+
 
 def evaluate(agent, env) -> dict:
     """Egitilmis ajani env uzerinde bir kez kosturur; backtest cikti dict'i dondurur.
@@ -21,10 +23,20 @@ def evaluate(agent, env) -> dict:
     while not (done or trunc):
         a = agent.act_eval(s)
         s, r, done, trunc, _ = env.step(a)
-    nav = np.array(env.nav_history[1:])
-    rets = np.array(env.ret_history)
-    W = np.array(env.weight_history[1:])
-    offset = env.window
-    dates = list(env.dates[offset: offset + len(nav)])
-    return dict(nav=nav, rets=rets, weights=W, dates=dates,
-                reward_terms_history=env.reward_terms_history)
+    nav = np.array(env.nav_history)
+    rets = np.concatenate([[0.0], np.array(env.ret_history)])
+    initial_w = np.asarray(env.weight_history[0])
+    result = BacktestResult(
+        nav=nav,
+        rets=rets,
+        dates=[env.episode_start_date] + list(env.date_history),
+        weights_before=np.vstack([initial_w, np.asarray(env.weights_before_history)]),
+        target_weights=np.vstack([initial_w, np.asarray(env.target_weight_history)]),
+        weights_after=np.asarray(env.weight_history),
+        turnover=np.concatenate([[0.0], np.asarray(env.turnover_history, dtype=float)]),
+        reward_terms_history=env.reward_terms_history,
+        period_lengths=np.concatenate([[0], np.asarray(env.period_length_history, dtype=np.int32)]),
+        discounts=np.concatenate([[1.0], np.asarray(env.discount_history, dtype=float)]),
+        provenance=env.provenance,
+    )
+    return result.to_dict()

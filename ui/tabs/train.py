@@ -16,7 +16,7 @@ from ui.services import train_generator
 from ui.state import _agent_key
 from utils.metrics import training_diagnostics
 from utils.portfolio_tl import (
-    build_portfolio_table, compute_tl_series, step_rows_for_training,
+    build_portfolio_table, build_trade_log, compute_tl_series, step_rows_for_training,
 )
 
 # Grafik/tablo serilestirme her N iterde bir (performans — kesif bulgusu:
@@ -516,3 +516,51 @@ def _render_episode_browser(key, algo, initial_capital):
         ph_tl_table=ph_table, ph_tl_port=ph_port, ph_bankrupt=ph_bank,
         seq=f"browse_{key}_{sel}",
     )
+
+    # ---- Adım kaydırıcısı: seçilen episode'da HER adımdaki aksiyon/holdings/nakit ----
+    if int(s["step_count"]) > 1:
+        st.markdown("**📋 Adım-adım detay** — bu episode'da seçilen adımda hangi aksiyon, "
+                    "hangi hisseler tutuluyor, portföy ve nakit durumu:")
+        _t_start = int(s["t"]) - int(s["step_count"])
+        _tx = [float(rt.get("tx_cost", 0.0)) for rt in s["reward_terms_history"]]
+        _ep_tl = compute_tl_series(
+            nav_hist=s["nav_history"], weight_hist=s["weight_history"],
+            prices_matrix=shared["prices"], initial_capital=initial_capital,
+            tx_cost_rates=_tx, t_start=_t_start,
+        )
+        if _ep_tl:
+            _maxk = len(_ep_tl) - 1
+            step_k = st.slider("Adım seç", 0, _maxk, _maxk, key=f"ep_browse_step_{key}_{sel}")
+            snap_k = _ep_tl[step_k]
+            _acts = s["actions"]
+            if algo == "DQN" and step_k < len(_acts):
+                _a = int(_acts[step_k])
+                act_name = ACTION_NAMES[_a] if 0 <= _a < len(ACTION_NAMES) else str(_a)
+            elif algo in ("PPO", "SAC", "TD3"):
+                act_name = f"{algo} (sürekli aksiyon)"
+            else:
+                act_name = "—"
+            _di = _t_start + 1 + step_k
+            dstr = (str(pd.Timestamp(shared["dates"][_di]).date())
+                    if 0 <= _di < len(shared["dates"]) else "")
+            sc = st.columns(6)
+            sc[0].metric("Adım", f"{step_k + 1} / {int(s['step_count'])}")
+            sc[1].metric("Tarih", dstr)
+            sc[2].metric("Aksiyon", act_name)
+            sc[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+            sc[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+            sc[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+            # w_prev = adımdan ÖNCEKİ ağırlık (weight_history[step_k]); 0'da başlangıç=nakit.
+            w_prev_k = s["weight_history"][step_k] if step_k < len(s["weight_history"]) else None
+            df_port_k = build_portfolio_table(BIST28, snap_k, include_cash=True, w_prev=w_prev_k)
+            df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+            pcol, tcol = st.columns([1.4, 1])
+            with pcol:
+                st.caption("Portföy — bu adımda tutulan hisseler (ağırlık / lot / TL)")
+                st.dataframe(df_port_k, hide_index=True, width='stretch', height=320)
+            with tcol:
+                st.caption("Bu adımın işlemleri (al / sat)")
+                if df_trade_k.empty:
+                    st.info("Bu adımda işlem yok (ağırlıklar korunmuş).")
+                else:
+                    st.dataframe(df_trade_k, hide_index=True, width='stretch', height=280)

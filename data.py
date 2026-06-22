@@ -132,6 +132,11 @@ def download_bist(tickers=BIST28, start=None, end=None,
             px = data["Close"].copy()
         else:
             px = data[["Close"]].copy()
+        # yfinance bazen tz-aware / time-bilesenli index doner; sentetik-doldurma reindex'i
+        # (naive bdate_range) eslesmezse TUM sentetik sutunlar NaN -> son dropna frame'i
+        # BOSALTIR (HF Space MIXED-bos hatasi). Index'i tz-naive GUNE normalize et.
+        _idx = pd.to_datetime(px.index)
+        px.index = (_idx.tz_localize(None) if _idx.tz is not None else _idx).normalize()
         px = px.dropna(axis=1, thresh=int(0.9 * len(px)))
         px = px.ffill().dropna()
         if px.shape[1] < 10 or len(px) < 100:
@@ -150,6 +155,10 @@ def download_bist(tickers=BIST28, start=None, end=None,
             for c in miss:
                 px[c] = synth[c].to_numpy()
         px = px[list(tickers)].ffill().dropna()
+        # EMNIYET AGI: islenmis frame bos/cok-kisa veya NaN'li ise (index eslesmezligi vb.)
+        # bozuk MIXED frame'i DONDURME -> except'e dusur (CSV/sentetik fallback gecerli veri verir).
+        if len(px) < 100 or bool(px.isna().any().any()):
+            raise RuntimeError(f"islenmis yfinance verisi gecersiz ({len(px)} satir)")
         if miss:
             _with_provenance(px, source="mixed", provider="yfinance+synthetic",
                              start=start, end=end, reason="missing yfinance tickers", missing=miss)

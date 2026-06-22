@@ -79,17 +79,54 @@ def test_clean_data_risky_returns_unchanged():
 
 # ------------------------------------------------------------- make_noisy_prices
 def test_make_noisy_prices_zero_is_identity():
+    """noise_std=0 -> birebir kopya (identity; KORUNUR)."""
     px = _market()
     clone = make_noisy_prices(px, 0.0, seed=1)
     assert np.allclose(clone.values, px.values, atol=1e-6)
 
 
 def test_make_noisy_prices_changes_path_but_keeps_start():
+    """UNIFORM noise: baslangic korunur, yol farkli, degerler sonlu."""
     px = _market()
     noisy = make_noisy_prices(px, 0.02, seed=3)
     assert np.allclose(noisy.values[0], px.values[0])           # baslangic korunur
     assert not np.allclose(noisy.values, px.values)             # yol farkli
     assert np.isfinite(noisy.values).all()
+
+
+def test_make_noisy_prices_uniform_bounded():
+    """UNIFORM gurultu: log-getiri farki [-noise_std, +noise_std] araliginda
+    olmali (Gauss'tan farkli: outlier yok, deterministik aralik).
+    Log-getiri farki |delta_logret| <= noise_std + kucuk sayisal tolerans."""
+    import numpy as np
+    px = _market(seed=7)
+    noise_std = 0.015
+    noisy = make_noisy_prices(px, noise_std, seed=99)
+    px_arr = px.to_numpy(dtype=np.float64)
+    noisy_arr = noisy.to_numpy(dtype=np.float64)
+    logret_orig = np.diff(np.log(np.maximum(px_arr, 1e-9)), axis=0)
+    logret_noisy = np.diff(np.log(np.maximum(noisy_arr, 1e-9)), axis=0)
+    delta = logret_noisy - logret_orig
+    # Maksimum sapma noise_std'yi gecmemeli (kucuk tolerans: kumulatif birikim yok)
+    assert np.max(np.abs(delta)) <= noise_std + 1e-9, (
+        f"Uniform gurultu siniri asildi: max|delta|={np.max(np.abs(delta)):.6f} > {noise_std}"
+    )
+
+
+def test_make_noisy_prices_features_differ_from_original():
+    """Noisy fiyattan uretilen feature'lar orijinalden FARKLI olmali
+    (ajan gercekten farkli durum vektoru alir — anti-ezber dogrulama)."""
+    from utils.features import add_features
+    px = _market(seed=5)
+    noisy = make_noisy_prices(px, 0.01, seed=11)
+    feats_orig = add_features(px)
+    feats_noisy = add_features(noisy)
+    # En az bir feature anahtarinda degerler farkli olmali
+    any_diff = any(
+        not np.allclose(feats_orig[k].values, feats_noisy[k].values)
+        for k in feats_orig
+    )
+    assert any_diff, "Noisy fiyattan hesaplanan feature'lar orijinalle ayni — anti-ezber saglanamadi"
 
 
 # ------------------------------------------------------- evaluate_noise_episodes

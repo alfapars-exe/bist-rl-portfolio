@@ -16,7 +16,7 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import DEFAULTS, SEED, ForecastConfig, MacroConfig, validate_train_range
 from core.factory import build_agent, build_env
-from core.episodes import episode_metrics
+from core.episodes import episode_metrics, make_noisy_prices
 from core.persistence import (load_agent, model_path, named_model_path,
                               read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
@@ -280,6 +280,82 @@ def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_ste
     )
 
 
+def _make_noisy_eval_env(noisy_te: pd.DataFrame, algo: str, step_days: int,
+                         adaptive: bool, seed: int):
+    """Noisy test serisi uzerinden eval ortami kurar (fiyat-seviyesi gurultu).
+
+    _make_env'in eval bloguyla AYNI context penceresi + start_index mantigini
+    taklit eder; ancak px_te yerine noisy_te kullanir. Feature'lar noisy_te
+    uzerinden YENIDEN HESAPLANIR (add_features) ve egitimde fit edilmis
+    session_state.scaler ile donusturulur — sizinti yok (scaler train-only).
+
+    Forecast feature (ForecastConfig.enabled=True iken feats_te'de bulunur):
+    Tahmin modeli egzojen (hisse serisiyle baglantiyi kesilmis) ve noisy
+    fiyattan yeniden hesaplanamaz (fit edilmemis). Bu nedenle forecast feature
+    orijinal feats_te'den (context+te dilimi) kopyalanir. State-dim KORUNUR.
+
+    Makro + regime egzojen (hisse fiyatiyla baglantisiz); orijinal olanlar
+    kullanilir (context + te dilimi, _make_env eval yoluyla ayni).
+    """
+    context = min(
+        len(st.session_state.px_tr),
+        max(21, ceil(DEFAULTS.minvol_window / step_days)) + 1
+    )
+    px_context = st.session_state.px_tr.iloc[-context:]
+
+    # Noisy te + context penceresi birlestir (baslangic fiyati px_tr'den gelir)
+    px_df = pd.concat([px_context, noisy_te])
+
+    # session_counts
+    counts = np.concatenate([
+        np.asarray(st.session_state.px_tr.attrs.get(
+            "session_counts", np.ones(len(st.session_state.px_tr), dtype=int)))[-context:],
+        np.asarray(st.session_state.px_te.attrs.get(
+            "session_counts", np.ones(len(st.session_state.px_te), dtype=int))),
+    ])
+    px_df.attrs.update(st.session_state.px_te.attrs)
+    px_df.attrs["session_counts"] = counts
+
+    # Feature'lari noisy fiyat uzerinden yeniden hesapla; egitim scaler'i uygula
+    # add_features: saf teknik feature'lar (12 adet); forecast egzojen -> ayri islenir
+    raw_feats_noisy = add_features(px_df)
+    feats_noisy = st.session_state.scaler.transform(raw_feats_noisy)
+
+    # Forecast feature varsa (state-dim uyumu icin): orijinal feats_te'den kopyala
+    # feats_te zaten context+te ile build edilmis (services._make_env eval yolu)
+    feats_te_orig = {k: pd.concat([st.session_state.feats_tr[k].iloc[-context:], v])
+                     for k, v in st.session_state.feats_te.items()}
+    if "forecast" in feats_te_orig and "forecast" not in feats_noisy:
+        feats_noisy["forecast"] = feats_te_orig["forecast"]
+
+    # Makro + regime orijinal (egzojen, hisse noisy'siyle degismez)
+    macro = st.session_state.get("macro_te")
+    regime = st.session_state.get("regime_te")
+    if macro is not None:
+        macro = np.concatenate([st.session_state.macro_tr[-context:], macro], axis=0)
+    if regime is not None:
+        regime = np.concatenate([st.session_state.regime_tr[-context:], regime], axis=0)
+
+    # Nakit faizi
+    cash_daily_rate = st.session_state.get("cash_daily_rate", None)
+    extra_cash = {} if cash_daily_rate is None else {"cash_daily_rate": float(cash_daily_rate)}
+
+    return build_env(
+        algo, px_df, feats_noisy,
+        adaptive=adaptive, max_steps=10_000,
+        random_start=False, seed=seed,
+        reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        # force_price_noise GECME: fiyat zaten noisy (fiyat-seviyesi)
+        episode_clean=False,
+        macro=macro, regime=regime,
+        rebalance_freq=1, step_days=int(step_days),
+        gamma=float(st.session_state.get("gamma_daily", DEFAULTS.gamma)),
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+        start_index=context,
+        **extra_cash,
+    )
+
+
 def evaluate_noise_episodes_ui(agent, algo: str, step_days: int, adaptive: bool, *,
                                n_episodes: int = 5, noise_std: float = 0.01) -> list:
     """Egitilmis ajani test araligi boyunca SIRAYLA birden cok episode'da kosturur;
@@ -287,19 +363,32 @@ def evaluate_noise_episodes_ui(agent, algo: str, step_days: int, adaptive: bool,
 
     Episode 0 = orijinal (gurultusuz) referans — normal testle AYNI kurulum (_make_env
     eval yolu: context penceresi + start_index) -> episode 0 normal test sonucuyla
-    ortusur. Episode 1..N = ayni test serisine getiri-seviyesinde Gauss gurultusu
-    (force_price_noise; episode basina FARKLI tohum) eklenmis YENI patikalar (anti-ezber).
-    Her episode TUM veri tarih araligini kapsar ve SIRAYLA kosar — biri tam BITMEDEN
-    (N gun varsa N adim) digeri BASLAMAZ. Donen her episode dict'i: episode, noise_std,
-    steps, nav, dates, trace (adim-adim), + final_nav/total_return/max_drawdown/sharpe.
+    ortusur.
+
+    Episode 1..N = orijinal px_te'ye UNIFORM noise eklenip YENIDEN HESAPLANMIS
+    fiyat serisinden kurulan YENI ortamlar (fiyat-seviyesi anti-ezber). Her episode
+    farkli seed kullanir; feature'lar noisy fiyat uzerinden yeniden hesaplanir.
+    Ajan GERCEKTEN FARKLI veri gorur (getiri-seviyesi Gauss'tan farkli).
+
+    Her episode TUM veri tarih araligini kapsar ve SIRAYLA kosar — biri tam bitmeden
+    digeri baslamaz. Donen her episode dict'i: episode, noise_std, steps, nav, dates,
+    trace (adim-adim), + final_nav/total_return/max_drawdown/sharpe.
     """
     results = []
     for i in range(int(n_episodes)):
         nstd = 0.0 if i == 0 else float(noise_std)
-        env = _make_env(False, algo, step_days, adaptive, max_steps=10_000,
-                        force_noise=(nstd > 0.0), noise_eval=nstd, seed_override=SEED + i)
-        # Tam aralik, adim-adim trace (tekli-test ile AYNI dongey reuse eder) — episode
-        # done'a (veri sonu) kadar kosar; sonraki episode ancak bu bittikten sonra baslar.
+        if i == 0:
+            # Episode 0: orijinal fiyatlar — _make_env eval yoluyla birebir ayni
+            env = _make_env(False, algo, step_days, adaptive, max_steps=10_000,
+                            seed_override=SEED + i)
+        else:
+            # Episode 1..N: px_te uzerine UNIFORM noise -> yeni fiyat serisi -> env
+            noisy_te = make_noisy_prices(
+                st.session_state.px_te, nstd, seed=SEED + i
+            )
+            env = _make_noisy_eval_env(noisy_te, algo, step_days, adaptive,
+                                       seed=SEED + i)
+        # Tam aralik, adim-adim trace — done'a (veri sonu) kadar sirayla kosar
         trace = _run_trace_loop(env, agent, algo, light=True)
         nav = np.asarray(env.nav_history, dtype=float)
         rets = np.asarray(getattr(env, "ret_history", []), dtype=float)

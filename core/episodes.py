@@ -27,13 +27,19 @@ def make_noisy_prices(prices: pd.DataFrame, noise_std: float,
                       seed: int) -> pd.DataFrame:
     """Orijinal fiyat serisinden gurultu eklenmis YENI bir seri uretir.
 
-    Gunluk log-getirilere bagimsiz Gauss gurultusu (std=noise_std) ekler ve
-    fiyati yeniden kumulatifler. Baslangic fiyati (ilk satir) korunur; boylece
-    ayni baslangic, farkli yol. noise_std=0 -> orijinalin birebir kopyasi.
+    Gunluk log-getirilere bagimsiz UNIFORM gurultusu ([-noise_std, +noise_std])
+    ekler ve fiyati yeniden kumulatifler. Baslangic fiyati (ilk satir) korunur;
+    boylece ayni baslangic, farkli yol (gercek anti-ezber). noise_std=0 ->
+    orijinalin birebir kopyasi (identity; KORUNUR).
+
+    Gauss yerine Uniform tercih edilmesinin sebebi: outlier-gurultu uretmez,
+    deterministik aralik garantisi saglar (|eps| <= noise_std) — ajan FARKLI
+    fiyat yolu gorur ama cok buyuk anlamsiz sapma olusturmaz.
 
     Args:
         prices: (T, N) ayarli kapanis matrisi (orijinal hisseler).
-        noise_std: gunluk log-getiriye eklenen Gauss gurultusu std'si (orn. 0.01).
+        noise_std: gunluk log-getiriye eklenen uniform gurultu genisligi
+                   (aralik: [-noise_std, +noise_std]). Ornek: 0.01.
         seed: tekrar-uretilebilir gurultu icin tohum (episode basina farkli ver).
     """
     px = prices.to_numpy(dtype=np.float64)
@@ -44,7 +50,8 @@ def make_noisy_prices(prices: pd.DataFrame, noise_std: float,
     logret = np.diff(np.log(np.maximum(px, 1e-9)), axis=0)
     if noise_std > 0.0:
         rng = np.random.default_rng(seed)
-        logret = logret + rng.normal(0.0, noise_std, size=logret.shape)
+        # UNIFORM gurultu: [-noise_std, +noise_std] (Gauss yerine; anti-ezber)
+        logret = logret + rng.uniform(-noise_std, noise_std, size=logret.shape)
     new = np.empty_like(px)
     new[0] = px[0]
     new[1:] = px[0] * np.exp(np.cumsum(logret, axis=0))

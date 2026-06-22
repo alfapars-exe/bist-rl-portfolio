@@ -50,11 +50,12 @@ def tab_test(algo: str, step_days: int, adaptive: bool):
     st.session_state.setdefault("noise_episodes", {})
     with st.expander("🎲 Gürültü-artırımlı çoklu episode (robustluk testi)", expanded=False):
         st.caption(
-            "Eğitilmiş ajan **tüm test aralığı boyunca** sırayla birden çok episode'da "
-            "koşturulur. Episode 0 = orijinal seri; sonraki episode'lar orijinal hisse "
-            "getirilerine eklenen Gauss gürültüsüyle üretilen **yeni patikalardır** "
-            "(anti-ezber). Düşük dağılım = ajan dayanıklı; yüksek dağılım = tek tarihsel "
-            "yola aşırı uyum riski."
+            "Episode'lar orijinal fiyatlara **UNIFORM noise** eklenmiş YENİ serilerdir "
+            "(1. episode orijinal); ajan farklı veri görür (anti-ezber). "
+            "Feature'lar noisy fiyat üzerinden yeniden hesaplanır — ajan gerçekten farklı "
+            "durum vektörü alır (getiri-seviyesi Gauss'tan farklı: fiyat-seviyesi uniform). "
+            "Adım kaydırıcısıyla her episode'da her adımdaki aksiyon/holdings/nakit görülür. "
+            "Düşük dağılım = ajan dayanıklı; yüksek dağılım = tek tarihsel yola aşırı uyum riski."
         )
         cc = st.columns(3)
         n_ep = cc[0].slider("Episode sayısı", 2, 30, 6, key="noise_n_ep")
@@ -123,6 +124,43 @@ def tab_test(algo: str, step_days: int, adaptive: bool):
                     initial_capital=cap)
                 st.caption(f"{_ep_lbl[sel]} — {len(df_detail)} adım (tüm veri tarih aralığı)")
                 st.dataframe(df_detail, hide_index=True, use_container_width=True, height=420)
+
+                # ---- Adım kaydırıcısı: seçilen episode'da per-step detay ----
+                st.markdown("---")
+                st.markdown("**Adım kaydırıcısı** — seçilen episode'da her adımdaki "
+                            "aksiyon / holdings / nakit detayı:")
+                ep_max_step = len(ep_tr) - 1
+                step_k = st.slider(
+                    "Adım seç", 0, ep_max_step, 0,
+                    key=f"noise_ep_step_slider_{sel}_{_ep_lbl[sel][:20]}"
+                )
+                snap_k = snaps[step_k]
+                step_cols = st.columns(6)
+                step_cols[0].metric("Adım", f"{step_k + 1} / {ep_max_step + 1}")
+                step_cols[1].metric("Tarih", ep_tr[step_k]["date"])
+                step_cols[2].metric("Aksiyon", ep_tr[step_k]["action_name"])
+                step_cols[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+                step_cols[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+                step_cols[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+
+                # Holdings tablosu
+                w_prev_k = ep_tr[step_k - 1]["weights_before"] if step_k > 0 else None
+                df_port_k = build_portfolio_table(
+                    BIST28, snap_k, include_cash=True, w_prev=w_prev_k
+                )
+                port_col, trade_col = st.columns([1.3, 1])
+                with port_col:
+                    st.caption("Portföy (hisse / durum / agirlik / TL)")
+                    st.dataframe(df_port_k, hide_index=True,
+                                 use_container_width=True, height=320)
+                with trade_col:
+                    st.caption("Bu adimin islemleri (alim/satim)")
+                    df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+                    if df_trade_k.empty:
+                        st.info("Bu adımda işlem yok.")
+                    else:
+                        st.dataframe(df_trade_k, hide_index=True,
+                                     use_container_width=True, height=280)
 
     max_step = len(trace) - 1
     # ---- Oynatma kontrolleri ----

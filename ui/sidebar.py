@@ -5,7 +5,8 @@ import datetime
 
 import streamlit as st
 
-from config import (DEFAULTS, SEED, STEP_DAYS_MAX, DataConfig, EnvConfig, RewardConfig,
+from config import (DEFAULTS, SEED, STEP_DAYS_MAX, DataConfig, DQNConfig, EnvConfig,
+                    PPOConfig, RewardConfig, SACConfig, TD3Config,
                     cash_daily_rate as _cash_daily_rate)
 from env.portfolio_env import HORIZON_PRESETS
 from core.persistence import MODELS_DIR, model_path
@@ -368,48 +369,199 @@ def sidebar_controls():
         help="İskonto faktörü. Vade preset default verir (Kısa 0.95 / Orta 0.99 / Uzun 0.995); "
              "burada değiştirilebilir — DQN/PPO/SAC/TD3'ün hepsine uygulanır.",
     )
+    # Gelişmiş expander'larda hidden seçeneği için ortak tuple listesi + format
+    _HIDDEN_OPTIONS = [(128, 64), (256, 128), (512, 256)]
+    _hidden_fmt = lambda t: f"{t[0]}×{t[1]}"
+
     if algo == "DQN":
         st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",
-            options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3)
-        hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000)
-        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
-        hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
+            options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3,
+            key=f"dqn_lr_{step_days}")
+        hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000,
+            key=f"dqn_eps_decay_{step_days}")
+        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64,
+            key=f"dqn_batch_{step_days}")
+        hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100,
+            key=f"dqn_target_update_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(DQNConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"dqn_hidden_{step_days}",
+                help="Politika ağının gizli katman nöron sayısı (1. katman × 2. katman). "
+                     "Büyük ağ kapasiteyi artırır ama daha yavaş eğitilir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=DQNConfig.buffer_size,
+                key=f"dqn_buffer_{step_days}",
+                help="Deneyim tekrar belleğinin maksimum kapasitesi. "
+                     "Büyük buffer çeşitlilik sağlar, bellek tüketimini artırır.",
+            )
+            hp["eps_start"] = st.slider(
+                "ε başlangıç (keşif)",
+                min_value=0.5, max_value=1.0,
+                value=DQNConfig.eps_start,
+                step=0.05,
+                key=f"dqn_eps_start_{step_days}",
+                help="Epsilon-greedy keşif oranının başlangıç değeri. "
+                     "1.0 = tamamen rastgele; eğitim ilerledikçe eps_end'e düşer.",
+            )
+            hp["eps_end"] = st.slider(
+                "ε bitiş (minimum keşif)",
+                min_value=0.01, max_value=0.20,
+                value=DQNConfig.eps_end,
+                step=0.01,
+                key=f"dqn_eps_end_{step_days}",
+                help="Epsilon'un ulaşacağı minimum değer. "
+                     "Küçük tutmak keşfi azaltır, sömürüyü artırır.",
+            )
+            hp["huber_delta"] = st.select_slider(
+                "Huber delta (kayıp eşiği)",
+                options=[0.5, 1.0, 2.0],
+                value=DQNConfig.huber_delta,
+                key=f"dqn_huber_delta_{step_days}",
+                help="Huber kaybının L1/L2 geçiş eşiği. "
+                     "Küçük delta aykırı değerlere karşı daha sağlam.",
+            )
     elif algo == "PPO":
         st.sidebar.caption(_EP_HINT.replace("episode", "update"))
-        hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
+        hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64,
+            key=f"ppo_rollout_{step_days}")
         hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"ppo_lr_p_{step_days}")
         hp["lr_v"]       = st.sidebar.select_slider("Value LR",
-            options=[3e-4, 1e-3, 3e-3], value=1e-3)
-        hp["clip"]       = st.sidebar.slider("Clip ε", 0.05, 0.4, 0.2, step=0.05)
+            options=[3e-4, 1e-3, 3e-3], value=1e-3,
+            key=f"ppo_lr_v_{step_days}")
+        hp["clip"]       = st.sidebar.slider("Clip ε", 0.05, 0.4, 0.2, step=0.05,
+            key=f"ppo_clip_{step_days}")
         hp["ent_coef"]   = st.sidebar.select_slider("Entropi katsayısı",
-            options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128)
-        hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1)
+            options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005,
+            key=f"ppo_ent_coef_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128,
+            key=f"ppo_batch_{step_days}")
+        hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1,
+            key=f"ppo_n_epochs_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(PPOConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"ppo_hidden_{step_days}",
+                help="Actor ve Critic ağlarının gizli katman nöron sayısı. "
+                     "Büyük ağ karmaşık politikaları öğrenebilir.",
+            )
+            hp["lam"] = st.slider(
+                "GAE lambda (λ)",
+                min_value=0.90, max_value=0.99,
+                value=PPOConfig.lam,
+                step=0.01,
+                key=f"ppo_lam_{step_days}",
+                help="Generalized Advantage Estimation'ın varyans-bias dengesi. "
+                     "1.0 = tam MC (yüksek varyans); 0.0 = TD(0) (yüksek bias).",
+            )
+            hp["log_std_init"] = st.slider(
+                "log σ başlangıcı",
+                min_value=-1.0, max_value=0.0,
+                value=PPOConfig.log_std_init,
+                step=0.1,
+                key=f"ppo_log_std_init_{step_days}",
+                help="Politika dağılımının başlangıç log-standart sapması. "
+                     "Daha negatif = daha dar başlangıç dağılımı (daha az keşif).",
+            )
     elif algo == "SAC":
         st.sidebar.caption(_EP_HINT)
         hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"sac_lr_pi_{step_days}")
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
-            options=[3e-4, 5e-4, 1e-3], value=5e-4)
-        hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01)
+            options=[3e-4, 5e-4, 1e-3], value=5e-4,
+            key=f"sac_lr_q_{step_days}")
+        hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01,
+            key=f"sac_alpha_{step_days}")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
-            options=[0.005, 0.01, 0.05], value=0.01)
-        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+            options=[0.005, 0.01, 0.05], value=0.01,
+            key=f"sac_tau_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128,
+            key=f"sac_batch_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(SACConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"sac_hidden_{step_days}",
+                help="Actor ve Q-ağlarının gizli katman nöron sayısı. "
+                     "SAC sürekli eylem uzayında çalışır; kapasite önemlidir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=SACConfig.buffer_size,
+                key=f"sac_buffer_{step_days}",
+                help="Off-policy deneyim belleğinin maksimum kapasitesi. "
+                     "Büyük buffer örnek çeşitliliğini artırır.",
+            )
     else:  # TD3 — sürekli/deterministik politika (hocanın tavsiyesi)
         st.sidebar.caption(_EP_HINT)
         hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"td3_lr_pi_{step_days}")
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
-            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4,
+            key=f"td3_lr_q_{step_days}")
         hp["policy_noise"] = st.sidebar.slider("Hedef-politika gürültüsü", 0.0, 0.5, 0.2, step=0.05,
+            key=f"td3_policy_noise_{step_days}",
             help="Hedef aksiyona eklenen clamped Gauss gürültüsü (TD3 smoothing).")
         hp["expl_noise"] = st.sidebar.slider("Keşif gürültüsü", 0.0, 0.5, 0.1, step=0.05,
+            key=f"td3_expl_noise_{step_days}",
             help="Eğitimde aksiyona eklenen keşif gürültüsü (eval'de kapalı).")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
-            options=[0.005, 0.01, 0.05], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+            options=[0.005, 0.01, 0.05], value=0.005,
+            key=f"td3_tau_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128,
+            key=f"td3_batch_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(TD3Config.hidden),
+                format_func=_hidden_fmt,
+                key=f"td3_hidden_{step_days}",
+                help="Actor ve Critic ağlarının gizli katman nöron sayısı. "
+                     "TD3 deterministik politikayla çalışır; derin ağ stabil kalabilir.",
+            )
+            hp["noise_clip"] = st.slider(
+                "Gürültü kırpma (noise_clip)",
+                min_value=0.0, max_value=1.0,
+                value=TD3Config.noise_clip,
+                step=0.1,
+                key=f"td3_noise_clip_{step_days}",
+                help="Hedef-politika gürültüsünün kırpma sınırı. "
+                     "Büyük değer daha geniş hedef düzgünleştirme sağlar.",
+            )
+            hp["policy_delay"] = st.slider(
+                "Politika güncelleme gecikmesi",
+                min_value=1, max_value=4,
+                value=TD3Config.policy_delay,
+                step=1,
+                key=f"td3_policy_delay_{step_days}",
+                help="Actor her kaç Critic güncellemesinde bir güncellenir (TD3 gecikmeli politika). "
+                     "2 = varsayılan; artırmak eğitimi stabilleştirir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=TD3Config.buffer_size,
+                key=f"td3_buffer_{step_days}",
+                help="Off-policy deneyim belleğinin maksimum kapasitesi.",
+            )
 
     # 💾 Model kalıcılığı (PDF §11 + N11): eğitilmiş modeli diske kaydet / diskten yükle.
     # İsimli kayıt: kullanıcı ad girer → named_model_path(name).pt olarak kaydedilir.

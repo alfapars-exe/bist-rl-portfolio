@@ -8,7 +8,7 @@ hangi katsayının kritik/kırılgan olduğunu gösteririz.
 
 YÖNTEM — One-At-a-Time (OAT) lokal duyarlılık
 ---------------------------------------------
-Her katsayıyı kendi default'u (config.HORIZON_PRESETS / RewardConfig) etrafında ~3
+Her katsayıyı kendi default'u (config.DEFAULTS / RewardConfig) etrafında ~3
 değerde varyasyonla tararız; DİĞER TÜM katsayıları default'ta SABİT tutarız. OAT bir
 lokal türev yaklaşımıdır (∂metrik/∂katsayı): ucuzdur (Σ değerler ≈ 15 eğitim) ve "tek
 parametreyi oynatınca sonuç ne kadar değişiyor?" sorusuna doğrudan cevap verir. Katsayılar
@@ -16,16 +16,16 @@ arası etkileşimi YAKALAMAZ (onun için Sobol/Morris gerekir) — burada amaç 
 "her bir katsayıya kırılganlık" testidir.
 
 Taranan katsayılar (reward_overrides üzerinden enjekte edilir):
-  eta_base   — işlem-maliyeti (turnover) cezası tabanı   (HORIZON_PRESETS[h]["eta"])
-  lambda_base— drawdown ceza tabanı                        (HORIZON_PRESETS[h]["lam"])
-  tau_base   — drawdown tolerans eşiği                      (HORIZON_PRESETS[h]["tau"])
+  eta_base   — işlem-maliyeti (turnover) cezası tabanı   (DEFAULTS.eta)
+  lambda_base— drawdown ceza tabanı                      (DEFAULTS.lam)
+  tau_base   — drawdown tolerans eşiği                   (DEFAULTS.tau)
   w_dsr      — Diferansiyel Sharpe ödül ağırlığı            (RewardConfig.w_dsr)
   w_cvar     — CVaR kuyruk-riski ceza ağırlığı              (RewardConfig.w_cvar)
   regime_beta— (opsiyonel) kriz amplifikasyon gücü          (RewardConfig.regime_beta)
 
 REFERANS KURULUM
 ----------------
-Tek temsili ajan: SAC, seed=42, orta vade (medium). Tüm (katsayı, değer) noktaları AYNI
+Tek temsili ajan: SAC, seed=42, varsayilan step_days. Tüm (katsayı, değer) noktaları AYNI
 seed + AYNI veri bölünmesi + AYNI eğitim bütçesi ile koşar → metrik farkı yalnızca o
 katsayıdan gelir (ceteris paribus). Her nokta için test setinde backtest → Sharpe / MaxDD
 / Calmar / FinalNAV.
@@ -71,7 +71,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import HORIZON_PRESETS, SEED, RewardConfig, TrainConfig  # noqa: E402
+from config import DEFAULTS, SEED, RewardConfig, TrainConfig  # noqa: E402
 from core.factory import build_agent, build_env                       # noqa: E402
 from core.rollout import evaluate as rollout_evaluate                 # noqa: E402
 from core.trainer import train as train_loop                          # noqa: E402
@@ -82,20 +82,18 @@ RES = BASE / "results"
 
 # --- Referans kurulum: tek temsili ajan (sweep boyu sabit) -------------------
 ALGO = "SAC"
-HORIZON = "medium"
 
 
-def _defaults(horizon: str) -> dict:
+def _defaults() -> dict:
     """Taranan 6 katsayının kanonik default'u (sweep'in 'merkez' noktası).
 
-    eta/lambda/tau vade-bağlı (HORIZON_PRESETS); w_dsr/w_cvar/regime_beta global
-    (RewardConfig). build_env override anahtarları ile birebir aynı isimlendirme.
+    eta/lambda/tau StepDefaults; w_dsr/w_cvar/regime_beta RewardConfig kaynaklidir.
+    build_env override anahtarlari ile birebir ayni isimlendirme kullanilir.
     """
-    p = HORIZON_PRESETS[horizon]
     return {
-        "eta_base": p["eta"],
-        "lambda_base": p["lam"],
-        "tau_base": p["tau"],
+        "eta_base": DEFAULTS.eta,
+        "lambda_base": DEFAULTS.lam,
+        "tau_base": DEFAULTS.tau,
         "w_dsr": RewardConfig.w_dsr,
         "w_cvar": RewardConfig.w_cvar,
         "regime_beta": RewardConfig.regime_beta,
@@ -103,8 +101,7 @@ def _defaults(horizon: str) -> dict:
 
 
 # --- OAT değer ızgaraları (default ~ orta değer; alt/üst komşular) -----------
-# Not: eta/lambda/tau preset'e bağlı olduğundan ızgaralar 3 vade preset'inin
-# yelpazesini (HORIZON_PRESETS short/medium/long) kapsayacak şekilde seçildi.
+# Izgaralar varsayilan degerin alt/ust komsularini kapsar.
 GRIDS = {
     "eta_base":    [0.0005, 0.0010, 0.0020],   # default(medium)=0.0010
     "lambda_base": [0.25,   0.50,   1.00],     # default(medium)=0.50
@@ -140,10 +137,12 @@ def _run_point(bundle, overrides: dict, *, n_episodes: int,
     # Eğitim ortamı (kanonik train.train_sac ile aynı kurulum: random_start,
     # max_steps, makro/regime). Tek fark: reward_overrides enjekte edilir.
     train_env = build_env(
-        ALGO, bundle.px_tr, bundle.feats_tr, horizon=HORIZON, adaptive=True,
+        ALGO, bundle.px_tr, bundle.feats_tr, adaptive=True,
         max_steps=max_steps, random_start=True, seed=SEED,
         reward_overrides=overrides,
         macro=bundle.macro_tr, regime=bundle.regime_tr,
+        rebalance_freq=1, step_days=bundle.step_days, gamma=DEFAULTS.gamma,
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
     )
     agent = build_agent(ALGO, train_env.state_dim, train_env.action_dim, seed=SEED)
     # Generator'i sonuna kadar tüket (eğitim yan-etkili).
@@ -154,13 +153,16 @@ def _run_point(bundle, overrides: dict, *, n_episodes: int,
     # değiştirmez ama tutarlılık + olası reward-bağlı kapı durumları için aktarılır;
     # eval'de random_start/price_noise kapalı -> determinizm).
     eval_env = build_env(
-        ALGO, bundle.px_te, bundle.feats_te, horizon=HORIZON, adaptive=True,
+        ALGO, bundle.px_te, bundle.feats_te, adaptive=True,
         max_steps=10_000, random_start=False, seed=SEED,
         reward_overrides=overrides,
         macro=bundle.macro_te, regime=bundle.regime_te,
+        rebalance_freq=1, step_days=bundle.step_days, gamma=DEFAULTS.gamma,
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
     )
     bt = rollout_evaluate(agent, eval_env)
-    m = summary(bt["nav"], bt["rets"], bt["weights"])
+    m = summary(bt["nav"], bt["rets"], bt["weights"], dates=bt["dates"],
+                turnover_values=bt.get("turnover"))
     return {
         "sharpe": float(m["Sharpe"]),
         "maxdd": float(m["MaxDD"]),
@@ -178,7 +180,7 @@ def run(params: list[str] | None = None, *, smoke: bool = False,
     np.random.seed(SEED)              # train.run() ile aynı global seed sırası
     bundle = prepare_data()
 
-    base = _defaults(HORIZON)
+    base = _defaults()
 
     if smoke:
         # MİNİMAL: 1 katsayı x 2 değer (format doğrulama; tam sweep değil).
@@ -199,7 +201,7 @@ def run(params: list[str] | None = None, *, smoke: bool = False,
     total = sum(len(grids[p]) for p in params)
     done = 0
     print("=" * 64)
-    print(f"ODUL DUYARLILIK (OAT) — {ALGO} seed={SEED} horizon={HORIZON} "
+    print(f"ODUL DUYARLILIK (OAT) — {ALGO} seed={SEED} step_days={bundle.step_days} "
           f"{'[SMOKE]' if smoke else ''}")
     print(f"  Taranan katsayilar: {params}")
     print(f"  Egitim butcesi: n_episodes={n_episodes} max_steps={max_steps}")

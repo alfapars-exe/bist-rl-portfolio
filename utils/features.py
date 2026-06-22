@@ -29,6 +29,11 @@ def add_features(prices: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     Anahtar sırası `config.FEATURES` ile aynıdır. Tüm göstergeler yalnız-geçmişe
     bakar (rolling/ewm/pct_change/diff — causal) → ileri-bakış (lookahead) yok.
     """
+    if prices.empty or not isinstance(prices.index, pd.DatetimeIndex):
+        raise ValueError("prices bos olmayan DatetimeIndex'li DataFrame olmali")
+    values = prices.to_numpy(dtype=float)
+    if not np.isfinite(values).all() or np.any(values <= 0):
+        raise ValueError("prices pozitif ve sonlu olmali")
     close = prices
     logret = np.log(close).diff().fillna(0.0)
     ma5    = close.pct_change(5).fillna(0.0)
@@ -75,6 +80,8 @@ class TrainScaler:
         self.fitted = False
 
     def fit(self, feats: Dict[str, pd.DataFrame]) -> "TrainScaler":
+        if not feats or any(df.empty for df in feats.values()):
+            raise ValueError("TrainScaler.fit bos feature matrisi kabul etmez")
         for k, df in feats.items():
             self.means[k] = df.mean(axis=0)
             self.stds[k]  = df.std(axis=0).replace(0, 1.0)

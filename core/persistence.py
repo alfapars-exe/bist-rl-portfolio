@@ -28,23 +28,25 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from core.contracts import RunSpec
 from core.factory import build_agent
 
-FORMAT = 1
+FORMAT = 2
 
 # Tum kaydedilmis modellerin bulundugu dizin (proje koku / models/).
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 
 
-def model_path(algo: str, horizon: str = "medium", adaptive: bool = True) -> Path:
+def model_path(algo: str, horizon: str | int = "medium", adaptive: bool = True) -> Path:
     """N11: algo_{horizon}_{adaptive}.pt — vade+adaptive farklilastirir.
 
     Ornek: model_path("DQN", "short", False) -> models/DQN_short_False.pt
     Eski tek-dosya yolunun yerine gecer; farkli vade/adaptive birbirini ezmez.
     CLI/golden bu fonksiyonu kullanir — degistirilmez.
     """
-    suffix = f"{adaptive}".lower()   # true / false — tutarli, kucuk harf
-    return MODELS_DIR / f"{algo}_{horizon}_{suffix}.pt"
+    suffix = f"{adaptive}".lower()
+    slot = f"step{horizon}" if isinstance(horizon, int) else str(horizon)
+    return MODELS_DIR / f"{algo}_{slot}_{suffix}.pt"
 
 
 def named_model_path(name: str, saved_at: str = "") -> Path:
@@ -74,9 +76,31 @@ def _modules(agent) -> dict:
             for name, m in vars(agent).items() if isinstance(m, nn.Module)}
 
 
+def _hidden_from_modules(algo: str, modules: dict) -> tuple[int, int] | None:
+    module_name = {"DQN": "q", "PPO": "policy", "SAC": "pi", "TD3": "actor"}.get(algo)
+    state = modules.get(module_name, {})
+    weights = [v for k, v in state.items() if k.endswith("weight") and getattr(v, "ndim", 0) == 2]
+    if len(weights) < 2:
+        return None
+    return int(weights[0].shape[0]), int(weights[1].shape[0])
+
+
+def _agent_config(agent, algo: str, modules: dict) -> dict:
+    hidden = _hidden_from_modules(algo, modules)
+    cfg = {"hidden": list(hidden)} if hidden else {}
+    for key in ("gamma", "batch_size", "eps_decay", "target_update", "lam", "clip",
+                "ent_coef", "n_epochs", "alpha", "tau", "policy_noise", "noise_clip",
+                "policy_delay", "expl_noise"):
+        if hasattr(agent, key):
+            value = getattr(agent, key)
+            if isinstance(value, (str, int, float, bool)):
+                cfg[key] = value
+    return cfg
+
+
 def save_agent(agent, algo: str, path, *, horizon: str = "medium",
                adaptive: bool = True, name: str = "",
-               saved_at: str | None = None) -> str:
+               saved_at: str | None = None, run_spec: RunSpec | dict | None = None) -> str:
     """Ajanin ag agirliklarini + meta'yi `path`'e yazar; yolu doner.
 
     name: kullanici-verilen model adi (bos olabilir — meta'da saklanir).
@@ -86,6 +110,9 @@ def save_agent(agent, algo: str, path, *, horizon: str = "medium",
         saved_at = datetime.now().isoformat(timespec="seconds")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    modules = _modules(agent)
+    spec_dict = (run_spec.to_dict() if isinstance(run_spec, RunSpec)
+                 else dict(run_spec or {}))
     torch.save({
         "format": FORMAT,
         "algo": algo,
@@ -95,7 +122,9 @@ def save_agent(agent, algo: str, path, *, horizon: str = "medium",
         "action_dim": _action_dim(agent),
         "name": name,
         "saved_at": saved_at,
-        "modules": _modules(agent),
+        "modules": modules,
+        "agent_config": _agent_config(agent, algo, modules),
+        "run_spec": spec_dict,
     }, path)
     return str(path)
 
@@ -110,7 +139,12 @@ def load_agent(path):
     # weights_only=True (guvenli unpickler): checkpoint yalniz metadata (str/int/bool)
     # + tensor state_dict'leri icerir; rastgele kod calistirma riski yok (SonarCloud S5042).
     ckpt = torch.load(Path(path), map_location="cpu", weights_only=True)
-    agent = build_agent(ckpt["algo"], int(ckpt["state_dim"]), int(ckpt["action_dim"]))
+    agent_cfg = dict(ckpt.get("agent_config", {}))
+    if "hidden" not in agent_cfg:
+        hidden = _hidden_from_modules(ckpt["algo"], ckpt["modules"])
+        if hidden:
+            agent_cfg["hidden"] = hidden
+    agent = build_agent(ckpt["algo"], int(ckpt["state_dim"]), int(ckpt["action_dim"]), agent_cfg)
     for name, sd in ckpt["modules"].items():
         module = getattr(agent, name, None)
         if isinstance(module, nn.Module):
@@ -121,6 +155,10 @@ def load_agent(path):
         "adaptive": bool(ckpt.get("adaptive", True)),
         "name": ckpt.get("name", ""),
         "saved_at": ckpt.get("saved_at", ""),
+        "format": int(ckpt.get("format", 1)),
+        "legacy": int(ckpt.get("format", 1)) < FORMAT,
+        "agent_config": agent_cfg,
+        "run_spec": ckpt.get("run_spec", {}),
     }
     return agent, meta
 
@@ -139,6 +177,10 @@ def read_meta(path) -> dict:
             "adaptive": bool(ckpt.get("adaptive", True)),
             "name": ckpt.get("name", ""),
             "saved_at": ckpt.get("saved_at", ""),
+            "format": int(ckpt.get("format", 1)),
+            "legacy": int(ckpt.get("format", 1)) < FORMAT,
+            "run_spec": ckpt.get("run_spec", {}),
         }
     except Exception:
-        return {"algo": "", "horizon": "medium", "adaptive": True, "name": "", "saved_at": ""}
+        return {"algo": "", "horizon": "medium", "adaptive": True, "name": "", "saved_at": "",
+                "format": 0, "legacy": True, "run_spec": {}}

@@ -125,7 +125,7 @@ def test_cash_riskfree_positive_rf(prices):
     rf = 1e-4
     d = cash_riskfree(prices, daily_rf=rf)
     assert d["nav"][-1] > d["nav"][0]
-    np.testing.assert_allclose(d["nav"][-1], (1 + rf) ** len(prices), rtol=1e-9)
+    np.testing.assert_allclose(d["nav"][-1], (1 + rf) ** (len(prices) - 1), rtol=1e-9)
 
 
 def test_momentum_top_k_concentration(prices):
@@ -133,11 +133,12 @@ def test_momentum_top_k_concentration(prices):
     top_k sifir-olmayan pozisyon."""
     k = 3
     d = momentum(prices, lookback=20, rebalance=5, top_k=k)
-    W = d["weights"]
-    nz = (W[-1] > 1e-9).sum()                 # son gun (warm-up sonrasi)
+    W = d["target_weights"]
+    t_reb = max(t for t in range(len(prices)) if t >= 20 and (t - 20) % 5 == 0)
+    nz = (W[t_reb] > 1e-9).sum()
     assert nz <= k
     # Secilen pozisyonlar esit agirlikli (1/k)
-    active = W[-1][W[-1] > 1e-9]
+    active = W[t_reb][W[t_reb] > 1e-9]
     if active.size:
         np.testing.assert_allclose(active, 1.0 / k, atol=1e-6)
 
@@ -154,7 +155,7 @@ def test_min_variance_reduces_portfolio_variance(prices):
     T, N = r.shape
     t_reb = max(t for t in range(T) if t >= lookback and (t - lookback) % rebalance == 0)
     cov = np.cov(r[t_reb - lookback:t_reb].T) + 1e-5 * np.eye(N)
-    w_mv = mv["weights"][t_reb]
+    w_mv = mv["target_weights"][t_reb]
     w_eq = np.ones(N) / N
     var_mv = float(w_mv @ cov @ w_mv)
     var_eq = float(w_eq @ cov @ w_eq)

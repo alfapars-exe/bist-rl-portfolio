@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from config import DataConfig, EnvConfig, RewardConfig
+from config import DEFAULTS, DataConfig, EnvConfig, RewardConfig
+from core.contracts import DataProvenance, RunSpec
 from data import BIST28
 from env.portfolio_env import HORIZON_PRESETS
 
@@ -32,6 +33,7 @@ def _init_state():
         "playing": False,
         "selected_algo": "DQN",
         "horizon": "medium",
+        "step_days": DEFAULTS.step_days,
         "adaptive": True,
         "initial_capital": 100_000.0,
         "train_delay": 0.0,
@@ -60,14 +62,39 @@ def _init_state():
         # Adım granülerliği — "daily" no-op (golden-güvenli)
         "granularity": "daily",
         "granularity_n_points": None,   # resample sonrası satır sayısı (uyarı için)
+        "active_run_spec": None,
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)
 
 
-def _agent_key(algo: str, horizon: str, adaptive: bool) -> tuple:
-    return (algo, horizon, bool(adaptive))
+def set_active_run_spec(algo: str, step_days: int, adaptive: bool, hp: dict) -> RunSpec:
+    prices = st.session_state.get("prices")
+    provenance = DataProvenance.from_value(
+        getattr(prices, "attrs", {}).get("provenance") if prices is not None else None)
+    feats = st.session_state.get("feats_tr") or {}
+    spec = RunSpec(
+        algo=algo, step_days=int(step_days), adaptive=bool(adaptive),
+        reward_cfg=dict(st.session_state.get("reward_cfg", {}) or {}),
+        agent_hp=dict(hp or {}), data_start=str(st.session_state.get("data_start", "")),
+        data_split=str(st.session_state.get("data_split", "")),
+        data_end=str(st.session_state.get("data_end", "")),
+        feature_names=tuple(feats.keys()), provenance=provenance,
+    )
+    st.session_state.active_run_spec = spec.to_dict()
+    return spec
 
 
-def env_rebalance_hint(horizon: str) -> int:
-    return int(HORIZON_PRESETS[horizon]["rebalance"])
+def _agent_key(algo: str, step_days, adaptive: bool) -> tuple:
+    if isinstance(step_days, str):
+        return (algo, step_days, bool(adaptive))  # legacy checkpoint/UI key
+    spec_data = st.session_state.get("active_run_spec")
+    if spec_data:
+        spec = RunSpec.from_dict(spec_data)
+        if spec.algo == algo and spec.step_days == int(step_days) and spec.adaptive == bool(adaptive):
+            return (algo, int(step_days), bool(adaptive), spec.fingerprint)
+    return (algo, int(step_days), bool(adaptive), "unbound")
+
+
+def env_rebalance_hint(step_days) -> int:
+    return int(step_days) if not isinstance(step_days, str) else int(HORIZON_PRESETS[step_days]["rebalance"])

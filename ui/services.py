@@ -7,19 +7,21 @@ trajectory yakalama.
 from __future__ import annotations
 
 from pathlib import Path
+from math import ceil
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 from agents.base import SupportsQValues
-from config import SEED, ForecastConfig, MacroConfig, GRANULARITY_MIN_POINTS
+from config import DEFAULTS, SEED, ForecastConfig, MacroConfig, validate_train_range
 from core.factory import build_agent, build_env
+from core.episodes import evaluate_noise_episodes
 from core.persistence import (load_agent, model_path, named_model_path,
                               read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
 from data import (align_macro, download_bist, download_macro,
-                  resample_to_granularity, train_test_split)
+                  resample_to_step_days, train_test_split)
 from env.portfolio_env import ACTION_NAMES
 from ui.state import _agent_key
 from utils.baselines import equal_weight
@@ -32,7 +34,7 @@ from utils.portfolio_tl import compute_tl_step
 MODELS_DIR = _MODELS_DIR  # noqa: N816  — dis erisim icin re-export (sidebar import eder)
 
 
-def save_trained_agent(algo: str, horizon: str, adaptive: bool, name: str = ""):
+def save_trained_agent(algo: str, step_days: int, adaptive: bool, name: str = ""):
     """Session'daki egitilmis ajani diske kaydeder; yolu doner (yoksa None).
 
     N11: isim verilmisse named_model_path(name).pt kullanilir (UI isimli kayit).
@@ -41,14 +43,14 @@ def save_trained_agent(algo: str, horizon: str, adaptive: bool, name: str = ""):
          bu fonksiyon yalnizca UI "Kaydet" butonundan cagirilir.
     name: kullanici-girilen model adi; bos olursa "{algo}_{horizon}" kullanilir.
     """
-    entry = st.session_state.trained_agents.get(_agent_key(algo, horizon, adaptive))
+    entry = st.session_state.trained_agents.get(_agent_key(algo, step_days, adaptive))
     if not entry or entry[0] is None:
         return None
-    effective_name = name.strip() if name.strip() else f"{algo}_{horizon}"
+    effective_name = name.strip() if name.strip() else f"{algo}_step{step_days}"
     path = named_model_path(effective_name)
     return save_agent(entry[0], algo, path,
-                      horizon=horizon, adaptive=adaptive,
-                      name=effective_name)
+                      horizon=f"step{step_days}", adaptive=adaptive,
+                      name=effective_name, run_spec=st.session_state.get("active_run_spec"))
 
 
 def list_saved_models() -> list[dict]:
@@ -71,6 +73,8 @@ def list_saved_models() -> list[dict]:
             "algo": meta["algo"],
             "horizon": meta["horizon"],
             "adaptive": meta["adaptive"],
+            "step_days": int(meta.get("run_spec", {}).get("step_days", 1)),
+            "legacy": bool(meta.get("legacy", True)),
         })
     # saved_at'e gore yeniden→eskiye sirala (ISO string karsilastirmasi dogru calisir)
     results.sort(key=lambda x: x["saved_at"], reverse=True)
@@ -98,7 +102,12 @@ def load_saved_agent_from_path(path):
     if not path.exists():
         return None
     agent, meta = load_agent(path)
-    key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
+    if meta.get("run_spec"):
+        st.session_state.active_run_spec = meta["run_spec"]
+        step_days = int(meta["run_spec"].get("step_days", 1))
+        key = _agent_key(meta["algo"], step_days, meta["adaptive"])
+    else:
+        key = _agent_key(meta["algo"], meta["horizon"], meta["adaptive"])
     st.session_state.trained_agents[key] = (agent, [])
     return key, meta
 
@@ -125,17 +134,19 @@ def _load_data():
     data_start = st.session_state.get("data_start", _dc_defaults.start)
     data_split = st.session_state.get("data_split", _dc_defaults.train_end)
     data_end   = st.session_state.get("data_end",   _dc_defaults.end)
-    g = st.session_state.get("granularity", "daily")
+    step_days = int(st.session_state.get("step_days", DEFAULTS.step_days))
 
     with st.spinner("Veri indiriliyor / cache okunuyor ..."):
         prices_daily = download_bist(start=data_start, end=data_end)
     # Sentetik-veri görünürlüğü: ağ + cache yoksa download_bist SENTETİK GBM'e düşer
     # (px.attrs["synthetic"]=True). Bu durumda sonuçlar GERÇEK DEĞİLDİR ve NaN/anlamsız
     # değerler çıkabilir → kullanıcıya AÇIK uyarı (sessiz NaN yerine).
-    if prices_daily.attrs.get("synthetic"):
-        st.error("⚠️ GERÇEK BIST verisi yüklenemedi (ağ erişimi + cache yok) → SENTETİK GBM "
-                 "verisi kullanılıyor. Sonuçlar gerçek DEĞİLDİR; NaN/anlamsız değerler "
-                 "görülebilir. (Bu ortamda `data/prices.parquet` eksik — deploy ile yüklenmeli.)")
+    source = prices_daily.attrs.get("provenance", {}).get("source", "unknown")
+    if source != "real":
+        st.warning(
+            f"Veri kaynagi {source.upper()}. Egitim ve test devam eder; modeller, "
+            "CSV'ler ve ekran bu provenance etiketini korur."
+        )
 
     # --- 1. Feature'lar her zaman GÜNLÜK hesaplanır (add_features DEĞİŞMEZ) ---
     feats_daily = add_features(prices_daily)
@@ -151,16 +162,22 @@ def _load_data():
             hidden=ForecastConfig.hidden, epochs=ForecastConfig.epochs,
             lr=ForecastConfig.lr, batch=ForecastConfig.batch, seed=SEED)
 
-    # --- 3. Granülerliğe resample (g="daily" → no-op, golden-güvenli) ---
-    prices = resample_to_granularity(prices_daily, g)
-    feats_all_raw = {k: resample_to_granularity(v, g) for k, v in feats_daily.items()}
-
-    # --- 4. train_test_split RESAMPLE'LANMIŞ fiyat üzerinde ---
-    px_tr, px_te = train_test_split(prices, split=data_split)
-
-    # --- 5. Feats'i train/test olarak böl (RESAMPLE'LANMIŞ index üzerinde) ---
-    feats_tr_raw = {k: v.loc[px_tr.index] for k, v in feats_all_raw.items()}
-    feats_te_raw = {k: v.loc[px_te.index] for k, v in feats_all_raw.items()}
+    # Split daily data first, then independently select N-session endpoints. A
+    # period can never mix train and test observations.
+    px_tr_daily, px_te_daily = train_test_split(prices_daily, split=data_split)
+    px_tr = resample_to_step_days(px_tr_daily, step_days)
+    px_te = resample_to_step_days(px_te_daily, step_days)
+    prices = pd.concat([px_tr, px_te])
+    prices.attrs.update(prices_daily.attrs)
+    feats_tr_raw = {
+        k: resample_to_step_days(v.loc[px_tr_daily.index], step_days) for k, v in feats_daily.items()
+    }
+    feats_te_raw = {
+        k: resample_to_step_days(v.loc[px_te_daily.index], step_days) for k, v in feats_daily.items()
+    }
+    ok, message = validate_train_range(len(px_tr), step_days=step_days)
+    if not ok:
+        raise ValueError(message)
 
     # SIZINTI KORUMASI: scaler YALNIZ eğitim kısmında fit edilir, test'e transform uygulanır.
     scaler = TrainScaler().fit(feats_tr_raw)
@@ -173,12 +190,7 @@ def _load_data():
 
     # Nokta sayısını kaydet (uyarı için sidebar/tab kullanabilir)
     st.session_state.granularity_n_points = len(prices)
-    _min_pts = GRANULARITY_MIN_POINTS.get(g, 0)
-    if len(prices) < _min_pts:
-        st.warning(
-            f"Seçilen granülerlik '{g}' ile toplam {len(prices)} nokta mevcut "
-            f"(önerilen minimum: {_min_pts}). Sonuçlar kaba olabilir."
-        )
+    st.session_state.data_provenance = prices_daily.attrs.get("provenance", {})
 
     # --- 6. Makro: GÜNLÜK indir → GÜNLÜK align → add_macro_features (GÜNLÜK) → resample ---
     # MacroScaler RESAMPLE'LANMIŞ px_tr'de fit edilir (sızıntı korunur).
@@ -189,14 +201,15 @@ def _load_data():
         )
         # Makro + regime'i granülerliğe resample et
         regime_daily = mfeat_daily["regime"].to_frame("regime")
-        mfeat = resample_to_granularity(mfeat_daily, g)
-        regime_full = resample_to_granularity(regime_daily, g)["regime"]
-        # MacroScaler RESAMPLE'LANMIŞ px_tr dilimiyle fit edilir
-        macro_z = MacroScaler().fit(mfeat.loc[px_tr.index]).transform(mfeat)
-        macro_tr = macro_z.loc[px_tr.index].to_numpy(np.float32)
-        macro_te = macro_z.loc[px_te.index].to_numpy(np.float32)
-        regime_tr = regime_full.loc[px_tr.index].to_numpy(np.float32)
-        regime_te = regime_full.loc[px_te.index].to_numpy(np.float32)
+        mtr_daily, mte_daily = train_test_split(mfeat_daily, split=data_split)
+        rtr_daily, rte_daily = train_test_split(regime_daily, split=data_split)
+        mtr = resample_to_step_days(mtr_daily, step_days)
+        mte = resample_to_step_days(mte_daily, step_days)
+        scaler_m = MacroScaler().fit(mtr)
+        macro_tr = scaler_m.transform(mtr).to_numpy(np.float32)
+        macro_te = scaler_m.transform(mte).to_numpy(np.float32)
+        regime_tr = resample_to_step_days(rtr_daily, step_days)["regime"].to_numpy(np.float32)
+        regime_te = resample_to_step_days(rte_daily, step_days)["regime"].to_numpy(np.float32)
     st.session_state.macro_tr = macro_tr
     st.session_state.macro_te = macro_te
     st.session_state.regime_tr = regime_tr
@@ -204,8 +217,10 @@ def _load_data():
     st.session_state.data_loaded = True
 
 
-def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps: int,
-              cash_daily_rate: float | None = None):
+def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_steps: int,
+              cash_daily_rate: float | None = None, *,
+              force_noise: bool = False, noise_eval: float = 0.0,
+              seed_override: int | None = None):
     """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3).
 
     N12: cash_daily_rate None verilirse session_state.cash_daily_rate okunur;
@@ -217,6 +232,26 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     feats = st.session_state.feats_tr if is_train else st.session_state.feats_te
     macro = st.session_state.get("macro_tr" if is_train else "macro_te")
     regime = st.session_state.get("regime_tr" if is_train else "regime_te")
+    start_index = None
+    if not is_train:
+        context = min(len(st.session_state.px_tr), max(21, ceil(DEFAULTS.minvol_window / step_days)) + 1)
+        px_context = st.session_state.px_tr.iloc[-context:]
+        px_df = pd.concat([px_context, px_df])
+        counts = np.concatenate([
+            np.asarray(st.session_state.px_tr.attrs.get(
+                "session_counts", np.ones(len(st.session_state.px_tr), dtype=int)))[-context:],
+            np.asarray(st.session_state.px_te.attrs.get(
+                "session_counts", np.ones(len(st.session_state.px_te), dtype=int))),
+        ])
+        px_df.attrs.update(st.session_state.px_te.attrs)
+        px_df.attrs["session_counts"] = counts
+        feats = {k: pd.concat([st.session_state.feats_tr[k].iloc[-context:], v])
+                 for k, v in st.session_state.feats_te.items()}
+        if macro is not None:
+            macro = np.concatenate([st.session_state.macro_tr[-context:], macro], axis=0)
+        if regime is not None:
+            regime = np.concatenate([st.session_state.regime_tr[-context:], regime], axis=0)
+        start_index = context
     # Eğitimde UI'dan okunan σ geçilir; eval'de None → env gürültüyü zaten
     # random_start=False ile kapatır, ama yine de None göndererek kasıtsız gürültüyü engelle.
     noise_std = (st.session_state.get("price_noise_std") if is_train else None)
@@ -225,19 +260,44 @@ def _make_env(is_train: bool, algo: str, horizon: str, adaptive: bool, max_steps
     ep_clean = bool(is_train and st.session_state.get("episode_clean", True))
     # Rebalans frekansı override (sidebar): None -> preset (golden-güvenli). Train+eval'e
     # AYNI değer uygulanır (model hangi frekansla eğitildiyse onunla test edilsin).
-    rebalance_freq = st.session_state.get("train_rebalance")
     # N12: nakit faiz — önce parametre, sonra session_state, sonra env default (None).
     if cash_daily_rate is None:
         cash_daily_rate = st.session_state.get("cash_daily_rate", None)
     return build_env(
-        algo, px_df, feats, horizon=horizon, adaptive=adaptive, max_steps=max_steps,
-        random_start=is_train, seed=SEED,          # v2: egitimde rastgele pencere, eval'de sabit
+        algo, px_df, feats, adaptive=adaptive, max_steps=max_steps,
+        random_start=is_train,                     # v2: egitimde rastgele pencere, eval'de sabit
+        seed=(int(seed_override) if seed_override is not None else SEED),  # noise-episode: per-episode tohum
         reward_overrides=st.session_state.get("reward_cfg", {}) or {},
-        price_noise_std=noise_std,                 # UI σ kontrolü (train-only)
+        price_noise_std=(float(noise_eval) if force_noise else noise_std),  # UI σ (train) / noise-episode (eval)
+        force_price_noise=bool(force_noise),       # gurultu-artirimli coklu-episode: eval'de gurultu ac
         episode_clean=ep_clean,                    # 1. iterasyon orijinal (anti-ezber)
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
         cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
-        rebalance_freq=rebalance_freq,             # sidebar override (None -> preset)
+        rebalance_freq=1, step_days=int(step_days),
+        gamma=float(st.session_state.get("gamma_daily", DEFAULTS.gamma)),
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+        start_index=start_index,
+    )
+
+
+def evaluate_noise_episodes_ui(agent, algo: str, step_days: int, adaptive: bool, *,
+                               n_episodes: int = 5, noise_std: float = 0.01) -> list:
+    """Egitilmis ajani test araligi boyunca SIRAYLA birden cok episode'da kosturur.
+
+    Episode 0 = orijinal (gurultusuz) referans — normal testle AYNI kurulum
+    (_make_env eval yolu: context penceresi + start_index dahil) -> episode 0
+    normal test sonucuyla ortusur. Episode 1..N = ayni test serisine getiri-
+    seviyesinde Gauss gurultusu (force_price_noise; episode basina FARKLI tohum)
+    eklenmis YENI patikalar (anti-ezber). Her episode TUM test araligini kapsar.
+    """
+    def make_env(episode: int, noise_std: float, seed: int):
+        return _make_env(False, algo, step_days, adaptive, max_steps=10_000,
+                         force_noise=(noise_std > 0.0), noise_eval=noise_std,
+                         seed_override=seed)
+
+    return evaluate_noise_episodes(
+        make_env, agent, n_episodes=int(n_episodes),
+        noise_std=float(noise_std), seed=SEED, include_original=True,
     )
 
 
@@ -250,7 +310,7 @@ def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
 # =====================================================================
 # Eğitim jeneratörü — canlı UI için episod başına yield
 # =====================================================================
-def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
+def train_generator(algo: str, step_days: int, adaptive: bool, hp: dict,
                     rollout_len: int = 400, resume_agent=None,
                     n_episodes: int | None = None):
     """Episod/update başına bir telemetri kaydı yield eder.
@@ -266,8 +326,8 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
          yoksa algo'ya özgü sabit fallback.
     """
     _algo_defaults = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}
-    max_steps = int(st.session_state.get("train_max_steps", _algo_defaults.get(algo, 252)))
-    env = _make_env(True, algo, horizon, adaptive, max_steps=max_steps)
+    max_steps = max(1, len(st.session_state.px_tr))
+    env = _make_env(True, algo, step_days, adaptive, max_steps=max_steps)
     if resume_agent is not None:
         agent = resume_agent
     else:
@@ -283,15 +343,15 @@ def train_generator(algo: str, horizon: str, adaptive: bool, hp: dict,
 # =====================================================================
 # Test dönemi — adım adım trajectory yakalama
 # =====================================================================
-def evaluate_with_trace(agent, algo: str, horizon: str, adaptive: bool) -> list:
-    env = _make_env(False, algo, horizon, adaptive, max_steps=10_000)
+def evaluate_with_trace(agent, algo: str, step_days: int, adaptive: bool) -> list:
+    env = _make_env(False, algo, step_days, adaptive, max_steps=10_000)
     s, _ = env.reset()
     trace = []
     done = trunc = False
     # P5 (ISP): hasattr yoklamasi yerine resmi Protocol — ayni semantik, acik niyet.
     has_q = isinstance(agent, SupportsQValues)  # yalnizca DQN introspeksiyonu sunar
     while not (done or trunc):
-        date = env.dates[env.t]
+        decision_date = env.dates[env.t]
         weights_before = env.w.copy()
         state_snapshot = s.copy()
 
@@ -308,14 +368,17 @@ def evaluate_with_trace(agent, algo: str, horizon: str, adaptive: bool) -> list:
 
         trace.append({
             "step": len(trace),
-            "date": str(pd.Timestamp(date).date()),
+            "date": str(pd.Timestamp(info["date"]).date()),
+            "decision_date": str(pd.Timestamp(decision_date).date()),
             "state": state_snapshot,
             "action_idx": action_idx,
             "action_name": action_name,
             "q_values": q_vals,
             "weights_before": weights_before,
+            "target_weights": info["target_weights"].copy(),
             "weights_after": env.w.copy(),
             "reward_terms": info["reward_terms"],
+            "period_length": info["period_length"],
             "nav": float(env.nav),
             "prices_t": info["prices_t"].copy(),
         })
@@ -340,6 +403,8 @@ def _compute_test_tl_snaps(trace: list, initial_capital: float) -> list:
             prev_portfolio_tl=prev_portfolio_tl,
             holding_days_prev=holding_days_prev,
             tx_cost_rate=float(t["reward_terms"].get("tx_cost", 0.0)),
+            target_weights=t.get("target_weights"),
+            holding_period_days=int(t.get("period_length", 1)),
         )
         snap["w_now"] = t["weights_after"]
         snaps.append(snap)

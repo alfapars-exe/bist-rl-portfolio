@@ -49,7 +49,8 @@ if not os.path.exists("results/macro_raw.csv") and os.path.exists("data/macro_ra
     print("  (results/macro_raw.csv parquet'ten uretildi)")
 # GERCEK veri CSV'leri (results/*.csv gitignore'da -> upload_folder ATLAR). data.py
 # fallback'i bunlari okur (parquet Space'te reddedildigi icin CSV kullaniliyor).
-_must = ["results/bist30_prices.csv", "results/macro_raw.csv"] + sorted(_glob.glob("models/*.pt"))
+_must = ["results/bist30_prices.csv", "results/macro_raw.csv",
+         "results/run_manifest.json"] + sorted(_glob.glob("models/*.pt"))
 for _f in _must:
     if os.path.exists(_f):
         api.upload_file(path_or_fileobj=_f, path_in_repo=_f, repo_id=REPO_ID,
@@ -74,12 +75,13 @@ pinned: false
 
 DQN/PPO/SAC/TD3 ile BIST 28 hissesi uzerinde portfoy-yonetimi RL demosu (UYIK 2026).
 Streamlit arayuzu (Docker SDK): canli egitim, adim-adim test, coklu-ajan karsilastirma;
-parametrik odul/ceza, vade preset'leri, train/test tarih secimi, parametrik episode + gurultu.
+parametrik odul/ceza, N-seans karar adimi, train/test tarih secimi, parametrik episode + gurultu.
 
 Tam dokumantasyon: `DOKUMANTASYON.md` | Kod eki: `KOD_EKI.md`
 
 > Sidebar'dan 'Veriyi Yukle' -> Egitim / Test / Karsilastirma. yfinance erisilemezse
-> sentetik veri ile calisir. Egitilmis modeller (models/*.pt) yuklu.
+> sentetik/karma veri ile provenance etiketi korunarak calisir. Model ve sonuclarin
+> kaynagi `results/run_manifest.json` dosyasinda kayitlidir.
 """
 api.upload_file(path_or_fileobj=README.encode("utf-8"), path_in_repo="README.md",
                 repo_id=REPO_ID, repo_type="space", commit_message="Space README (docker)")

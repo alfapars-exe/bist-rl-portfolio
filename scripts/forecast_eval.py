@@ -70,6 +70,12 @@ def _pearson(p: np.ndarray, g: np.ndarray) -> float:
     return float(np.corrcoef(p, g)[0, 1])
 
 
+def _finite_mean(values: list[float]) -> float:
+    values_arr = np.asarray(values, dtype=float)
+    finite = values_arr[np.isfinite(values_arr)]
+    return float(finite.mean()) if finite.size else float("nan")
+
+
 def _metrics_pooled(p: np.ndarray, g: np.ndarray) -> dict:
     """Genel (havuzlanmis: tum (t,j) ornekleri tek vektorde) metrikler."""
     return dict(rmse=_rmse(p, g), mae=_mae(p, g),
@@ -86,8 +92,8 @@ def _metrics_per_asset(P: np.ndarray, G: np.ndarray) -> dict:
         mae.append(_mae(pj, gj))
         sgn.append(_sign_acc(pj, gj))
         cor.append(_pearson(pj, gj))
-    return dict(rmse=float(np.nanmean(rmse)), mae=float(np.nanmean(mae)),
-                sign_acc=float(np.nanmean(sgn)), corr=float(np.nanmean(cor)))
+    return dict(rmse=_finite_mean(rmse), mae=_finite_mean(mae),
+                sign_acc=_finite_mean(sgn), corr=_finite_mean(cor))
 
 
 # --------------------------------------------------------------------------- #
@@ -98,10 +104,14 @@ def main() -> None:
 
     # 1) Veri — train.py ile birebir ayni cagri
     px = download_bist()
-    is_synth = bool(px.attrs.get("synthetic", False))
+    provenance = px.attrs.get("provenance", {})
+    source = provenance.get("source", "unknown")
     px_tr, px_te = train_test_split(px)   # default split = DataConfig.train_end
-    src = "SENTETIK GBM (offline fallback)" if is_synth else "GERCEK BIST (yfinance)"
-    print(f"Veri kaynagi : {src}")
+    print(f"Veri kaynagi : {source.upper()} ({provenance.get('provider', 'unknown')})")
+    if provenance.get("missing_tickers"):
+        print(f"Eksik ticker  : {', '.join(provenance['missing_tickers'])}")
+    if provenance.get("reason"):
+        print(f"Fallback      : {provenance['reason']}")
     print(f"Train        : {px_tr.shape}  (< {DataConfig.train_end})")
     print(f"Test         : {px_te.shape}  (>= {DataConfig.train_end})")
     print(f"Hisse sayisi : {px.shape[1]}")
@@ -222,9 +232,9 @@ def main() -> None:
     else:
         verdict = "karisik; sinyal gostergeleri zayif"
     print(f"  -> SONUC: {verdict}")
-    if is_synth:
-        print("  NOT: Bu sonuc SENTETIK GBM verisi uzerinde. GBM getirileri serisel "
-              "bagimsizdir; ogrenilecek sinyal yoktur -> forecast ~ zero, corr ~ 0 beklenir.")
+    if source in {"mixed", "synthetic"}:
+        print(f"  NOT: Veri kaynagi {source.upper()}; sonuc tamamen gercek veri olarak "
+              "etiketlenemez.")
     print(f"\nYazildi: {out_csv}")
     print("=" * 72)
 

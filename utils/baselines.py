@@ -27,6 +27,58 @@ from config import HORIZON_PRESETS, EnvConfig, cash_daily_rate
 DEFAULT_ETA: float = float(HORIZON_PRESETS["medium"]["eta"])
 
 
+def _normalize(w: np.ndarray) -> np.ndarray:
+    w = np.clip(np.asarray(w, dtype=float), 0.0, None)
+    total = float(w.sum())
+    return w / total if total > 1e-12 else np.full(len(w), 1.0 / len(w))
+
+
+def _turnover_from_holdings(target: np.ndarray, held: np.ndarray) -> float:
+    """L1 turnover including the implicit cash slot."""
+    target = _normalize(target)
+    held = np.asarray(held, dtype=float)
+    return float(np.abs(target - held).sum() + abs((1.0 - target.sum()) - (1.0 - held.sum())))
+
+
+def _simulate(prices: pd.DataFrame, target_fn, *, eta: float,
+              rebalance_fn) -> dict:
+    """Self-financing long-only simulator shared by all risky baselines."""
+    r = prices.pct_change().fillna(0.0).to_numpy(dtype=float)
+    T, N = r.shape
+    nav = np.empty(T, dtype=float)
+    rets = np.empty(T, dtype=float)
+    weights = np.empty((T, N), dtype=float)
+    target_hist = np.empty((T, N), dtype=float)
+    turnover = np.zeros(T, dtype=float)
+    held = np.zeros(N, dtype=float)  # all cash before the first allocation
+    wealth = 1.0
+    pending_initial_cost = 0.0
+    for t in range(T):
+        if rebalance_fn(t):
+            target = _normalize(target_fn(t, r, held.copy()))
+            turn = _turnover_from_holdings(target, held)
+        else:
+            target = held.copy()
+            turn = 0.0
+        if t == 0:
+            # Report the common pre-trade starting wealth. Initial allocation
+            # cost is realized together with the first investable period.
+            pending_initial_cost = float(eta) * turn
+            gross = net = 0.0
+        else:
+            gross = float(target @ r[t])
+            net = gross - float(eta) * turn - pending_initial_cost
+            pending_initial_cost = 0.0
+            wealth = max(0.0, wealth * (1.0 + net))
+        grown = target * (1.0 + (r[t] if t > 0 else 0.0))
+        held = _normalize(grown) if float(grown.sum()) > 1e-12 else target
+        nav[t], rets[t], weights[t], target_hist[t], turnover[t] = \
+            wealth, net, held, target, turn
+    return {"nav": nav, "rets": rets, "weights": weights,
+            "target_weights": target_hist, "turnover": turnover,
+            "dates": list(prices.index)}
+
+
 def equal_weight(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
     """Günlük rebalansla eşit ağırlık — RL ile simetrik işlem maliyeti düşülür.
 
@@ -34,35 +86,18 @@ def equal_weight(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
     hareketiyle kayan ağırlıklar (w_drift) tekrar 1/N'e çekilir; bu rebalansın
     ||Δw||₁'i kadar `eta` maliyeti net getiriden düşülür. Drift küçük olduğundan
     maliyet de küçüktür ama 0 değildir (RL ile simetri)."""
-    r = prices.pct_change().fillna(0).values
-    T, N = r.shape
-    w_target = np.ones(N) / N
-    rets = np.empty(T)
-    w_prev = w_target.copy()                  # gün 0 başlangıcı: eşit ağırlık
-    for t in range(T):
-        # Gün başında hedef = eşit ağırlık; rebalans maliyeti w_prev'e göre.
-        turnover = float(np.abs(w_target - w_prev).sum())
-        port_r = float((w_target * r[t]).sum())
-        rets[t] = port_r - eta * turnover
-        # Gün içi getiriyle ağırlıklar kayar (drift) -> ertesi gün w_prev.
-        w_drift = w_target * (1.0 + r[t])
-        s = w_drift.sum()
-        w_prev = w_drift / s if s > 1e-12 else w_target.copy()
-    nav = np.cumprod(1 + rets)
-    return dict(nav=nav, rets=rets, weights=np.tile(w_target, (T, 1)))
+    n = prices.shape[1]
+    target = np.full(n, 1.0 / n)
+    return _simulate(prices, lambda t, r, w: target, eta=eta,
+                     rebalance_fn=lambda t: True)
 
 
-def buy_and_hold_index(prices: pd.DataFrame) -> dict:
-    """Eşit ağırlık alıp tut (rebalans yok)."""
-    p0 = prices.iloc[0].values
-    shares = 1.0 / p0 / prices.shape[1]
-    nav = (prices.values * shares).sum(axis=1)
-    rets = np.diff(np.log(nav))
-    return dict(
-        nav=nav / nav[0],
-        rets=np.concatenate([[0.0], rets]),
-        weights=None,
-    )
+def buy_and_hold_index(prices: pd.DataFrame, eta: float = DEFAULT_ETA) -> dict:
+    """Eşit ağırlık alıp tut; yalnız ilk alım işlem maliyeti doğurur."""
+    n = prices.shape[1]
+    target = np.full(n, 1.0 / n)
+    return _simulate(prices, lambda t, r, w: target, eta=eta,
+                     rebalance_fn=lambda t: t == 0)
 
 
 def mean_variance(prices: pd.DataFrame, lookback: int = 120,
@@ -74,36 +109,26 @@ def mean_variance(prices: pd.DataFrame, lookback: int = 120,
     işlem maliyeti net getiriden düşülür."""
     from scipy.optimize import minimize
 
-    r = prices.pct_change().fillna(0).values
-    T, N = r.shape
-    navs = [1.0]; rets = []; w_hist = []
-    w = np.ones(N) / N
-    for t in range(T):
-        tx = 0.0
-        if t >= lookback and (t - lookback) % rebalance == 0:
-            hist = r[t - lookback: t]
-            mu = hist.mean(axis=0)
-            cov = np.cov(hist.T) + 1e-5 * np.eye(N)
+    n = prices.shape[1]
+    equal = np.full(n, 1.0 / n)
 
-            def obj(w_, mu=mu, cov=cov, ra=risk_aversion):
-                return -(w_ @ mu) + 0.5 * ra * w_ @ cov @ w_
+    def target_fn(t, r, held):
+        if t < lookback:
+            return equal
+        hist = r[t - lookback:t]
+        mu = hist.mean(axis=0)
+        cov = np.cov(hist.T) + 1e-5 * np.eye(n)
 
-            res = minimize(
-                obj, np.ones(N) / N,
-                bounds=[(0, 0.2)] * N,
-                constraints=({"type": "eq", "fun": lambda w_: w_.sum() - 1}),
-            )
-            w_new = res.x
-            tx = eta * float(np.abs(w_new - w).sum())   # RL-simetrik tx-cost
-            w = w_new
-        port_r = float((w * r[t]).sum()) - tx
-        rets.append(port_r)
-        navs.append(navs[-1] * (1 + port_r))
-        w_hist.append(w.copy())
-    return dict(
-        nav=np.array(navs[1:]),
-        rets=np.array(rets),
-        weights=np.array(w_hist),
+        def obj(w_, mu=mu, cov=cov, ra=risk_aversion):
+            return -(w_ @ mu) + 0.5 * ra * w_ @ cov @ w_
+
+        res = minimize(obj, equal, bounds=[(0, 0.2)] * n,
+                       constraints=({"type": "eq", "fun": lambda w_: w_.sum() - 1}))
+        return res.x if res.success and np.isfinite(res.x).all() else equal
+
+    return _simulate(
+        prices, target_fn, eta=eta,
+        rebalance_fn=lambda t: t == 0 or (t >= lookback and (t - lookback) % rebalance == 0),
     )
 
 
@@ -124,26 +149,19 @@ def _rolling_backtest(prices: pd.DataFrame, weight_fn, lookback: int,
         net_r = port_r - eta * ||w_yeni - w_eski||_1
     eta = config.HORIZON_PRESETS['medium']['eta'] (RL kanonik base oran).
     Hicbir np.random cagrisi yok -> golden RNG sirasi etkilenmez (determinist)."""
-    r = prices.pct_change().fillna(0.0).values
-    T, N = r.shape
-    navs = [1.0]; rets = []; w_hist = []
-    w = np.ones(N) / N
-    for t in range(T):
-        tx = 0.0
-        if t >= lookback and (t - lookback) % rebalance == 0:
-            hist = r[t - lookback: t]
-            w_new = np.asarray(weight_fn(hist, w), dtype=float)
-            w_new = np.clip(w_new, 0.0, None)
-            s = w_new.sum()
-            w_new = w_new / s if s > 1e-12 else np.ones(N) / N
-            tx = eta * float(np.abs(w_new - w).sum())   # RL-simetrik tx-cost
-            w = w_new
-        port_r = float((w * r[t]).sum()) - tx
-        rets.append(port_r)
-        navs.append(navs[-1] * (1 + port_r))
-        w_hist.append(w.copy())
-    return dict(nav=np.array(navs[1:]), rets=np.array(rets),
-                weights=np.array(w_hist))
+    n = prices.shape[1]
+    equal = np.full(n, 1.0 / n)
+
+    def target_fn(t, r, held):
+        if t < lookback:
+            return equal
+        candidate = np.asarray(weight_fn(r[t - lookback:t], held), dtype=float)
+        return candidate if candidate.shape == (n,) and np.isfinite(candidate).all() else equal
+
+    return _simulate(
+        prices, target_fn, eta=eta,
+        rebalance_fn=lambda t: t == 0 or (t >= lookback and (t - lookback) % rebalance == 0),
+    )
 
 
 def inverse_volatility(prices: pd.DataFrame, lookback: int = 60,
@@ -204,7 +222,7 @@ def min_variance(prices: pd.DataFrame, lookback: int = 120,
         res = _min(lambda x: x @ cov @ x, np.ones(n) / n,
                    bounds=[(0, max_weight)] * n,
                    constraints=({"type": "eq", "fun": lambda x: x.sum() - 1}))
-        return res.x
+        return res.x if res.success and np.isfinite(res.x).all() else np.ones(n) / n
     return _rolling_backtest(prices, f, lookback, rebalance, eta)
 
 
@@ -247,6 +265,10 @@ def cash_riskfree(prices: pd.DataFrame,
         daily_rf = cash_daily_rate(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
     T, N = prices.shape
     rets = np.full(T, float(daily_rf))
+    if T:
+        rets[0] = 0.0
     nav = np.cumprod(1.0 + rets)
     weights = np.zeros((T, N))
-    return dict(nav=nav, rets=rets, weights=weights)
+    return dict(nav=nav, rets=rets, weights=weights,
+                target_weights=weights.copy(), turnover=np.zeros(T),
+                dates=list(prices.index))

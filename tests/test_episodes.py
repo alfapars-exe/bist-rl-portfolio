@@ -1,0 +1,126 @@
+"""Gurultu-artirimli coklu-episode + NaN-guvenligi testleri (torch'suz, v12-uyumlu).
+
+(1) NaN-guvenligi: data._sanitize_prices NaN'i temizler; env._risky_returns'teki
+    np.nan_to_num, env.prices'a (ctor validasyonundan SONRA) enjekte edilen tek bir
+    NaN getiriyi 'hareket yok' (0) sayar -> NAV sonlu kalir (eski hata: 0*nan=nan
+    NAV'i tum episod boyunca zehirlerdi; HF Space'te gozlemlendi).
+(2) Gurultu-artirimli episode mekanizmasi: make_noisy_prices determinizmi +
+    evaluate_noise_episodes'in sirayla tam-aralik episode kosturmasi.
+Random (torch'suz) ajan; ajan-agnostik act_eval yolu test edilir.
+"""
+import numpy as np
+import pandas as pd
+
+from core.episodes import (
+    evaluate_noise_episodes, make_noisy_prices, summarize_episodes,
+)
+from data import _sanitize_prices
+from env.portfolio_env import DiscretePortfolioEnv
+from utils.features import TrainScaler, add_features
+
+
+def _market(seed=0, n=400, k=6):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2015-01-01", periods=n)
+    px = pd.DataFrame(100.0 * np.exp(np.cumsum(rng.normal(0.0003, 0.012, (n, k)), axis=0)),
+                      index=idx, columns=[f"A{i}" for i in range(k)])
+    return px
+
+
+class _RandomAgent:
+    def __init__(self, n=6, seed=0):
+        self.rng = np.random.default_rng(seed)
+        self.n = n
+
+    def act_eval(self, s):
+        return int(self.rng.integers(0, self.n))
+
+
+def _eval_env(px, seed=42, **kw):
+    feats = TrainScaler().fit(add_features(px)).transform(add_features(px))
+    return DiscretePortfolioEnv(px, feats, horizon="short", adaptive=True,
+                                max_steps=10_000, random_start=False, seed=seed, **kw)
+
+
+# ---------------------------------------------------------------- NaN-guvenligi
+def test_sanitize_prices_cleans_nan():
+    """data._sanitize_prices: ortadaki NaN ffill/bfill ile temizlenir (NaN kalmaz)."""
+    px = _market()
+    px_bad = px.copy()
+    px_bad.iloc[200, 2] = np.nan
+    clean = _sanitize_prices(px_bad)
+    assert not clean.isna().any().any(), "_sanitize_prices NaN birakti"
+
+
+def test_risky_returns_nan_to_num_keeps_nav_finite():
+    """Regresyon: env.prices'a (validasyon SONRASI) enjekte edilen tek NaN,
+    _risky_returns'te 0'a cevrilir -> getiri vektoru sonlu (eski 0*nan=nan hatasi)."""
+    px = _market()
+    env = _eval_env(px)
+    env.reset()
+    env.prices[env.t + 1, 2] = np.nan          # ctor validasyonundan SONRA enjekte
+    r = env._risky_returns()
+    assert np.isfinite(r).all(), "NaN getiri _risky_returns'te temizlenmedi"
+
+
+def test_clean_data_risky_returns_unchanged():
+    """no-op invariant: temiz veride nan_to_num davranisi degistirmemeli (golden ruhu).
+    Riskli kisim = (p1-p0)/max(p0,1e-9); nakit slotu = v10 faiz (cash_period_rate)."""
+    px = _market()
+    env = _eval_env(px)
+    r = env._risky_returns()
+    p0, p1 = env.prices[env.t], env.prices[env.t + 1]
+    risky = (p1 - p0) / np.maximum(p0, 1e-9)
+    sessions = int(env.session_counts[env.t + 1])
+    cash = (1.0 + env.cash_daily_rate) ** sessions - 1.0
+    expected = np.concatenate([risky, [cash]]).astype(np.float32)
+    np.testing.assert_allclose(r, expected, rtol=1e-6, atol=1e-9)
+
+
+# ------------------------------------------------------------- make_noisy_prices
+def test_make_noisy_prices_zero_is_identity():
+    px = _market()
+    clone = make_noisy_prices(px, 0.0, seed=1)
+    assert np.allclose(clone.values, px.values, atol=1e-6)
+
+
+def test_make_noisy_prices_changes_path_but_keeps_start():
+    px = _market()
+    noisy = make_noisy_prices(px, 0.02, seed=3)
+    assert np.allclose(noisy.values[0], px.values[0])           # baslangic korunur
+    assert not np.allclose(noisy.values, px.values)             # yol farkli
+    assert np.isfinite(noisy.values).all()
+
+
+# ------------------------------------------------------- evaluate_noise_episodes
+def test_evaluate_noise_episodes_sequential_finite():
+    px = _market()
+    scaler = TrainScaler().fit(add_features(px))
+
+    def make_env(episode, noise_std, seed):
+        npx = make_noisy_prices(px, noise_std, seed=seed)
+        feats = scaler.transform(add_features(npx))
+        return DiscretePortfolioEnv(npx, feats, horizon="short", adaptive=True,
+                                    max_steps=10_000, random_start=False, seed=seed)
+
+    res = evaluate_noise_episodes(make_env, _RandomAgent(seed=0),
+                                  n_episodes=4, noise_std=0.01, seed=42)
+    assert len(res) == 4
+    assert res[0]["noise_std"] == 0.0                          # episode 0 = orijinal
+    assert all(r["noise_std"] == 0.01 for r in res[1:])
+    assert all(np.isfinite(r["final_nav"]) for r in res)
+    finals = {round(r["final_nav"], 6) for r in res}
+    assert len(finals) > 1                                     # episode'lar farkli
+    summ = summarize_episodes(res)
+    assert summ["n_episodes"] == 4 and np.isfinite(summ["final_nav_mean"])
+
+
+# ----------------------------------------------------------- force_price_noise
+def test_force_price_noise_flag_golden_safe():
+    px = _market()
+    # default: eval'de gurultu KAPALI (golden korunur)
+    e_def = _eval_env(px, price_noise_std=0.05)
+    assert e_def._noise_active is False
+    # force=True: eval'de gurultu ACIK (yeni episode yolu)
+    e_force = _eval_env(px, price_noise_std=0.05, force_price_noise=True)
+    assert e_force._noise_active is True

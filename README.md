@@ -5,6 +5,12 @@ UYİK 2026 bildirisi için hazırlanan DQN/PPO/SAC portföy RL ortamının
 adım adım gözleyebildiğiniz, vade preset'leri (Kısa/Orta/Uzun) ve
 adaptif ödül şekillendirici içeren bir demo uygulama.
 
+> **V12 aktif sözleşme:** Kısa/Orta/Uzun preset ve Gün/Ay/Yıl granülerlik
+> kontrolleri kaldırıldı. Tek kontrol `step_days=N` değeridir: veri ardışık N BIST
+> seansının dönem-sonu kapanışından oluşur ve ajan her adımda rebalans yapar.
+> Nakit faiz, discount, lookback ve yıllık metrikler gerçek dönem uzunluğuna göre
+> ölçeklenir. Aşağıdaki V11 bölümleri yalnız tarihsel sonuç açıklamasıdır.
+
 > 📘 **Tam proje dokümantasyonu** (mimari, çalışma mantığı, teknolojiler,
 > algoritmalar + RL Final Projesi rapor başlıkları §9.1–§9.9): **[DOKUMANTASYON.md](DOKUMANTASYON.md)**
 
@@ -17,9 +23,9 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Ödül**: `log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)` — 4 terim ayrı ayrı raporlanır
 - **Nakit faizi (V10)**: Nakit varlık risksiz faiz kazanır (`cash_annual_rate=0.40`, günlük bileşik); ajan fırsat maliyetini içselleştirir
 - **Adil karşılaştırma (V11)**: Re-base hizalama + maliyetli baseline + nakit %40 faiz + 8 metodoloji düzeltmesi — RL ve baseline aynı koşullarda değerlendirilir
-- **Vade Preset'leri**: Kısa (1–30 gün) / Orta (30–90 gün) / Uzun (90–360 gün) — (η, λ, τ, γ, rebalans frekansı, train_max_steps) değişir; UI'dan aralık içinde slider ile seçilir
+- **Tek N-seans modeli**: `step_days=1..252`; dönem-sonu kapanışı, her adımda karar/rebalans ve tüm train aralığını kapsayan episode
 - **Model kaydet/yükle (isim + tarih)**: Eğitilen ajan kullanıcı-verilen ada ve kayıt zamanıyla (`saved_at` ISO) diske yazılır; `list_saved_models()` ile listelenir; sidebar selectbox'tan seçilip yeniden eğitmeden Test sekmesine geçilebilir (`core/persistence.py`)
-- **Adım granülerliği (Gün/Ay/Yıl)**: Sidebar selectbox ile günlük/aylık/yıllık adım seçilir. Feature'lar her zaman günlük hesaplanır (`add_features` değişmez); `data.resample_to_granularity` ile resample edilir. Günlük = V11 bit-aynı (golden-güvenli)
+- **İşlem yapılabilir örnekleme**: Ortalama fiyat yerine ardışık N seansın son kapanışı kullanılır; train/test ayrı örneklenir
 - **Episode-clean (1. iterasyon orijinal veri)**: Sidebar checkbox (UI'da varsayılan açık). Açıkken 1. episode gürültüsüz orijinal fiyatlar, 2.–N. her biri farklı `N(0,σ)` realizasyonu. CLI/golden'da default kapalı → V11 bit-aynı
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
@@ -67,7 +73,7 @@ streamlit run app.py
 
 Tarayıcı otomatik açılır (http://localhost:8501). Sidebar'dan:
 1. **Ajan** seçin (DQN/PPO/SAC)
-2. **Vade** seçin (Kısa/Orta/Uzun)
+2. **Karar adımı** seçin (`step_days`, BIST seansı)
 3. **Adaptif ödül** toggle'ını ayarlayın
 4. "Veriyi Yükle" → sonra sırayla Tab 2 → Tab 3 → Tab 4
 
@@ -84,7 +90,7 @@ python main.py --skip-plots      # sadece eğitim
 
 | Sekme | İçerik |
 |-------|--------|
-| 📐 Veri & MDP | 28 ticker, MDP tuple, vade preset tablosu, adaptif formül açıklaması |
+| 📐 Veri & MDP | 28 ticker, MDP tuple, N-seans sözleşmesi, adaptif formül açıklaması |
 | 🎓 Eğitim | Canlı ödül/kazanç/başarı/loss eğrileri, progress bar, session cache |
 | 🎬 Test (Adım-Adım) | Oynat/Durdur/İleri-Geri + slider; durum, Q-değerleri, ağırlık pastası, ödül terimleri, adaptif katsayıların mini zaman serisi |
 | 📊 Karşılaştırma | Metrik tablosu (CAGR, Sharpe, Sortino, MaxDD, Calmar, Vol, FinalNAV, Turnover), NAV çok-çizgili, ağırlık ısı haritası, DQN aksiyon dağılımı, adaptif katsayılar |

@@ -41,16 +41,20 @@ class AdaptiveRewardShaper:
         self.turnover_target = float(turnover_target)
         self.alpha = float(ema_alpha)
         self.enabled = bool(enabled)
+        self.vol_var_ewma = float(vol_target) ** 2
         self.vol_ewma = float(vol_target)
         self.turnover_ewma = float(turnover_target)
 
     def reset(self):
+        self.vol_var_ewma = self.vol_target ** 2
         self.vol_ewma = self.vol_target
         self.turnover_ewma = self.turnover_target
 
     def update_and_shape(self, port_r: float, delta_w_l1: float) -> Tuple[float, float, float, float, float]:
         a = self.alpha
-        self.vol_ewma      = (1 - a) * self.vol_ewma      + a * abs(float(port_r))
+        self.vol_var_ewma  = ((1 - a) * self.vol_var_ewma
+                              + a * float(port_r) * float(port_r))
+        self.vol_ewma      = float(np.sqrt(max(self.vol_var_ewma, 0.0)))
         self.turnover_ewma = (1 - a) * self.turnover_ewma + a * float(delta_w_l1)
 
         if not self.enabled:

@@ -26,15 +26,15 @@ from utils.portfolio_tl import (
 RENDER_EVERY = 5
 
 
-def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
-    st.header(f"🎓 Eğitim — {algo} · {horizon.upper()} · "
+def tab_train(algo: str, step_days: int, adaptive: bool, hp: dict):
+    st.header(f"🎓 Eğitim — {algo} · {step_days} seans/adım · "
               f"Adaptif: {'Açık' if adaptive else 'Kapalı'}")
 
     if not st.session_state.data_loaded:
         st.warning("Önce sidebar'dan 'Veriyi Yükle' butonuna basın.")
         return
 
-    key = _agent_key(algo, horizon, adaptive)
+    key = _agent_key(algo, step_days, adaptive)
     already = key in st.session_state.trained_agents
     if already:
         st.success(f"Bu konfigürasyon daha önce eğitildi. "
@@ -105,7 +105,7 @@ def tab_train(algo: str, horizon: str, adaptive: bool, hp: dict):
     curve = list(st.session_state.trained_agents[key][1]) if resume else []
     iter_offset = len(curve)
     n_episodes = int(st.session_state.get("n_episodes", 12))
-    gen = train_generator(algo, horizon, adaptive, hp,
+    gen = train_generator(algo, step_days, adaptive, hp,
                           rollout_len=int(hp.get("rollout_len", 400)),
                           resume_agent=resume_agent,
                           n_episodes=n_episodes)

@@ -6,7 +6,7 @@
 > çelişkiyi düzelt.
 
 **Proje**: BIST 28 portföy-yönetimi RL · UYİK 2026 bildirisi / `RL_FinalProje.pdf` teslimi
-**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-22 (ajan sistemi yeniden-yapı: roster 16→17, blackboard v2, +9 drift-guard; **golden DEĞİŞMEDİ** — yalnız .md/docs/tests)
+**Kanonik kök**: `kod/` · **Son güncelleme**: 2026-06-22 (V12 N-seans modeli, self-financing muhasebe, checkpoint v2; **golden yeniden tabanlanacak**)
 
 ---
 
@@ -24,6 +24,8 @@
 - **STATE_DIM**: 397 (DQN/SAC/TD3) / 369 (PPO; forecast hariç) = 28 hisse × (12 feature [+1 forecast]) + 29 ağırlık + 4 makro.
 - **ACTION**: 29-boyut softmax simpleks (PPO/SAC/TD3) / 6 şablon (DQN, ayrık).
 - **REWARD**: `log(1+w·r_net) − η_t·‖Δw‖₁ − λ_t·max(0,DD−τ_t) − bankruptcy_penalty [+ w_dsr·DSR] [+ w_cvar·CVaR] [+ opt-in gain/ruin]`.
+- **STEP**: `step_days=N`; ardışık N BIST seansının son kapanışı. Her adım karar ve rebalanstır; dönem-sonu ağırlıklar fiyat hareketiyle sürüklenir.
+- **TIME SCALE**: nakit ve discount gerçek seans sayısıyla bileşir; lookback günleri `ceil(gün/N)` adıma çevrilir; metrikler tarihten yıllıklandırılır.
 
 <!-- derived:config — guard: tests/test_config_single_source.py — ELLE DÜZENLEME (config.py'den türetilir) -->
 seed = 42
@@ -74,14 +76,14 @@ kod/
 ```
 data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScaler, train-only fit)
    →  forecast/forecaster.py ('forecast' feature, train-only)
-   →  [UI yolu] data.resample_to_granularity(df, granularity)  ← Gün/Ay/Yıl granülerliği
+   →  data.resample_to_step_days(df, step_days)  ← N ardışık seansın dönem sonu
    →  env/portfolio_env.py (MDP state; coarse'da window/mom/minvol cap'lenir)
    →  agents/* (DQN/PPO/SAC/TD3)  →  core/trainer.py (generator eğitim)
    →  core/rollout.py (deterministik eval)  →  utils/metrics.py
    →  plots.py (CLI figürler) / ui/* (interaktif)  →  results/ + figures/
 ```
 
-**NOT:** CLI/`main.py` hep günlük veriyle çalışır → granülerlik yalnız UI (`ui/services._load_data`) yolunda etkindir.
+**NOT:** UI ve CLI aynı `step_days` sözleşmesini ve aynı `core.trainer/rollout` çekirdeğini kullanır.
 
 ## 3. KIRILMAZ İnvariant'lar (her değişiklikte koru)
 
@@ -115,7 +117,9 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
   `{"algo","iter","reward","nav","loss","success","actions","agent","env"}`. UI ve CLI bu
   sözleşmeye bağımlıdır — anahtar adlarını değiştirme.
 - **`agent.act_eval(state)`** deterministik eylem döndürür (eval/rollout için).
-- **`config.HORIZON_PRESETS`** = {short, medium, long} → (η, λ, τ, γ, rebalans, pencereler).
+- **`core.contracts.RunSpec`** çalışma kimliğidir; algo/adım/ödül/HP/tarih/feature/provenance içerir ve checkpoint/UI anahtarını belirler.
+- **`core.contracts.BacktestResult`** net getiri, tarih, işlem öncesi/hedef/dönem-sonu ağırlık, turnover ve provenance taşır.
+- **`config.HORIZON_PRESETS`** yalnız legacy checkpoint ve eski script uyumluluğu içindir; aktif UI/CLI kullanmaz.
 - **`data.resample_to_granularity(df, granularity)`** — granularity ∈ {"Gün","Ay","Yıl"};
   Gün = NO-OP (aynı df), Ay = `resample("ME").mean()`, Yıl = `resample("YE").mean()`.
   ÇAĞRI SIRASI: `add_features` → `train_test_split` → `resample_to_granularity` (her split ayrı).
@@ -131,6 +135,8 @@ data.py (yfinance → parquet)  →  utils/features.py (add_features + TrainScal
 
 > Yeni kararlar buraya tarih + gerekçe ile eklenir. (Ör. "TD3 eklendi — hoca tavsiyesi,
 > sürekli kontrol; SAC ile kıyas için." / "PPO forecast feature almaz — v2 ablation kararı.")
+
+- _(2026-06-22)_ V12: vade/granülerlik yerine tek N-seans dönem-sonu modeli; her adım rebalans, self-financing ağırlık sürüklenmesi, fold-yerel makro scaler, provenance ve checkpoint format v2. Kullanıcı onayıyla golden değişecek.
 
 - _(seed)_ TD3 sürekli kontrol için eklendi (hoca tavsiyesi); eylem 29-softmax.
 - _(seed)_ PPO forecast feature'ı dışlar (v2 ablation) → boyutu DQN/SAC/TD3'ten 28 düşük.

@@ -22,7 +22,7 @@ def test_walk_forward_returns_fold_metrics():
     px = _prices()
     feats_raw = add_features(px)                       # teknik feat (forecast YOK -> leak-safe)
     rep = walk_forward(px, feats_raw, _ppo_factory, n_folds=2,
-                       n_iters=2, rollout_len=120, seed=0, horizon="short")
+                       n_iters=2, rollout_len=120, seed=0, step_days=1)
     assert len(rep["folds"]) >= 1
     for key in ("CAGR", "Sharpe", "MaxDD", "FinalNAV"):
         assert key in rep["mean"] and key in rep["std"]

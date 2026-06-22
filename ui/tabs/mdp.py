@@ -6,7 +6,7 @@ import plotly.express as px
 import streamlit as st
 
 from data import BIST28, SPLIT, START, END
-from ui.charts import _horizon_preset_table
+from config import DEFAULTS
 
 
 def tab_mdp():
@@ -37,16 +37,22 @@ def tab_mdp():
             ("𝒜 Eylem Uzayı (PPO/SAC)", "ℝ²⁹ → softmax → portföy simpleksi"),
             ("𝒫 Geçiş", "Piyasa tarafından belirlenen stokastik süreç"),
             ("r Ödül", "log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)"),
-            ("γ İndirgeme", "0.95 / 0.99 / 0.995 (vadeye göre)"),
-            ("Sonlandırma", "veri sonu VEYA NAV<0.01 (iflas) VEYA 252 adım"),
+            ("γ İndirgeme", "gamma_daily ^ dönem_seans_sayısı"),
+            ("Sonlandırma", "veri sonu VEYA NAV<0.01 (iflas)"),
         ], columns=["Bileşen", "Tanım"])
         st.dataframe(mdp, hide_index=True, width='stretch')
 
     st.divider()
-    st.subheader("⏳ Vade Preset'leri & Adaptif Ödül")
+    st.subheader("N-Seans Adım Sözleşmesi & Adaptif Ödül")
     c1, c2 = st.columns([1.1, 1])
     with c1:
-        st.dataframe(_horizon_preset_table(), hide_index=True, width='stretch')
+        st.dataframe(pd.DataFrame([{
+            "Seçili N": int(st.session_state.get("step_days", DEFAULTS.step_days)),
+            "Rebalans": "Her adım",
+            "Momentum (işlem günü)": DEFAULTS.mom_window,
+            "Min-vol (işlem günü)": DEFAULTS.minvol_window,
+            "γ günlük": DEFAULTS.gamma,
+        }]), hide_index=True, width='stretch')
     with c2:
         st.markdown("""
 **Adaptif şekillendirici** (`AdaptiveRewardShaper`):
@@ -60,4 +66,4 @@ EWMA ile rolling realized vol (`vol_ewma`) ve rolling turnover (`turnover_ewma`)
   — volatil rejimde eşik daralır → daha hassas DD cezası
 """)
         st.info(f"Adaptif mod: **{'Açık' if st.session_state.adaptive else 'Kapalı'}** · "
-                f"Seçili vade: **{st.session_state.horizon}**")
+                f"Seçili adım: **{st.session_state.get('step_days', 1)} BIST seansı**")

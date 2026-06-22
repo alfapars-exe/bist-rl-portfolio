@@ -5,6 +5,13 @@
 > şablonunun (PDF) tüm zorunlu başlıklarını (§9.1–§9.9) karşılar. Rapor ve sunum bu
 > belgeden türetilebilir.
 
+> **V12 uygulama notu (2026-06-22):** Aktif kod yolu vade presetleri ve
+> Gün/Ay/Yıl ortalama granülerliği yerine `step_days=N` kullanır. Her gözlem
+> ardışık N BIST seansının dönem-sonu kapanışıdır; ajan her adımda rebalans yapar,
+> ağırlıklar fiyat sonrası self-financing biçimde sürüklenir ve UI/CLI aynı
+> `RunSpec`/`BacktestResult` sözleşmesini paylaşır. Belgedeki V11 preset tabloları
+> tarihsel deney açıklaması olarak korunmuştur.
+
 **Proje adı:** BIST 28 hissesi üzerinde derin pekiştirmeli öğrenme ile portföy yönetimi
 **Ajan(lar):** Tek ajan — dört farklı algoritmayla (DQN / PPO / SAC / TD3) bağımsız eğitilir ve karşılaştırılır
 **Arayüz:** Streamlit (canlı eğitim + adım-adım test oynatma + karşılaştırma)

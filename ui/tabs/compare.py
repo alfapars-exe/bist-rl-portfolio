@@ -43,20 +43,26 @@ def tab_compare():
     nav_map = {}
 
     for key, (agent, _curve) in trained.items():
-        algo, horizon, adaptive = key
+        algo, step_days, adaptive = key[:3]
         if key not in traces:
             continue
         tr = traces[key]
-        nav = np.array([t["nav"] for t in tr])
-        rets = np.array([t["reward_terms"]["gross_port_r"] for t in tr])
-        W = np.array([t["weights_after"] for t in tr])
-        m = summary(nav, rets, W)
-        name = f"{algo}-{horizon}{'·A' if adaptive else ''}"
+        initial_w = np.zeros_like(tr[0]["weights_before"])
+        initial_w[-1] = 1.0
+        nav = np.concatenate([[1.0], [t["nav"] for t in tr]])
+        rets = np.concatenate([[0.0], [
+            t["reward_terms"]["gross_port_r"] - t["reward_terms"]["tx_cost"] for t in tr]])
+        W = np.vstack([initial_w, [t["weights_after"] for t in tr]])
+        dates = pd.to_datetime([tr[0]["decision_date"]] + [t["date"] for t in tr])
+        turns = np.concatenate([[0.0], [t["reward_terms"]["delta_w_l1"] for t in tr]])
+        m = summary(nav, rets, W, dates=dates, turnover_values=turns)
+        name = f"{algo}-{step_days}g{'·A' if adaptive else ''}"
         rows[name] = m
         nav_map[name] = nav
 
     for bn, bd in baselines.items():
-        m = summary(bd["nav"], bd["rets"], bd.get("weights"))
+        m = summary(bd["nav"], bd["rets"], bd.get("weights"), dates=bd.get("dates"),
+                    turnover_values=bd.get("turnover"))
         rows[bn] = m
         nav_map[bn] = bd["nav"]
 
@@ -71,9 +77,17 @@ def tab_compare():
                        file_name="metrics.csv", mime="text/csv")
 
     # Hizalanmış NAV eğrileri
-    min_len = min(len(v) for v in nav_map.values())
-    nav_df = pd.DataFrame({k: v[-min_len:] for k, v in nav_map.items()})
-    nav_df.index = st.session_state.px_te.index[-min_len:]
+    nav_series = {}
+    for name, values in nav_map.items():
+        if name in rows and name.split("-")[0] in {"DQN", "PPO", "SAC", "TD3"}:
+            matching = next((traces[k] for k in trained if k in traces and
+                             f"{k[0]}-{k[1]}g{'·A' if k[2] else ''}" == name), None)
+            idx = (pd.to_datetime([matching[0]["decision_date"]] + [t["date"] for t in matching])
+                   if matching else st.session_state.px_te.index[-len(values):])
+        else:
+            idx = pd.DatetimeIndex(baselines[name].get("dates", st.session_state.px_te.index[:len(values)]))
+        nav_series[name] = pd.Series(values, index=idx)
+    nav_df = pd.concat(nav_series, axis=1, join="inner").sort_index()
     fig = go.Figure()
     for c in nav_df.columns:
         fig.add_trace(go.Scatter(x=nav_df.index, y=nav_df[c], name=c, mode="lines"))
@@ -88,7 +102,7 @@ def tab_compare():
         chosen = st.selectbox(
             "Ajan seç",
             agent_keys_with_traces,
-            format_func=lambda k: f"{k[0]}-{k[1]}{'·A' if k[2] else ''}"
+            format_func=lambda k: f"{k[0]}-{k[1]}g{'·A' if k[2] else ''}"
         )
         tr = traces[chosen]
         W = np.array([t["weights_after"] for t in tr])

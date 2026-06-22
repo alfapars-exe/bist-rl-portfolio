@@ -29,7 +29,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import HORIZON_PRESETS                          # noqa: E402
+from config import DEFAULTS                                  # noqa: E402
 from data import download_bist, train_test_split            # noqa: E402
 from utils.baselines import (cash_riskfree,                 # noqa: E402
                              inverse_volatility, min_variance,
@@ -43,11 +43,9 @@ PRICES_CSV = RES / "bist30_prices.csv"   # train.py'nin step_data'da yazdigi kan
 
 # Vade preset'i — kanonik backtest 'medium' kullanir (train.py ile tutarli).
 # Momentum/min-var pencereleri ile rebalans frekansi buradan okunur (tek kaynak).
-HORIZON = "medium"
-_P = HORIZON_PRESETS[HORIZON]
-REBALANCE = _P["rebalance"]        # medium -> 5
-MOM_WINDOW = _P["mom_window"]      # medium -> 20
-MINVOL_WINDOW = _P["minvol_window"]  # medium -> 60
+REBALANCE = 1
+MOM_WINDOW = DEFAULTS.mom_window
+MINVOL_WINDOW = DEFAULTS.minvol_window
 
 # Yeni baseline'larin metrics.csv satir adlari (mevcut satirlarla CAKISMAZ).
 NEW_ROWS = ["RiskParity", "InverseVol", "MinVariance", "Momentum", "CashRiskFree"]
@@ -105,7 +103,7 @@ def run() -> pd.DataFrame:
     px_te = _load_test_prices()
     print(f"[extra_baselines] Test fiyatlari: {px_te.shape}  "
           f"{px_te.index[0].date()} -> {px_te.index[-1].date()}  "
-          f"(horizon={HORIZON}, rebalance={REBALANCE})")
+          f"(step_days=1, her adimda rebalans)")
 
     # 2) Yeni baseline metriklerini hesapla — ANA STRATEJILERLE AYNI hizali
     #    pencerede (C1): navs_aligned.csv ortak min_len + yeniden-tabanlama (NAV[0]=1).
@@ -117,12 +115,13 @@ def run() -> pd.DataFrame:
     for name, d in bts.items():
         nav = np.asarray(d["nav"], dtype=float)[-min_len:]
         nav = nav / nav[0]                      # ortak pencere baslangicina tabanla
-        rets = (np.asarray(d["rets"], dtype=float)[-min_len:]
-                if d.get("rets") is not None else np.diff(nav) / nav[:-1])
+        rets = np.concatenate([[0.0], np.diff(nav) / nav[:-1]])
         w = d.get("weights")
         if w is not None:
             w = np.asarray(w)[-min_len:]
-        m = summary(nav, rets, w)
+        dates = pd.DatetimeIndex(d.get("dates", px_te.index))[-min_len:]
+        turn = np.asarray(d.get("turnover", []), dtype=float)[-min_len:]
+        m = summary(nav, rets, w, dates=dates, turnover_values=turn)
         new_metrics[name] = m
         print(f"[TEST] {name:<12}  CAGR={m['CAGR']:+.2%}  Sharpe={m['Sharpe']:+.2f}  "
               f"Sortino={m['Sortino']:+.2f}  MaxDD={m['MaxDD']:+.2%}  "

@@ -17,6 +17,8 @@ def compute_tl_step(nav: float, w_now: np.ndarray, w_prev: np.ndarray,
                     prices_t: np.ndarray, initial_capital: float,
                     prev_portfolio_tl: float, holding_days_prev: np.ndarray,
                     tx_cost_rate: float = 0.0,
+                    target_weights: np.ndarray | None = None,
+                    holding_period_days: int = 1,
                     eps: float = HOLDING_EPS) -> Dict[str, np.ndarray | float]:
     """Tek adımın TL türevlerini hesapla.
 
@@ -41,12 +43,15 @@ def compute_tl_step(nav: float, w_now: np.ndarray, w_prev: np.ndarray,
     cash_tl      = portfolio_tl * float(w_now[-1])
     asset_tl     = portfolio_tl * w_now[:N_risky]
     shares       = asset_tl / safe_px
-    trade_tl     = portfolio_tl * (w_now[:N_risky] - w_prev[:N_risky])
+    trade_w = (w_now if target_weights is None
+               else np.asarray(target_weights, dtype=np.float64).reshape(-1))
+    trade_tl     = portfolio_tl * (trade_w[:N_risky] - w_prev[:N_risky])
     trade_shares = trade_tl / safe_px
     commission_tl = portfolio_tl * float(tx_cost_rate)
 
     holding_days_prev = np.asarray(holding_days_prev, dtype=np.int64).reshape(-1)
-    holding_days = np.where(w_now[:N_risky] >= eps, holding_days_prev + 1, 0)
+    holding_days = np.where(w_now[:N_risky] >= eps,
+                            holding_days_prev + max(1, int(holding_period_days)), 0)
 
     return dict(
         portfolio_tl=portfolio_tl,

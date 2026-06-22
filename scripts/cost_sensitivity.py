@@ -18,12 +18,12 @@ MALIYET MODELI (kaynak: aracilik komisyon tarifeleri + Tebli, 2024-2025; bkz. ra
   orta 0.0010(~10bps/20RT), uzun 0.0005(~5bps/10RT). c=10-20 bps senaryolari preset
   bandinin merkezinde -> η gercekci.
 
-HESAP (golden-guvenli — core/rollout & golden & metrics.csv & train DOKUNULMAZ, np.random YOK):
-  - RL ajanlari: results/weights_{DQN,PPO,SAC,TD3}.csv -> gunluk tek-yon turnover
-    ‖Δw_t‖₁ = |diff(W)|.sum(axis=1); gross getiriler results/navs_aligned.csv'den (pct_change).
-  - Baseline'lar: utils/baselines.py'yi results/bist30_prices.csv TEST donemi (>=2022-01-01)
-    alt kumesi ile deterministik yeniden uret -> weights trajektorisi -> turnover.
-    c=0 satiri results/metrics.csv ile sanity-eslesir (train.py ayni px_te'yi kullanir).
+HESAP (golden-guvenli — egitim yolunu degistirmez, np.random YOK):
+  - RL ajanlari: results/backtest_{DQN,PPO,SAC,TD3}.csv icindeki gross_return ve
+    gerceklesen tek-yon turnover kullanilir.
+  - Baseline'lar results/bist30_prices.csv test doneminde maliyetsiz yeniden uretilir.
+  - Tum stratejiler ortak degerleme tarihleri uzerinde hizalanir. c=0 maliyetsiz
+    brut senaryodur; adaptif maliyet iceren kanonik metrics.csv ile ayni olmasi beklenmez.
   - Her c icin: rets_net_t = rets_gross_t - (c/10000)*‖Δw_t‖₁ ; NAV yeniden bilesik;
     Sharpe/MaxDD/CAGR utils/metrics.py ile yeniden hesap.
   - results/cost_sensitivity.csv: satir=strateji, sutun=her c icin FinalNAV + Sharpe.
@@ -46,7 +46,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 RES = BASE / "results"
 
-from utils.metrics import sharpe, max_drawdown, cagr, TRADING_DAYS  # noqa: E402
+from utils.metrics import sharpe, max_drawdown, TRADING_DAYS  # noqa: E402
 from utils.baselines import (  # noqa: E402
     equal_weight, buy_and_hold_index, mean_variance, inverse_volatility,
     risk_parity, min_variance, momentum, cash_riskfree,
@@ -73,10 +73,12 @@ def recompute(rets_gross: np.ndarray, turn: np.ndarray, c_bps: float) -> dict:
     c = c_bps / 10_000.0
     rets_net = rets_gross - c * turn
     nav = np.cumprod(1.0 + rets_net)
+    metric_rets = rets_net[1:] if len(rets_net) > 1 and abs(rets_net[0]) < 1e-15 else rets_net
+    elapsed_periods = max(len(nav) - 1, 1)
     return dict(
         FinalNAV=float(nav[-1]),
-        Sharpe=float(sharpe(rets_net)),
-        CAGR=float(cagr(nav)),
+        Sharpe=float(sharpe(metric_rets)),
+        CAGR=float(nav[-1] ** (TRADING_DAYS / elapsed_periods) - 1.0),
         MaxDD=float(max_drawdown(nav)),
         annual_drag=float(np.mean(turn) * c * TRADING_DAYS),  # ~ gunluk_turnover * c * 252
         mean_turnover=float(np.mean(turn)),
@@ -90,16 +92,19 @@ def load_rl():
     """RL ajanlari: navs_aligned'dan gross getiri, weights_*.csv'den turnover.
     navs_aligned RL navs'lerini min_len'e kirpar; weights tam test uzunlugunda.
     Hizalama: ikisini de SON L gune kirp (L = min(len(nav)-? , len(turn)))."""
-    navs = pd.read_csv(RES / "navs_aligned.csv", index_col=0)
     out = {}
     for algo in RL_ALGOS:
-        nav = navs[algo].to_numpy(dtype=float)
-        rets_gross = np.concatenate([[0.0], np.diff(nav) / nav[:-1]])  # pct_change, t=0 -> 0
-        W = pd.read_csv(RES / f"weights_{algo}.csv").to_numpy(dtype=float)
-        turn = turnover_series(W)
-        # navs_aligned kirpilmis olabilir -> son L gune hizala
-        L = min(len(rets_gross), len(turn))
-        out[algo] = dict(rets=rets_gross[-L:], turn=turn[-L:])
+        trace_path = RES / f"backtest_{algo}.csv"
+        if not trace_path.exists():
+            raise FileNotFoundError(
+                f"{trace_path.name} yok; gross getiri net NAV'dan guvenle turetilemez. "
+                "Yeni train.run() ile sonuclari yeniden uretin.")
+        trace = pd.read_csv(trace_path)
+        out[algo] = dict(
+            dates=pd.DatetimeIndex(pd.to_datetime(trace["date"])),
+            rets=trace["gross_return"].to_numpy(float),
+            turn=trace["turnover"].to_numpy(float),
+        )
     return out
 
 
@@ -110,13 +115,13 @@ def load_baselines():
     px = pd.read_csv(RES / "bist30_prices.csv", index_col=0, parse_dates=True)
     px_te = px[px.index >= SPLIT]
     specs = {
-        "BuyHold":     lambda: buy_and_hold_index(px_te),
-        "EqualWeight": lambda: equal_weight(px_te),
-        "MeanVar":     lambda: mean_variance(px_te, lookback=120, rebalance=20),
-        "RiskParity":  lambda: risk_parity(px_te, lookback=120, rebalance=20),
-        "InverseVol":  lambda: inverse_volatility(px_te, lookback=60, rebalance=20),
-        "MinVariance": lambda: min_variance(px_te, lookback=120, rebalance=20),
-        "Momentum":    lambda: momentum(px_te, lookback=60, rebalance=20, top_k=5),
+        "BuyHold":     lambda: buy_and_hold_index(px_te, eta=0.0),
+        "EqualWeight": lambda: equal_weight(px_te, eta=0.0),
+        "MeanVar":     lambda: mean_variance(px_te, lookback=120, rebalance=20, eta=0.0),
+        "RiskParity":  lambda: risk_parity(px_te, lookback=120, rebalance=20, eta=0.0),
+        "InverseVol":  lambda: inverse_volatility(px_te, lookback=60, rebalance=20, eta=0.0),
+        "MinVariance": lambda: min_variance(px_te, lookback=120, rebalance=20, eta=0.0),
+        "Momentum":    lambda: momentum(px_te, lookback=60, rebalance=20, top_k=5, eta=0.0),
         "CashRiskFree": lambda: cash_riskfree(px_te),
     }
     out = {}
@@ -129,7 +134,8 @@ def load_baselines():
         else:
             turn = turnover_series(np.asarray(W, dtype=float))
         L = min(len(rets), len(turn))
-        out[name] = dict(rets=rets[-L:], turn=turn[-L:])
+        dates = pd.DatetimeIndex(d.get("dates", px_te.index))[-L:]
+        out[name] = dict(dates=dates, rets=rets[-L:], turn=turn[-L:])
     return out
 
 
@@ -141,8 +147,24 @@ def run():
     strategies.update(load_rl())
     strategies.update(load_baselines())
 
-    # c=0 sanity: metrics.csv ile FinalNAV/Sharpe eslesmesi (toleransli rapor)
-    met = pd.read_csv(RES / "metrics.csv", index_col=0)
+    common_dates = None
+    for d in strategies.values():
+        dates = pd.DatetimeIndex(d["dates"])
+        common_dates = dates if common_dates is None else common_dates.intersection(dates)
+    if common_dates is None or common_dates.empty:
+        raise ValueError("Stratejiler arasinda ortak degerleme tarihi bulunamadi.")
+    common_dates = common_dates.sort_values()
+    for name, d in strategies.items():
+        frame = pd.DataFrame(
+            {"rets": d["rets"], "turn": d["turn"]},
+            index=pd.DatetimeIndex(d["dates"]),
+        )
+        frame = frame.loc[~frame.index.duplicated(keep="last")].reindex(common_dates)
+        if frame.isna().any().any():
+            raise ValueError(f"{name}: ortak tarih hizalamasinda eksik deger olustu.")
+        d["dates"] = common_dates
+        d["rets"] = frame["rets"].to_numpy(float)
+        d["turn"] = frame["turn"].to_numpy(float)
 
     rows = []
     per_c = {c: {} for c in COST_BPS}
@@ -173,8 +195,9 @@ def run():
     print("=" * 90)
     print("ISLEM-MALIYETI DUYARLILIK ANALIZI  (golden-guvenli, gozlemsel)")
     print("=" * 90)
-    print(f"Maliyet senaryolari (tek-yon, bps): {COST_BPS}   |  η_ondalik = c/10000")
-    print(f"Test donemi: index >= {SPLIT}  ({len(next(iter(strategies.values()))['rets'])} gun)")
+    print(f"Maliyet senaryolari (tek-yon, bps): {COST_BPS}   |  eta = c/10000")
+    print(f"Ortak test donemi: {common_dates[0].date()} - {common_dates[-1].date()} "
+          f"({len(common_dates)} degerleme tarihi)")
     print()
 
     # (c) maliyet-duyarlilik tablosu
@@ -183,26 +206,9 @@ def run():
     print(show.to_string())
     print()
 
-    # c=0 sanity
-    print("--- c=0 SANITY (cost_sensitivity vs results/metrics.csv) ---")
-    print(f"{'Strateji':<13}{'NAV_c0':>12}{'metrics.NAV':>14}{'dNAV':>11}"
-          f"{'Sh_c0':>10}{'metrics.Sh':>12}{'dSh':>10}")
-    max_dnav = max_dsh = 0.0
-    for name in strategies:
-        if name not in met.index:
-            continue
-        nav0 = per_c[0][name]["FinalNAV"]
-        sh0 = per_c[0][name]["Sharpe"]
-        mnav = float(met.loc[name, "FinalNAV"])
-        msh = float(met.loc[name, "Sharpe"])
-        dnav, dsh = nav0 - mnav, sh0 - msh
-        max_dnav = max(max_dnav, abs(dnav))
-        max_dsh = max(max_dsh, abs(dsh))
-        print(f"{name:<13}{nav0:>12.4f}{mnav:>14.4f}{dnav:>+11.4f}"
-              f"{sh0:>10.4f}{msh:>12.4f}{dsh:>+10.4f}")
-    print(f"  -> max |dNAV|={max_dnav:.4f}, max |dSharpe|={max_dsh:.4f}  "
-          f"(RL: navs_aligned min_len kirpmasi -> kucuk sapma beklenir; "
-          f"baseline: px_te birebir -> ~0)")
+    print("--- c=0 NOTU ---")
+    print("c=0 maliyetsiz brut senaryodur. Kanonik metrics.csv adaptif/gerceklesen "
+          "islem maliyetlerini icerdigi icin sayisal eslesme beklenmez.")
     print()
 
     # (d) SAC net-edge + siralama degisimi

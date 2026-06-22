@@ -55,10 +55,18 @@ def main():
         layout="wide",
     )
     _init_state()
-    algo, horizon, adaptive, hp = sidebar_controls()
+    algo, step_days, adaptive, hp = sidebar_controls()
 
     st.title("📈 BIST 28 Pekiştirmeli Öğrenme Portföy Yönetimi")
-    st.caption("UYİK 2026 · DQN/PPO/SAC/TD3 · Vade preset'leri · Adaptif ödül şekillendirici")
+    st.caption("UYİK 2026 · DQN/PPO/SAC/TD3 · N-seans karar adimi · Adaptif odul")
+    provenance = st.session_state.get("data_provenance") or {}
+    if provenance:
+        source = str(provenance.get("source", "unknown")).upper()
+        message = f"Veri kaynagi: {source} ({provenance.get('provider', 'bilinmiyor')})"
+        if source == "REAL":
+            st.success(message)
+        else:
+            st.warning(message + " - sonuclar bu kaynak etiketiyle kaydedilir.")
 
     t1, t2, t3, t4 = st.tabs([
         "📐 Veri & MDP",
@@ -67,8 +75,8 @@ def main():
         "📊 Karşılaştırma",
     ])
     with t1: tab_mdp()
-    with t2: tab_train(algo, horizon, adaptive, hp)
-    with t3: tab_test(algo, horizon, adaptive)
+    with t2: tab_train(algo, step_days, adaptive, hp)
+    with t3: tab_test(algo, step_days, adaptive)
     with t4: tab_compare()
 
 

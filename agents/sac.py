@@ -104,23 +104,25 @@ class SACAgent(BaseAgent):
         """Eval: tanh-deterministik aksiyon."""
         return self.act(s, deterministic=True)
 
-    def remember(self, s, a, r, s2, d):
-        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d)
+    def remember(self, s, a, r, s2, d, discount=None):
+        self.buffer.push(s, np.asarray(a, dtype=np.float32), r, s2, d,
+                         self.gamma if discount is None else discount)
 
     def train_step(self) -> float | None:
         if len(self.buffer) < self.batch_size:
             return None
-        s, a, r, s2, d = self.buffer.sample(self.batch_size)
+        s, a, r, s2, d, discount = self.buffer.sample(self.batch_size)
         s  = torch.as_tensor(s,  dtype=torch.float32, device=self.device)
         a  = torch.as_tensor(a,  dtype=torch.float32, device=self.device)
         r  = torch.as_tensor(r,  dtype=torch.float32, device=self.device)
         s2 = torch.as_tensor(s2, dtype=torch.float32, device=self.device)
         d  = torch.as_tensor(d,  dtype=torch.float32, device=self.device)
+        discount = torch.as_tensor(discount, dtype=torch.float32, device=self.device)
 
         with torch.no_grad():
             a2, logp2 = self.pi.sample(s2)
             q_min = torch.min(self.q1_t(s2, a2), self.q2_t(s2, a2))
-            target = r + (1.0 - d) * self.gamma * (q_min - self.alpha * logp2)
+            target = r + (1.0 - d) * discount * (q_min - self.alpha * logp2)
 
         for q, opt in [(self.q1, self.opt_q1), (self.q2, self.opt_q2)]:
             q_pred = q(s, a)

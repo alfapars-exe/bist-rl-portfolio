@@ -11,18 +11,21 @@ import streamlit as st
 
 from data import BIST28
 from ui.charts import _q_bar, _reward_bar, _state_top_features, _weights_pie
-from ui.services import _compute_test_tl_snaps, evaluate_with_trace
+from ui.services import (
+    _compute_test_tl_snaps, evaluate_noise_episodes_ui, evaluate_with_trace,
+)
+from core.episodes import summarize_episodes
 from ui.state import _agent_key, env_rebalance_hint
 from utils.portfolio_tl import (
     build_cumulative_trade_log, build_portfolio_table, build_trade_log,
 )
 
 
-def tab_test(algo: str, horizon: str, adaptive: bool):
-    st.header(f"🎬 Test — {algo} · {horizon.upper()} · "
+def tab_test(algo: str, step_days: int, adaptive: bool):
+    st.header(f"🎬 Test — {algo} · {step_days} seans/adım · "
               f"Adaptif: {'Açık' if adaptive else 'Kapalı'}")
 
-    key = _agent_key(algo, horizon, adaptive)
+    key = _agent_key(algo, step_days, adaptive)
     if key not in st.session_state.trained_agents:
         st.warning("Bu konfigürasyon henüz eğitilmedi. Tab 2'ye git ve 'Eğit' butonuna bas.")
         return
@@ -30,7 +33,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     if st.button("Test dönemini çalıştır (rollout + trajectory)", type="primary"):
         agent = st.session_state.trained_agents[key][0]
         with st.spinner("Ajan test döneminde adım adım çalıştırılıyor..."):
-            trace = evaluate_with_trace(agent, algo, horizon, adaptive)
+            trace = evaluate_with_trace(agent, algo, step_days, adaptive)
         st.session_state.test_traces[key] = trace
         st.session_state.step_idx = 0
         st.success(f"{len(trace)} adım yakalandı.")
@@ -39,6 +42,67 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
     if not trace:
         st.info("Henüz trajectory yok. Yukarıdaki butona basın.")
         return
+
+    # =================================================================
+    # Gürültü-artırımlı çoklu episode (robustluk / anti-ezber)
+    # =================================================================
+    st.session_state.setdefault("noise_episodes", {})
+    with st.expander("🎲 Gürültü-artırımlı çoklu episode (robustluk testi)", expanded=False):
+        st.caption(
+            "Eğitilmiş ajan **tüm test aralığı boyunca** sırayla birden çok episode'da "
+            "koşturulur. Episode 0 = orijinal seri; sonraki episode'lar orijinal hisse "
+            "getirilerine eklenen Gauss gürültüsüyle üretilen **yeni patikalardır** "
+            "(anti-ezber). Düşük dağılım = ajan dayanıklı; yüksek dağılım = tek tarihsel "
+            "yola aşırı uyum riski."
+        )
+        cc = st.columns(3)
+        n_ep = cc[0].slider("Episode sayısı", 2, 30, 6, key="noise_n_ep")
+        nstd = cc[1].slider("Gürültü σ (günlük log-getiri)", 0.0, 0.05, 0.01,
+                            step=0.005, key="noise_std_ep")
+        run_noise = cc[2].button("▶ Episode'ları sırayla çalıştır", key="run_noise_eps")
+        if run_noise:
+            ag = st.session_state.trained_agents[key][0]
+            with st.spinner(f"{n_ep} episode test aralığı boyunca çalıştırılıyor..."):
+                st.session_state.noise_episodes[key] = evaluate_noise_episodes_ui(
+                    ag, algo, step_days, adaptive,
+                    n_episodes=int(n_ep), noise_std=float(nstd))
+        eps = st.session_state.noise_episodes.get(key)
+        if eps:
+            cap = float(st.session_state.initial_capital)
+            fig_eps = go.Figure()
+            for r in eps:
+                nav = np.asarray(r["nav"], dtype=float)
+                is_orig = (r["episode"] == 0)
+                fig_eps.add_trace(go.Scatter(
+                    x=list(range(len(nav))), y=nav * cap, mode="lines",
+                    name=("Orijinal" if is_orig else f"Ep{r['episode']} (σ={r['noise_std']:.3f})"),
+                    line=dict(width=3 if is_orig else 1,
+                              color="#1f77b4" if is_orig else None),
+                    opacity=1.0 if is_orig else 0.55))
+            fig_eps.add_hline(y=cap, line_dash="dot", line_color="#888")
+            fig_eps.update_layout(title="Portföy Değeri (TL) — episode başına",
+                                  height=380, xaxis_title="Adım (gün)",
+                                  yaxis_title="TL", margin=dict(t=40, b=30))
+            st.plotly_chart(fig_eps, use_container_width=True, key="noise_eps_chart")
+
+            df_eps = pd.DataFrame([{
+                "Episode": ("Orijinal" if r["episode"] == 0 else r["episode"]),
+                "Gürültü σ": round(r["noise_std"], 3),
+                "Adım": r["steps"],
+                "Final NAV": round(r["final_nav"], 4),
+                "Getiri %": round(r["total_return"] * 100, 2),
+                "Final TL": round(r["final_nav"] * cap, 0),
+                "Max DD %": round(r["max_drawdown"] * 100, 1),
+                "Sharpe": round(r["sharpe"], 2),
+            } for r in eps])
+            st.dataframe(df_eps, hide_index=True, use_container_width=True)
+
+            summ = summarize_episodes(eps)
+            mc = st.columns(4)
+            mc[0].metric("Final NAV ort.", f"{summ['final_nav_mean']:.4f}")
+            mc[1].metric("Final NAV std", f"{summ['final_nav_std']:.4f}")
+            mc[2].metric("Ort. getiri", f"{summ['total_return_mean'] * 100:+.2f}%")
+            mc[3].metric("Zarar olasılığı", f"{summ['prob_loss'] * 100:.0f}%")
 
     max_step = len(trace) - 1
     # ---- Oynatma kontrolleri ----
@@ -117,7 +181,7 @@ def tab_test(algo: str, horizon: str, adaptive: bool):
         st.subheader("🧾 Bu adımın işlem logu")
         df_trade = build_trade_log(BIST28, tl_now, threshold_tl=1.0)
         if df_trade.empty:
-            rebal = env_rebalance_hint(horizon)
+            rebal = env_rebalance_hint(step_days)
             st.info(f"Bu adımda işlem yok (rebalans her {rebal} günde bir).")
         else:
             st.dataframe(df_trade, hide_index=True, width='stretch', height=280)

@@ -20,11 +20,13 @@ Sonlandırma koşulları:
 """
 from __future__ import annotations
 
+from math import ceil
 from typing import Dict, Literal
 import numpy as np
 import pandas as pd
 
-from config import EnvConfig, HORIZON_PRESETS, RewardConfig
+from config import DEFAULTS, EnvConfig, HORIZON_PRESETS, RewardConfig
+from core.contracts import DataProvenance
 from config import cash_daily_rate as _cash_daily_rate_from_annual
 # P7 (SRP): odul siniflari env/reward.py'ye tasindi; buradan re-export edilir
 # (test_env ve dis kullanicilar `from env.portfolio_env import DifferentialSharpe`
@@ -88,11 +90,14 @@ class PortfolioEnv:
                  seed: int | None = None,
                  price_noise_std: float = EnvConfig.price_noise_std,
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
+                 force_price_noise: bool = False,
                  episode_clean: bool = False,
                  rebalance_freq: int | None = None,
                  gamma: float | None = None,            # v12: None -> preset (golden); override
                  mom_window: int | None = None,         # v12: None -> preset; override
                  minvol_window: int | None = None,      # v12: None -> preset; override
+                 step_days: int = DEFAULTS.step_days,
+                 start_index: int | None = None,
                  cash_daily_rate: float | None = None,
                  w_dsr: float = RewardConfig.w_dsr,
                  dsr_eta: float = RewardConfig.dsr_eta,
@@ -105,8 +110,25 @@ class PortfolioEnv:
                  w_gain_speed: float = 0.0,
                  w_ruin_timing: float = 0.0,
                  macro=None, regime=None):
+        if not isinstance(prices.index, pd.DatetimeIndex):
+            raise TypeError("prices DatetimeIndex gerektirir")
+        if prices.empty or prices.shape[1] == 0:
+            raise ValueError("prices bos olamaz")
+        if not np.isfinite(prices.to_numpy(dtype=float)).all() or (prices <= 0).any().any():
+            raise ValueError("prices pozitif ve sonlu degerlerden olusmali")
+        if any(not prices.index.equals(v.index) or list(prices.columns) != list(v.columns)
+               for v in features.values()):
+            raise ValueError("tum feature matrisleri prices ile ayni index/kolonlara sahip olmali")
         self.prices = prices.values.astype(np.float32)
         self.dates  = prices.index
+        self.step_days = max(1, int(step_days))
+        raw_counts = prices.attrs.get("session_counts")
+        self.session_counts = (np.ones(len(prices), dtype=np.int32) if raw_counts is None
+                               else np.asarray(raw_counts, dtype=np.int32))
+        if self.session_counts.shape != (len(prices),) or np.any(self.session_counts < 1):
+            raise ValueError("prices.attrs['session_counts'] gecersiz")
+        self.provenance = DataProvenance.from_value(prices.attrs.get("provenance"))
+        self.start_index = None if start_index is None else int(start_index)
         self.feat_names = list(features.keys())
         self.feat_tensor = np.stack(
             [features[k].values.astype(np.float32) for k in self.feat_names],
@@ -118,8 +140,12 @@ class PortfolioEnv:
         # rebalance_freq: None -> preset (CLI/golden bit-ayni); UI override -> max(1, int).
         self.rebalance_freq = preset["rebalance"] if rebalance_freq is None else max(1, int(rebalance_freq))
         # v12: mom/minvol/gamma artik OVERRIDE-edilebilir (None -> preset, golden bit-ayni).
-        self.mom_window     = preset["mom_window"]    if mom_window    is None else max(1, int(mom_window))
-        self.minvol_window  = preset["minvol_window"] if minvol_window is None else max(1, int(minvol_window))
+        mom_days = preset["mom_window"] if mom_window is None else max(1, int(mom_window))
+        minvol_days = preset["minvol_window"] if minvol_window is None else max(1, int(minvol_window))
+        self.mom_window = max(1, int(ceil(mom_days / self.step_days)))
+        self.minvol_window = max(1, int(ceil(minvol_days / self.step_days)))
+        self.mom_lookback_days = mom_days
+        self.minvol_lookback_days = minvol_days
         self.gamma          = preset["gamma"]         if gamma         is None else float(gamma)
         eta_base    = preset["eta"] if eta_base    is None else float(eta_base)
         lambda_base = preset["lam"] if lambda_base is None else float(lambda_base)
@@ -193,8 +219,11 @@ class PortfolioEnv:
         # v8: fiyat gurultusu/slippage (hocanin sarti). train_only -> yalniz random_start
         # (egitim) acik; eval (random_start=False) -> kapali, golden eval determinizmi korunur.
         self.price_noise_std = float(price_noise_std)
+        # force_price_noise: eval'de de gurultu acar (gurultu-artirimli coklu-episode
+        # degerlendirmesi icin). Varsayilan False -> mevcut train-only davranis + golden korunur.
         self._noise_active = (self.price_noise_std > 0.0 and
-                              (self.random_start if price_noise_train_only else True))
+                              (force_price_noise or
+                               (self.random_start if price_noise_train_only else True)))
         # OPT-IN episode-clean (kullanici istegi: "1. iterasyon orijinal, 2-12 farkli noise").
         # _episode_idx: ctor'da -1; her reset()'te +1 -> 1. episode idx=0 (TEMIZ/orijinal),
         # idx>=1 gurultulu. DEFAULT KAPALI -> CLI/golden V11 davranisi (her episode gurultulu)
@@ -216,6 +245,8 @@ class PortfolioEnv:
         # Gunluk: self.window=60 -> min(60, 2552)=60 -> V11-AYNI.
         lo_raw = max(self.window, 21)
         lo = min(lo_raw, max(1, self.n_days - 2))
+        if self.start_index is not None:
+            lo = max(lo, self.start_index)
         # v12: dejenere (asiri-kisa) veri korumasi — sessiz NaN/bos-slice yerine acik hata.
         if self.n_days < 3 or lo >= self.n_days - 1:
             raise ValueError(
@@ -233,6 +264,7 @@ class PortfolioEnv:
                 self.t = lo
         else:
             self.t = lo
+        self.episode_start_date = self.dates[self.t]
         self.step_count = 0
         self.w = np.zeros(self.N, dtype=np.float32)
         self.w[-1] = 1.0  # nakitle başla
@@ -242,6 +274,12 @@ class PortfolioEnv:
         self.weight_history = [self.w.copy()]
         self.ret_history = []
         self.reward_terms_history = []
+        self.weights_before_history = []
+        self.target_weight_history = []
+        self.turnover_history = []
+        self.period_length_history = []
+        self.discount_history = []
+        self.date_history = []
         self.reward.reset()
 
     def reset(self, seed: int | None = None):
@@ -263,6 +301,12 @@ class PortfolioEnv:
         p0 = self.prices[self.t]
         p1 = self.prices[self.t + 1]
         r = (p1 - p0) / np.maximum(p0, 1e-9)
+        # ROBUSTLUK (NaN-guvenligi): gercek BIST verisinde eksik/halt gunleri NaN birakabilir.
+        # Tek bir NaN getiri, w*r agirlikli toplamini (0*nan=nan dahil) zehirleyip NAV'i TUM
+        # episod boyunca nan yapardi (HF Space'te gozlemlenen hata). Eksik veriyi 'hareket yok'
+        # (0 getiri) say -> NAV daima sonlu. Temiz veride no-op (sonlu degerler degismez) ->
+        # golden-master korunur.
+        r = np.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
         # episode_clean ACIK ise 1. episode (idx=0) gurultusuz orijinal, idx>=1 noise'lu.
         # KAPALI ise kosul daima True -> V11 davranisi (her episode gurultulu, golden bit-ayni).
         if self._noise_active and (not self._episode_clean or self._episode_idx >= 1):
@@ -273,32 +317,29 @@ class PortfolioEnv:
         if self.cash_asset:
             # v10: nakit varlik artik 0 degil; gunluk risksiz faiz kazanir (SABIT skaler,
             # RNG kullanmaz -> golden RNG sirasi korunur, yalniz deger degisir).
-            r = np.concatenate([r, [self.cash_daily_rate]])
+            sessions = int(self.session_counts[self.t + 1])
+            cash_period_rate = (1.0 + self.cash_daily_rate) ** sessions - 1.0
+            r = np.concatenate([r, [cash_period_rate]])
         return r
 
     def _should_rebalance(self) -> bool:
-        return (self.step_count % self.rebalance_freq) == 0
+        return True
 
     def _apply_action(self, action) -> np.ndarray:
-        if self._should_rebalance():
-            a = np.asarray(action, dtype=np.float32).reshape(-1)
-            if a.shape[0] != self.N:
-                raise ValueError(f"action must have length {self.N}, got {a.shape}")
-            # v12: NaN/Inf koruması — dejenere aksiyon -> nakit'e (son slot) düş. Sağlıklı
-            # aksiyonda np.isfinite hepsi True -> NO-OP (golden bit-aynı, RNG'ye dokunmaz).
-            if not np.isfinite(a).all():
-                w = np.zeros(self.N, dtype=np.float32)
-                w[-1] = 1.0
-                return w
-            return softmax(a, temp=1.0)
-        return self.w.copy()
+        a = np.asarray(action, dtype=np.float32).reshape(-1)
+        if a.shape[0] != self.N:
+            raise ValueError(f"action must have length {self.N}, got {a.shape}")
+        if not np.isfinite(a).all():
+            raise ValueError("action NaN/Inf iceremez")
+        return softmax(a, temp=1.0)
 
     def step(self, action):
         # Piyasa/portfoy mekanigi burada; odul aritmetigi RewardEngine'de (P7, SRP).
-        w_new = self._apply_action(action)
-        delta_w_l1 = float(np.abs(w_new - self.w).sum())
+        weights_before = self.w.copy()
+        w_target = self._apply_action(action)
+        delta_w_l1 = float(np.abs(w_target - weights_before).sum())
         r_vec = self._risky_returns()
-        gross_port_r = float((w_new * r_vec).sum())
+        gross_port_r = float((w_target * r_vec).sum())
 
         regime_t = float(self.regime[self.t]) if self.regime is not None else 0.0
         outcome = self.reward.compute(gross_port_r=gross_port_r, delta_w_l1=delta_w_l1,
@@ -307,19 +348,44 @@ class PortfolioEnv:
         self.nav, self.peak = outcome.nav, outcome.peak
         reward_terms = outcome.terms
 
-        self.w = w_new
+        # Holdings drift after the market move. Fees are modeled as a wealth drag;
+        # relative holdings are normalized by gross portfolio wealth.
+        gross_wealth = 1.0 + gross_port_r
+        if gross_wealth <= 1e-12 or not np.isfinite(gross_wealth):
+            w_after = np.zeros(self.N, dtype=np.float32)
+            w_after[-1] = 1.0
+        else:
+            w_after = np.asarray(w_target * (1.0 + r_vec) / gross_wealth, dtype=np.float32)
+            w_after = np.clip(w_after, 0.0, None)
+            total_w = float(w_after.sum())
+            if total_w <= 1e-12 or not np.isfinite(total_w):
+                raise FloatingPointError("donem-sonu portfoy agirliklari gecersiz")
+            w_after /= total_w
+        self.w = w_after
         self.t += 1
         self.step_count += 1
         self.nav_history.append(self.nav)
         self.weight_history.append(self.w.copy())
         self.ret_history.append(outcome.port_r_net)
         self.reward_terms_history.append(reward_terms)
+        period_len = int(self.session_counts[self.t])
+        discount = float(self.gamma ** period_len)
+        self.weights_before_history.append(weights_before)
+        self.target_weight_history.append(w_target.copy())
+        self.turnover_history.append(delta_w_l1)
+        self.period_length_history.append(period_len)
+        self.discount_history.append(discount)
+        self.date_history.append(self.dates[self.t])
 
         # İflas veya veri sonu → done; 252 adım tavanı → trunc
         done = (self.t >= (self.n_days - 1)) or reward_terms["bankrupt"]
         trunc = (self.step_count >= self.max_steps)
         info = dict(nav=self.nav, dd=reward_terms["dd"], port_r=outcome.port_r_net,
-                    reward_terms=reward_terms, prices_t=self.prices[self.t].copy())
+                    reward_terms=reward_terms, prices_t=self.prices[self.t].copy(),
+                    weights_before=weights_before, target_weights=w_target.copy(),
+                    weights_after=self.w.copy(), turnover=delta_w_l1,
+                    period_length=period_len, discount=discount,
+                    date=self.dates[self.t])
         return self._obs(), float(outcome.total), bool(done), bool(trunc), info
 
 
@@ -342,8 +408,10 @@ class DiscretePortfolioEnv(PortfolioEnv):
         # ETKISIZ -> golden bit-ayni. (mom/minvol ctor'da da cap'lendi; bu ikinci savunma hatti.)
         lo_mom = max(0, self.t - mw)
         lo_vol = max(0, self.t - mvw)
-        lb_mom  = self.feat_tensor[lo_mom: self.t, :, self.feat_names.index("logret")]
-        lb_vol  = self.feat_tensor[lo_vol: self.t, :, self.feat_names.index("logret")]
+        # Portfolio templates operate on raw returns. Scaled feature values would
+        # destroy cross-asset momentum and volatility magnitudes.
+        lb_mom = np.diff(np.log(self.prices[lo_mom:self.t + 1]), axis=0)
+        lb_vol = np.diff(np.log(self.prices[lo_vol:self.t + 1]), axis=0)
         mean_r = lb_mom.mean(axis=0)
         vol    = lb_vol.std(axis=0) + 1e-6
         N_risky = self.N - 1 if self.cash_asset else self.N
@@ -377,8 +445,5 @@ class DiscretePortfolioEnv(PortfolioEnv):
         if not (0 <= a_idx < self.n_discrete):
             raise ValueError(
                 f"action_idx={a_idx} aralik disi; [0, {self.n_discrete}) bekleniyor")
-        if self._should_rebalance():
-            logits = self._discrete_to_logits(a_idx)
-        else:
-            logits = np.zeros(self.N, dtype=np.float32)
+        logits = self._discrete_to_logits(a_idx)
         return super().step(logits)

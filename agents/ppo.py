@@ -68,7 +68,10 @@ class PPOAgent(BaseAgent):
         self.reset_rollout()
 
     def reset_rollout(self):
-        self.S, self.A, self.R, self.D, self.Vs, self.LP = [], [], [], [], [], []
+        self.S, self.A, self.R = [], [], []
+        self.Terminal, self.Boundary = [], []
+        self.Vs, self.NextVs, self.LP = [], [], []
+        self.Discounts, self.GaeDiscounts = [], []
 
     @torch.no_grad()
     def _policy_dist(self, s_t: torch.Tensor):
@@ -98,21 +101,28 @@ class PPOAgent(BaseAgent):
             mu, _ = self.policy(s_t)
         return mu.cpu().numpy()[0].astype(np.float32)
 
-    def remember(self, s, a, r, done, v, logp):
+    def remember(self, s, a, r, done, v, logp, *, next_v=0.0,
+                 boundary=None, discount=None, period_length=1):
         self.S.append(np.asarray(s, dtype=np.float32))
         self.A.append(np.asarray(a, dtype=np.float32))
-        self.R.append(float(r)); self.D.append(float(done))
-        self.Vs.append(float(v)); self.LP.append(float(logp))
+        self.R.append(float(r))
+        self.Terminal.append(float(done))
+        self.Boundary.append(float(done if boundary is None else boundary))
+        self.Vs.append(float(v)); self.NextVs.append(float(next_v)); self.LP.append(float(logp))
+        sessions = max(1, int(period_length))
+        self.Discounts.append(float(self.gamma ** sessions if discount is None else discount))
+        self.GaeDiscounts.append(float((self.gamma * self.lam) ** sessions))
 
     def compute_gae(self, last_v: float):
         n = len(self.R)
         adv = np.zeros(n, dtype=np.float32)
         g = 0.0
         for i in reversed(range(n)):
-            next_v = last_v if i == n - 1 else self.Vs[i + 1]
-            mask = 1.0 - self.D[i]
-            delta = self.R[i] + self.gamma * next_v * mask - self.Vs[i]
-            g = delta + self.gamma * self.lam * mask * g
+            terminal_mask = 1.0 - self.Terminal[i]
+            carry_mask = 1.0 - self.Boundary[i]
+            delta = (self.R[i] + self.Discounts[i] * self.NextVs[i] * terminal_mask
+                     - self.Vs[i])
+            g = delta + self.GaeDiscounts[i] * carry_mask * g
             adv[i] = g
         ret = adv + np.array(self.Vs, dtype=np.float32)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)

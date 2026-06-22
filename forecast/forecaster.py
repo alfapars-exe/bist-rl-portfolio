@@ -62,6 +62,21 @@ def build_forecast_feature(prices_full: pd.DataFrame, prices_train: pd.DataFrame
     prices_train ile fit edilir (sizinti yok); prices_full uzerinde causal tahmin
     uretilir (her t icin pencere <=t). Donen DataFrame feats['forecast'] olur.
     """
+    if window < 2:
+        raise ValueError("forecast window en az 2 olmali")
+    if len(prices_train) <= window:
+        raise ValueError(
+            f"Forecaster egitimi icin en az window+1={window + 1} satir gerekli; "
+            f"{len(prices_train)} geldi")
+    if list(prices_full.columns) != list(prices_train.columns):
+        raise ValueError("prices_full ve prices_train kolonlari ayni olmali")
+    if not prices_train.index.isin(prices_full.index).all():
+        raise ValueError("prices_train prices_full'un alt kumesi olmali")
+    for name, frame in (("prices_full", prices_full), ("prices_train", prices_train)):
+        values = frame.to_numpy(dtype=float)
+        if not np.isfinite(values).all() or np.any(values <= 0):
+            raise ValueError(f"{name} pozitif ve sonlu olmali")
+
     set_seed(seed)                          # fit'i tekrar-uretilebilir kil (golden)
     device = get_device()
     lr_tr = _logret(prices_train)

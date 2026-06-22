@@ -42,7 +42,7 @@ HORIZON_PRESETS: Dict[str, dict] = {
 # v12: TEK ADIM/ORTALAMA MODELI — horizon preset + Gun/Ay/Yil granulerlik yerine
 # tek `step_days` (N) + BAGIMSIZ odul parametreleri. DEFAULTS = eski "medium"
 # preset'inin BIREBIR karsiligi (golden re-baseline kanonik degerleri).
-#   N=1 -> gunluk (resample no-op). N>=2 -> N-gunluk blok-ortalama + N-gunluk adim.
+#   N=1 -> gunluk (resample no-op). N>=2 -> N seanslik blok-sonu kapanis + N seanslik adim.
 #   Episode uzunlugu = secilen train tarih araliginin TAMAMI (slider yok).
 # ---------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -57,6 +57,9 @@ class StepDefaults:
 
 
 DEFAULTS = StepDefaults()
+
+STEP_DAYS_MIN = 1
+STEP_DAYS_MAX = 252
 
 
 # ---------------------------------------------------------------------

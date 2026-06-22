@@ -209,7 +209,7 @@ class TestCashRiskFreeBaseline:
         # 300 gun / 252 ~ 1.19 yil -> NAV = 1.40^1.19 ~ 1.49
         # Kesin deger: (1+dr)^300
         dr = _cash_daily_rate(EnvConfig.cash_annual_rate, EnvConfig.trading_days)
-        expected = (1.0 + dr) ** len(prices)
+        expected = (1.0 + dr) ** (len(prices) - 1)
         np.testing.assert_allclose(d["nav"][-1], expected, rtol=1e-9,
                                    err_msg="cash_riskfree default faiz NAV hatali")
         assert d["nav"][-1] > 1.0, "Pozitif faizde NAV > 1 olmali"

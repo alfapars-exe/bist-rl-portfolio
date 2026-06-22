@@ -5,14 +5,13 @@ import datetime
 
 import streamlit as st
 
-from config import (SEED, DataConfig, EnvConfig, RewardConfig,
-                    GRANULARITY_OPTIONS, GRANULARITY_MIN_POINTS,
+from config import (DEFAULTS, SEED, STEP_DAYS_MAX, DataConfig, EnvConfig, RewardConfig,
                     cash_daily_rate as _cash_daily_rate)
 from env.portfolio_env import HORIZON_PRESETS
 from core.persistence import MODELS_DIR, model_path
 from ui.services import (_load_data, list_saved_models, load_saved_agent,
                          load_saved_agent_from_path, save_trained_agent)
-from ui.state import _agent_key
+from ui.state import _agent_key, set_active_run_spec
 
 _dc = DataConfig()
 _rc = RewardConfig()
@@ -237,6 +236,24 @@ def sidebar_controls():
     algo = st.sidebar.radio("Ajan", _algos, index=_algos.index(_cur))
     st.session_state.selected_algo = algo
 
+    step_days = int(st.sidebar.number_input(
+        "Karar adimi (BIST seansi)", min_value=1, max_value=STEP_DAYS_MAX,
+        value=int(st.session_state.get("step_days", DEFAULTS.step_days)), step=1,
+        help="Ajan her N BIST seansinin donem-sonu kapanisinda karar verir ve rebalans yapar.",
+    ))
+    if step_days != int(st.session_state.get("step_days", DEFAULTS.step_days)):
+        st.session_state.step_days = step_days
+        st.session_state.data_loaded = False
+        st.session_state.trained_agents = {}
+        st.session_state.test_traces = {}
+        st.session_state.baselines = None
+        st.sidebar.warning("Adim uzunlugu degisti; veriyi yeniden yukleyin.")
+    else:
+        st.session_state.step_days = step_days
+    preset = HORIZON_PRESETS["medium"]  # legacy-equivalent reward defaults
+    st.sidebar.caption(f"Her {step_days} seansta karar + rebalans; episode = tum train araligi")
+
+    """LEGACY_UI_REMOVED
     horizon_label = st.sidebar.radio(
         "Vade (Yatırım Ufku)",
         ["Kısa", "Orta", "Uzun"],
@@ -354,6 +371,9 @@ def sidebar_controls():
             "Eğitim & test envlerine uygulanır; CLI/golden preset'i kullanır."
         ),
     )
+    """
+    st.session_state.train_rebalance = 1
+    st.session_state.train_max_steps = 10_000
 
     # ------------------------------------------------------------------
     # N12: Nakit yıllık faiz oranı
@@ -484,7 +504,7 @@ def sidebar_controls():
     hp["gamma"] = st.sidebar.number_input(
         "γ (discount / iskonto)", value=float(preset["gamma"]),
         min_value=0.90, max_value=0.999, step=0.005, format="%.3f",
-        key=f"gamma_{st.session_state.horizon}",
+        key=f"gamma_step_{step_days}",
         help="İskonto faktörü. Vade preset default verir (Kısa 0.95 / Orta 0.99 / Uzun 0.995); "
              "burada değiştirilebilir — DQN/PPO/SAC/TD3'ün hepsine uygulanır.",
     )
@@ -537,12 +557,12 @@ def sidebar_controls():
     st.sidebar.divider()
     st.sidebar.subheader("💾 Model (kaydet / yükle)")
 
-    cur_key = _agent_key(algo, st.session_state.horizon, st.session_state.adaptive)
+    cur_key = _agent_key(algo, step_days, st.session_state.adaptive)
     has_trained = (cur_key in st.session_state.trained_agents
                    and st.session_state.trained_agents[cur_key][0] is not None)
 
     if has_trained:
-        _default_name = f"{algo}_{st.session_state.horizon}"
+        _default_name = f"{algo}_step{step_days}"
         _model_name = st.sidebar.text_input(
             "Model adı (kaydetmek için)",
             value=_default_name,
@@ -553,7 +573,7 @@ def sidebar_controls():
         )
         if st.sidebar.button("💾 Eğitilmiş modeli kaydet", width='stretch'):
             p = save_trained_agent(
-                algo, st.session_state.horizon, st.session_state.adaptive,
+                algo, step_days, st.session_state.adaptive,
                 name=_model_name,
             )
             if p:
@@ -575,9 +595,7 @@ def sidebar_controls():
 
         def _model_label(m: dict) -> str:
             """"{name} · {saved_at} · {algo}/{horizon}/{adaptive}" formatı."""
-            _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(
-                m["horizon"], m["horizon"]
-            )
+            _hor_tr = f"{m.get('step_days', 1)} seans" if not m.get("legacy") else f"legacy:{m['horizon']}"
             _adp_tr = "adaptif" if m["adaptive"] else "sabit"
             _name = m["name"] or "(isimsiz)"
             _at = m["saved_at"] or "—"
@@ -605,11 +623,11 @@ def sidebar_controls():
                 # Yüklenen modelin algo/horizon/adaptive değerlerini session'a al
                 # → mevcut resume (G4 "Devam Et") akışı bu değerleri kullanır.
                 st.session_state.selected_algo = _lmeta["algo"]
-                st.session_state.horizon = _lmeta["horizon"]
+                if _lmeta.get("run_spec"):
+                    st.session_state.step_days = int(_lmeta["run_spec"].get("step_days", 1))
                 st.session_state.adaptive = _lmeta["adaptive"]
-                _hor_tr = {"short": "Kısa", "medium": "Orta", "long": "Uzun"}.get(
-                    _lmeta["horizon"], _lmeta["horizon"]
-                )
+                _hor_tr = (f"{_lmeta['run_spec'].get('step_days', 1)} seans"
+                           if _lmeta.get("run_spec") else f"legacy:{_lmeta['horizon']}")
                 st.sidebar.success(
                     f"**{_sel_model['name']}** yüklendi  \n"
                     f"{_lmeta['algo']} / {_hor_tr} / "
@@ -625,5 +643,7 @@ def sidebar_controls():
             "ya da CLI ile üret: python main.py"
         )
 
+    st.session_state.gamma_daily = float(hp["gamma"])
+    set_active_run_spec(algo, step_days, st.session_state.adaptive, hp)
     st.sidebar.caption(f"Seed: {SEED} (sabit)")
-    return algo, st.session_state.horizon, st.session_state.adaptive, hp
+    return algo, step_days, st.session_state.adaptive, hp

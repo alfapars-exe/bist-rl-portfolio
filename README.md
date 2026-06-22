@@ -30,7 +30,9 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Gürültü-artırımlı çoklu-episode (opt-in)**: `core/episodes.py` — `make_noisy_prices`, `evaluate_noise_episodes`, `summarize_episodes`. env `force_price_noise=True` (default kapalı → golden bit-aynı). UI Test sekmesinde NAV grafiği + episode seçici + adım-adım detay tablosu
 - **NaN-güvenliği**: `env._risky_returns` `np.nan_to_num` (halt/eksik gün → 0 getiri; temiz veride no-op → golden korunur). `data._sanitize_prices` cache-okuma NaN temizliği. yfinance tz-aware → tz-naive normalleştirme + emniyet ağı
 - **Model kaydet/yükle (isim + tarih)**: Eğitilen ajan kullanıcı-verilen ada ve kayıt zamanıyla (`saved_at` ISO) diske yazılır; `list_saved_models()` ile listelenir; sidebar selectbox'tan seçilip yeniden eğitmeden Test sekmesine geçilebilir (`core/persistence.py`)
-- **Episode-clean (1. iterasyon orijinal veri)**: Sidebar checkbox (UI'da varsayılan açık). Açıkken 1. episode gürültüsüz orijinal fiyatlar, 2.–N. her biri farklı `N(0,σ)` realizasyonu. CLI/golden'da default kapalı → bit-aynı
+- **Episode-clean (1. iterasyon orijinal veri)**: Sidebar checkbox (UI'da varsayılan açık). Açıkken 1. episode gürültüsüz orijinal fiyatlar, 2.–N. her biri farklı realizasyon. CLI/golden'da default kapalı → bit-aynı
+- **Per-episode noise — anti-ezber veri artırımı (opt-in, v12)**: "Eğitimde her episode = noise'lu veri seti" toggle (varsayılan **açık**). Her episode train verisinin uniform-noise'lu yeni bir versiyonu (episode 0 orijinal, ≥1 farklı tohum). `core.episodes.make_noisy_prices`: log-getirilere `[-σ,+σ]` uniform gürültü → yeniden kümülatif fiyat. Off-policy (DQN/SAC/TD3) replay buffer episode'lar arası korunur → farklı noise'lu geçişler karışır (data augmentation). CLI/golden'da `episode_data_fn=None` → bit-aynı
+- **Parametrik hiperparametreler — Gelişmiş expander**: Her algo dalı sonunda `🔧 Gelişmiş hiperparametreler` expander'ı. DQN: hidden, buffer_size, eps_start, eps_end, huber_delta; PPO: hidden, lam, log_std_init; SAC: hidden, buffer_size; TD3: hidden, noise_clip, policy_delay, buffer_size. Tüm widget default'ları `config.py` sabitine bağlı → dokunulmazsa CLI/golden bit-aynı. Kaynak: `ui/sidebar.py`
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
 
@@ -168,18 +170,28 @@ kod/
 └── figures/                    # PNG'ler
 ```
 
-## Hiperparametreler (DQN Varsayılanları — Prompt Spec)
+## Hiperparametreler (`config.py` — hat-etkin değerler)
 
-| Parametre | Değer |
-|---|---|
-| Ağ mimarisi | `Linear(397, 256) → ReLU → Linear(256, 128) → ReLU → Linear(128, 6)` (397 = V6+ makro dahil; 393 = makro-öncesi V5 tabanı) |
-| Öğrenme oranı | 1e-3 (Adam) |
-| Kayıp | Huber (δ=1.0) |
-| Replay buffer | 50.000, uniform, batch 64 |
-| Target sync | Her 500 adım (hard update) |
-| ε-greedy | 1.0 → 0.05, 10.000 adımda lineer decay |
-| γ | 0.99 (orta vade) / 0.95 (kısa) / 0.995 (uzun) |
-| Seed | 42 (tekrar üretilebilir) |
+Tüm değerler `config.py` dataclass'larından tek kaynaktan gelir; `core/factory.py:build_agent`
+`hp.get(key, Config.default)` deseniyle kablolar (golden-güvenli).
+
+| Parametre | DQN | PPO | SAC | TD3 |
+|---|---|---|---|---|
+| Gizli katman | (256, 128) ReLU | (256, 128) Tanh | (256, 128) ReLU | (256, 128) ReLU |
+| Öğrenme oranı | lr=1e-3 | lr_p=3e-4, lr_v=1e-3 | lr_pi=3e-4, lr_q=5e-4 | lr_pi=lr_q=3e-4 |
+| Replay buffer | 50.000 (uniform FIFO) | — (on-policy) | 50.000 | 50.000 |
+| Batch | 64 | 128 | 128 | 128 |
+| Keşif | ε: 1.0→0.05, eps_decay=10k env-adım | entropi ent_coef=0.005 | α=0.05 (sabit) | expl_noise=0.1 |
+| Özel | target_update=500 (gradyan adımı), Huber δ=1.0 | clip=0.2, λ_GAE=0.95, n_epochs=6, log_std_init=−0.5 | τ=0.01, tanh-squash | τ=0.005, policy_noise=0.2, noise_clip=0.5, policy_delay=2 |
+| γ | 0.99 | 0.99 | 0.99 | 0.99 |
+| Seed | 42 | 42 | 42 | 42 |
+
+**Tasarım tercihleri (bilinçli):** Double-DQN YOK (vanilla DQN); PPO KL erken-durdurma YOK
+(clip=0.2 güven-bölgesi rolünü üstlenir); SAC α SABİT (otomatik-tune yok).
+
+**UI'da Gelişmiş expander (`🔧`):** DQN(hidden, buffer_size, eps_start, eps_end, huber_delta),
+PPO(hidden, lam, log_std_init), SAC(hidden, buffer_size), TD3(hidden, noise_clip, policy_delay, buffer_size).
+Widget default'ları `config.py` sabitine bağlı → dokunulmazsa CLI/golden bit-aynı.
 
 ## Vade Preset'leri (v12 — yalnız PENCERE/REBALANS/ÖDÜL parametresi)
 

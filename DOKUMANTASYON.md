@@ -243,15 +243,40 @@ verisinde fit edilir.
 3. NAV güncellenir: `NAV ← NAV · (1 + wₜ·r_vec − işlem maliyeti)`
 4. `s_{t+1}` = bir sonraki günün öznitelikleri ⊕ yeni ağırlıklar
 
-**Episode-clean (opt-in, V8 genişlemesi):** `PortfolioEnv(episode_clean=True)` verildiğinde env
-`_episode_idx` sayacını her `reset()` çağrısında artırır. `idx=0` (1. episode) gürültüsüz
-**orijinal** fiyatlarla çalışır; `idx≥1` her seferinde farklı bir `N(0,σ)` gürültü
-realizasyonu üretir — "12 iterasyon = 1 orijinal + 11 farklı noise". Bu davranış yalnızca
-`episode_clean=True` ve `random_start=True` (eğitim modu) birlikte aktifken devreye girer;
-**CLI ve golden testlerde default `False`** olduğundan V11 bit-aynı davranış korunur. Yeni
-RNG çağrısı yalnız opt-in açık + `idx≥1` iken gerçekleşir → sızıntısız ve golden-güvenli.
-UI'da sidebar checkbox "1. iterasyon orijinal veri (anti-ezber)" varsayılan açık; bu değer
-`core.factory.build_env(episode_clean=...)` ile ortama enjekte edilir (`core/factory.py:108`).
+**Per-episode noise — anti-ezber veri artırımı (opt-in, v12):**
+
+`PortfolioEnv(episode_data_fn=...)` ile her `reset()` çağrısında fiyat + feature verisinin
+UNIFORM-noise'lu yeni bir versiyonuna swap yapılabilir. Mekanizma:
+
+- Episode 0 (ilk): `episode_data_fn(0)` → **orijinal** fiyatlar (gürültüsüz referans).
+- Episode ≥1: `episode_data_fn(i)` → `core.episodes.make_noisy_prices(prices, noise_std, seed=seed+i)`
+  → log-getirilere bağımsız **uniform** gürültü `[-σ, +σ]` eklenir, başlangıç fiyatı korunur.
+  Her episode farklı tohum → farklı yol, aynı istatistik band. Gauss yerine Uniform seçilmesinin
+  nedeni: aykırı-değer üretmez, deterministik aralık garantisi sağlar (`core/episodes.py:54`).
+- Swap episode sınırında gerçekleşir — her `(s, a, r, s')` geçişi tek bir veri setinden gelir
+  → Bellman hedefi tutarlı.
+
+**Off-policy (DQN/SAC/TD3) replay buffer episode'lar arası KORUNUR:** Buffer, farklı
+noise'lu veri setlerinin transition'larını biriktirerek karıştırır. Bu **amaçlıdır** —
+bir data augmentation / anti-ezber stratejisidir; ajan farklı gürültü realizasyonlarından
+gelen deneyimleri karıştırarak öğrenir. Her transition kendi veri setinden geliyor olduğu
+için Bellman tutarlılığı korunur.
+
+**PPO** (on-policy): Her episode rollout buffer'ı tüketilir ve sıfırlanır; episode sınırında
+dataset swap yapıldığında GAE boundary maskesi (`self.Boundary`) bootstrap'ı keser —
+farklı noise'lu episode'lar arası avantaj geçişmez.
+
+**Golden-güvenlik:** `episode_data_fn=None` (CLI/golden default) → env mevcut prices'ı
+olduğu gibi kullanır → bit-aynı davranış. UI'da "Eğitimde her episode = noise'lu veri
+seti" toggle (varsayılan **açık**) `core.factory.build_env(episode_data_fn=...)` üzerinden
+enjekte edilir. Kaynak: `core/episodes.py` (make_noisy_prices), `ui/sidebar.py:101–107`,
+`core/factory.py:154`.
+
+**Episode-clean (opt-in, ek katman):** `PortfolioEnv(episode_clean=True)` aynı zamanda
+`_episode_idx` sayacını artırır; `idx=0` → gürültüsüz orijinal, `idx≥1` → farklı
+realizasyon. **CLI ve golden testlerde default `False`** → V11 bit-aynı davranış korunur.
+UI'da "1. iterasyon orijinal veri (anti-ezber)" checkbox (varsayılan **açık**).
+`core.factory.build_env(episode_clean=...)` ile enjekte edilir (`core/factory.py:153`).
 
 ### 5.4. Ödül Fonksiyonu (`env/reward.py → RewardEngine`)
 
@@ -319,20 +344,64 @@ eylem problemleri için açıkça tavsiye ettiği** (RL_12) algoritmadır.
 | Sürekli, off-policy (stokastik) | **SAC** (çift-Q + entropi düzenlemesi) | Keşif-sömürü dengesi; off-policy örnek verimliliği |
 | Sürekli, off-policy (deterministik) | **TD3** (çift-Q min + gecikmeli politika + hedef yumuşatma) | DDPG'nin aşırı-tahmin/kararsızlık sorunlarını üç hileyle giderir; **hocanın tavsiyesi** |
 
-### Ağ mimarileri
+### Ağ mimarileri ve algoritma yapılandırması (doğrulanmış)
 
-- **DQN** — `QNetwork`: `MLP[s → 256 → 128 → 6]` (ReLU), Huber kaybı, hedef ağ (hard sync),
-  uniform replay buffer, ε-greedy keşif.
-- **PPO** — `Actor`: `MLP[s → 256 → 128]` (Tanh) → μ başlığı + öğrenilen `log_std`; `Critic`:
-  `MLP[s → 256 → 128 → 1]` (Tanh). GAE avantajı, clipped surrogate + entropi bonusu.
-- **SAC** — `Actor`: tanh-sıkıştırılmış Gaussian; **çift** Q-eleştirmen `MLP[s+a → 256 → 128 → 1]`
-  (ReLU) + hedef ağlar; entropi katsayısı α; yumuşak güncelleme (τ).
-- **TD3** — `Actor`: `MLP[s → 256 → 128 → 29]` (tanh çıktı, **deterministik**); **çift** eleştirmen
-  `MLP[s+a → 256 → 128 → 1]` (ReLU) + hedef ağlar. Üç TD3 hilesi: (1) twin critics + **min-Q**
-  hedefi (aşırı-tahmin azaltma), (2) **gecikmeli** politika güncellemesi (`policy_delay=2`),
-  (3) **hedef-politika yumuşatma** (clamped gürültü). Keşif eğitimde aksiyona eklenen Gauss
-  gürültüsüyle; eval'de deterministik (`act_eval`). Arayüz SAC ile birebir → aynı off-policy
-  eğitim döngüsünü (`core.trainer.train_td3`) paylaşır.
+Aşağıdaki tablo dört algoritmanın **yapılandırma ve işlevsel** olarak denetlenmiş bilgilerini
+özetler. Tüm sayılar `config.py` dataclass'larından (`DQNConfig`, `PPOConfig`, `SACConfig`,
+`TD3Config`) alınmıştır; bağlantı `core/factory.py:build_agent` üzerinden `hp.get(key,
+Config.default)` deseniyle sağlanır (golden-güvenli: kullanıcı müdahalesi olmadan bit-aynı).
+
+**DQN** (vanilla DQN, ayrık 6-şablon `DiscretePortfolioEnv`)
+
+- Ağ: `QNetwork` — `MLP[s → 256 → 128 → 6]` (ReLU), 6 ham Q-değeri çıktısı (`agents/dqn.py`)
+- Replay: uniform deque, kapasite 50.000 (FIFO; `DQNConfig.buffer_size`)
+- Hedef ağ: hard-update her `target_update=500` **gradyan adımında** (`step_count % 500 == 0`)
+- Keşif: ε-greedy, **env-adımına** bağlı lineer decay — `eps_start=1.0 → eps_end=0.05`, `eps_decay=10_000` adım
+- Kayıp: Huber(δ=1.0); gradyan kırpma max_norm=10 (`agents/dqn.py:116`)
+- **Tasarım tercihi:** Double-DQN uygulanmamıştır (vanilla); hedef ağ `q_target.max()` ile
+  hesaplandığından overestimation bias içerebilir — bilinçli basitlik kararı
+
+**PPO** (on-policy, sürekli, Gaussian politika)
+
+- Ağ: `PolicyNet` — `MLP[s → 256 → 128]` (Tanh) → μ başlığı + öğrenilen `log_std` `Parameter`
+  (`log_std_init=-0.5`); `ValueNet` — `MLP[s → 256 → 128 → 1]` (Tanh). **Policy ve Value ağları
+  ayrıdır**; ayrı optimizer (lr_p=3e-4 / lr_v=1e-3) (`agents/ppo.py`)
+- Rollout: liste tabanlı (replay buffer YOK — on-policy doğrudur); her güncelleme rollout tamamen
+  tüketilir, sonra sıfırlanır
+- GAE(λ=0.95): tam-rollout avantaj hesabı; normalize edilir (`adv = (adv - adv.mean()) / (adv.std() + 1e-8)`)
+- Clipped surrogate: clip=0.2; n_epochs=6 (hat değeri — ctor default'u 8; `config.py` docstring);
+  entropi bonusu ent_coef=0.005; mini-batch=128
+- KL ölçümü: `(lp_old - logp).mean()` yalnız telemetri olarak döner; **KL erken-durdurma YOK**
+  — clip zaten güven-bölgesi rolünü üstlenir (bilinçli tasarım tercihi)
+- Eval: deterministik μ (`act_eval` — `agents/ppo.py:93`)
+
+**SAC** (off-policy, sürekli, tanh-sıkıştırılmış Gaussian)
+
+- Ağ: `GaussianPolicy` — MLP trunk (ReLU) → μ başlığı + log_std başlığı → tanh-squash;
+  TWIN-Q: `QNet` × 2 + soft-target × 2 (`agents/sac.py`)
+- Replay: 50.000 (`SACConfig.buffer_size`); batch=128
+- Q-hedef: `min(Q1_t, Q2_t) − α·logπ`; reparametrize örnekleme + tanh-squash logp düzeltmesi
+  (`logp − log(1 − a² + 1e-6).sum()`)
+- Soft-target: τ=0.01 (`SACConfig.tau`)
+- **Tasarım tercihi:** `alpha=0.05` SABİT — otomatik entropi ayarı (hedef-entropi bazlı α güncellemesi)
+  uygulanmamıştır; keşif-sömürü dengesi ortam koşullarına göre otomatik ölçeklenmez
+
+**TD3** (off-policy, sürekli, deterministik; hocanın tavsiyesi)
+
+- Ağ: `Actor` — `MLP[s → 256 → 128 → action_dim]` (tanh çıktı, deterministik);
+  TWIN kritikler: `Critic` × 2 + hedef kopyaları × 3 (`agents/td3.py`)
+- Replay: 50.000 (`TD3Config.buffer_size`); batch=128
+- Üç TD3 hilesi: **(1)** twin critics + clipped-double Q-min hedef (aşırı-tahmin azaltma);
+  **(2)** GECİKMELİ politika güncellemesi: `policy_delay=2` — actor her 2 critic adımda bir
+  güncellenir (`self._it % self.policy_delay == 0`); **(3)** hedef-politika yumuşatma:
+  `policy_noise=0.2`, `noise_clip=0.5` — hedef aksiyona kırpılmış gürültü eklenir
+- Keşif: `expl_noise=0.1` (eğitimde aksiyona eklenir; eval'de 0 — `act_eval`)
+- Soft-target: τ=0.005 (`TD3Config.tau`) — SAC'tan (0.01) daha yavaş güncelleme
+
+**Ortak:** Tüm hiperparametreler `config.py`'de tek-kaynak; `core/factory.py:build_agent`
+`hp.get(key, Config.default)` ile kablolu — UI widget'ı default'a bırakılırsa eğitim
+CLI/golden ile bit-aynı. Yukarıda işaretlenen noktalar (Double-DQN, KL erken-durdurma,
+sabit-α) **bilinçli tasarım tercihleri** olarak belgelenmiştir.
 
 ### Hiperparametreler (`config.py` — hat-etkin değerler)
 
@@ -342,25 +411,32 @@ eylem problemleri için açıkça tavsiye ettiği** (RL_12) algoritmadır.
 | Öğrenme oranı | lr=1e-3 | lr_p=3e-4, lr_v=1e-3 | lr_pi=3e-4, lr_q=5e-4 | lr_pi=lr_q=3e-4 |
 | γ (iskonto) | 0.99 | 0.99 | 0.99 | 0.99 |
 | Batch | 64 | 128 | 128 | 128 |
-| Replay buffer | 50.000 | — (on-policy) | 50.000 | 50.000 |
-| Keşif | ε: 1.0→0.05 (10k adım) | entropi 0.005 | entropi α=0.05 | expl_noise=0.1 (eval'de 0) |
-| Diğer | target_update=500, Huber δ=1.0 | clip=0.2, λ_GAE=0.95, n_epochs=6, rollout=400 | τ=0.01 | τ=0.005, policy_noise=0.2, noise_clip=0.5, policy_delay=2 |
+| Replay buffer | 50.000 (uniform FIFO) | — (on-policy, liste) | 50.000 | 50.000 |
+| Aktivasyon | ReLU | Tanh | ReLU | ReLU |
+| Keşif | ε: 1.0→0.05 (10k env-adım) | entropi ent_coef=0.005 | entropi α=0.05 (sabit) | expl_noise=0.1 (eval'de 0) |
+| Diğer | target_update=500 (gradyan adımı), Huber δ=1.0, grad-clip 10 | clip=0.2, λ_GAE=0.95, n_epochs=6, rollout=400, log_std_init=−0.5 | τ=0.01, tanh-squash logp düzeltme | τ=0.005, policy_noise=0.2, noise_clip=0.5, policy_delay=2 |
 | Eğitim uzunluğu | 12 episode | 24 güncelleme | 8 episode × 600 adım | 8 episode × 600 adım |
 
 Ortak: `SEED=42`, CPU-PyTorch, train-only z-score, `random_start` eğitim çeşitliliği.
 
 ### Uygulama notları (dürüst sınırlar)
 
-- **PPO eval örneklemesi:** PPO değerlendirmede politika dağılımından örnekler (deterministik-mean
-  kullanmaz); tekrar-üretilebilirlik `SEED=42` ile sağlanır, ancak stokastik örnekleme nedeniyle
-  farklı seed'lerde eval sonuçları hafifçe değişebilir.
+- **PPO eval deterministik:** PPO değerlendirmede `act_eval` politika ortalamasını (μ) kullanır
+  — stokastik örnekleme değil. Bu V11 adil-karşılaştırma düzeltmelerinden biridir (C4).
 - **SAC sabit α:** SAC entropi katsayısı `α=0.05` sabit tutulmuştur; otomatik entropi ayarı
-  (hedef-entropi bazlı α güncellemesi) uygulanmamıştır. Bu, keşif-sömürü dengesini ortam
-  koşullarına göre otomatik ölçeklemeyen daha basit bir tasarımdır.
-- **DQN standart DQN:** Uygulama standart DQN'dir (Double DQN değil); hedef ağ max-Q ile
-  hesaplanır, bu da overestimation bias içerebilir. DDQN'in buradaki etkisi deneysel olarak
-  test edilmemiştir.
-- **Algoritma karşılaştırmasında adalet kriteri (dürüst sınır):** Bu çalışmadaki algoritma karşılaştırması **eşit env-step veya eşit wall-clock bazında değildir**. Her algoritma kendi mimarisine ve yakınsama profiline göre ayarlanmıştır: DQN 12 episode, PPO 24 güncelleme (rollout=400 adım/güncelleme), SAC/TD3 8 episode × 600 adım (`config.py TrainConfig`). Aynı sayıda çevre adımıyla karşılaştırma yapılmadığından algoritmalar arasındaki performans farkları hem öğrenme verimliliğini hem de bütçe asimetrisini yansıtıyor olabilir. Eşit-bütçe (equal env-step budget) karşılaştırması gelecek iş olarak belirtilir.
+  (hedef-entropi bazlı α güncellemesi) uygulanmamıştır. Bilinçli basitlik kararı; keşif-sömürü
+  dengesi ortam koşullarına göre otomatik ölçeklenmez.
+- **DQN standart (vanilla) DQN:** Double-DQN uygulanmamıştır; hedef ağ `q_target.max()` ile
+  hesaplanır → overestimation bias içerebilir. DDQN etkisi bu ortamda deneysel olarak test
+  edilmemiştir.
+- **PPO KL monitörü, erken-durdurma değil:** KL `(lp_old - logp).mean()` yalnız telemetri
+  olarak `train()` return dict'ine girer; clip=0.2 zaten güven-bölgesi rolünü üstlenir.
+- **Algoritma karşılaştırmasında adalet kriteri (dürüst sınır):** Bu çalışmadaki algoritma
+  karşılaştırması **eşit env-step veya eşit wall-clock bazında değildir**. DQN 12 episode,
+  PPO 24 güncelleme (rollout=400 adım/güncelleme), SAC/TD3 8 episode × 600 adım
+  (`config.py TrainConfig`). Aynı çevre-adımı bütçesiyle karşılaştırma yapılmadığından
+  performans farkları hem öğrenme verimliliğini hem de bütçe asimetrisini yansıtıyor olabilir.
+  Eşit-bütçe (equal env-step budget) karşılaştırması gelecek iş olarak belirtilir.
 
 ---
 
@@ -396,7 +472,7 @@ odaklanan bir mühendislik revizyonudur. Golden ≤1e-6 korunur.
 | **Episode = tam tarih aralığı** | `ui/services.py`, `ui/sidebar.py` | Eğitim env `len(px_tr)` adım; eval env `len(px_te)` adım (`max_steps=10_000`). Eski horizon slider kaldırıldı |
 | **`resample_to_step_days(df, n)`** | `data.py` | n=1 no-op; n≥2 N-günlük blok-ortalama. Leak-safe: add_features (günlük) → split → resample sırası |
 | **`core/contracts.py`** (`RunSpec`, `DataProvenance`, `BacktestResult`) | `core/contracts.py` | Model+veri kimliği/provenance sözleşmeleri; UI ve CLI aynı `RunSpec`/`BacktestResult` paylaşır |
-| **`core/episodes.py`** (`make_noisy_prices`, `evaluate_noise_episodes`, `summarize_episodes`) | `core/episodes.py` | Gürültü-artırımlı çoklu-episode değerlendirmesi. `force_price_noise=False` default → golden bit-aynı |
+| **`core/episodes.py`** (`make_noisy_prices`, `evaluate_noise_episodes`, `summarize_episodes`) | `core/episodes.py` | Gürültü-artırımlı çoklu-episode değerlendirmesi. `make_noisy_prices`: log-getirilere uniform `[-σ,+σ]` gürültü → yeni fiyat serisi (başlangıç fiyatı korunur). `force_price_noise=False` default → golden bit-aynı |
 | **`force_price_noise`** (env parametresi) | `env/portfolio_env.py`, `core/factory.py` | Eval'de gürültü açar (çoklu-episode için); default kapalı → golden korunur |
 | **`_risky_returns` `np.nan_to_num`** | `env/portfolio_env.py` | Halt/eksik gün → 0 getiri; NaN NAV zincirini kırar. Temiz veride no-op → golden korunur |
 | **`_sanitize_prices()`** | `data.py` | Cache-okuma NaN temizliği: `ffill().bfill()` + tamamen-boş sütun düşürme |
@@ -785,6 +861,16 @@ kod/
 - **ISP:** DQN'e özgü `q_values` introspeksiyonu `SupportsQValues` Protocol'üyle resmileştirildi.
 - **DRY:** forecast-filtreleme ve fabrika tek kaynağa indirildi (`core.features`, `core.factory`).
 
+**`core/factory.py` + `config.py` parametrik kablolama notu:**
+`build_agent(algo, state_dim, action_dim, hp, seed)` fonksiyonu `hp.get(key, Config.default)`
+deseniyle çalışır: `hp` dict'inde bir anahtar yoksa ilgili `Config` dataclass sabitine düşer.
+Bu sayede UI'da yeni bir widget eklemek `factory.py` veya ajan constructor'larını
+değiştirmeden yeterlidir — sidebar `hp["key"] = widget_value` yazar, factory bunu okur.
+`hidden` parametresi tuple gerektirdiğinden `hp.get("hidden", DQNConfig.hidden)` döndürdükten
+sonra `tuple(...)` ile sarılır (`core/factory.py:35,52,66,79`). Widget default'u
+`Config.hidden` sabitine bağlandığında kullanıcı dokunmazsa ajan CLI/golden ile bit-aynı
+çalışır (RNG tüketimi değişmez → golden ≤1e-6 korunur).
+
 ### 9.4. Teknoloji yığını
 
 | Katman | Teknoloji |
@@ -833,12 +919,29 @@ seçilir; `python main.py` dört ajanı otomatik kaydeder.
 
 **Yeni UI özellikleri (sonraki commit'ler):**
 
+- **Parametrik hiperparametreler — "Gelişmiş" expander (v12 sidebar):** Her algoritma dalında
+  ana kontrollerin altında `st.sidebar.expander("🔧 Gelişmiş hiperparametreler")` açılır.
+  Açık kontroller algo × parametre olarak:
+
+  | Algo | Ana kontroller | Gelişmiş expander (`🔧`) |
+  |------|----------------|--------------------------|
+  | DQN | lr, eps_decay, batch_size, target_update | hidden (256×128 / 128×64 / 512×256), buffer_size, eps_start, eps_end, huber_delta |
+  | PPO | rollout_len, lr_p, lr_v, clip, ent_coef, batch_size, n_epochs | hidden, lam (GAE λ), log_std_init |
+  | SAC | lr_pi, lr_q, alpha, tau, batch_size | hidden, buffer_size |
+  | TD3 | lr_pi, lr_q, policy_noise, expl_noise, tau, batch_size | hidden, noise_clip, policy_delay, buffer_size |
+
+  Tüm widget default'ları `config.py` sabitine birebir bağlıdır (ör. `DQNConfig.hidden`,
+  `PPOConfig.lam`, `TD3Config.noise_clip`). **Golden-güvenlik:** Kullanıcı hiçbir widget'a
+  dokunmazsa `build_agent` aldığı `hp` dict'i config sabit değeriyle örtüşür → eğitim
+  CLI/golden ile bit-aynı. Yalnız `ui/sidebar.py` değişti; `core/factory.py` ve ajan
+  constructor'ları değişmedi — `hp.get(key, Config.default)` deseni sayesinde widget
+  eklemek yeterli oldu. Kaynak: `ui/sidebar.py:387–564`, `core/factory.py:32–88`.
+
 - **Episode-clean (1. iterasyon orijinal veri):** Sidebar'da "1. iterasyon orijinal veri
   (anti-ezber)" checkbox'ı (varsayılan **açık**). Açıkken 1. episode gürültüsüz orijinal
   fiyatlarla, 2.–N. episodeler her biri farklı `N(0,σ)` gürültü realizasyonuyla çalışır.
   Kapalıyken (CLI/golden modu) tüm episodeler V11 bit-aynı davranışla gürültülü kalır.
-  Kaynak: `ui/sidebar.py:225`, `env/portfolio_env.py:91,190–191,250`,
-  `core/factory.py:108,136`.
+  Kaynak: `ui/sidebar.py:92–99`, `env/portfolio_env.py:94`, `core/factory.py:153`.
 
 - **Adım granülerliği — step_days (v12):** Sidebar'da `step_days` kaydırıcısı
   (`config.STEP_DAYS_MAX=252`; kaynak: `config.py`). Seçilen N değerinde pipeline:

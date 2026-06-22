@@ -2,7 +2,7 @@
 
 > PDF §10: tüm kaynak kod final raporunun sonuna eklenir. Bu dosya `python scripts/build_code_appendix.py` ile tekrar üretilir (testler `tests/` altında ayrıca yer alır).
 
-**Toplam: 38 kaynak dosya, ~7538 satır.**
+**Toplam: 38 kaynak dosya, ~7893 satır.**
 
 ---
 
@@ -2216,6 +2216,7 @@ class PortfolioEnv:
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  force_price_noise: bool = False,
                  episode_clean: bool = False,
+                 episode_data_fn=None,
                  rebalance_freq: int | None = None,
                  gamma: float | None = None,            # v12: None -> preset (golden); override
                  mom_window: int | None = None,         # v12: None -> preset; override
@@ -2353,6 +2354,11 @@ class PortfolioEnv:
         # idx>=1 gurultulu. DEFAULT KAPALI -> CLI/golden V11 davranisi (her episode gurultulu)
         # BIT-AYNI; yalniz UI episode_clean=True gecer. Kapaliyken sayac kullanilmaz -> golden-no-op.
         self._episode_clean = bool(episode_clean)
+        # OPT-IN per-episode veri degisimi (anti-ezber): her reset()'te callback
+        # (ep_idx) -> (prices_array, feat_tensor_array) doner; env bu episode'un
+        # noise'lu verisini kullanir. DEFAULT None -> blok hic calisMAZ -> CLI/golden
+        # RNG/sonuc BIT-AYNI. episode_clean ile celiSmez (ikisi de opt-in, ayri mekanizma).
+        self._episode_data_fn = episode_data_fn
         self._episode_idx = -1
         # v10: nakit (risksiz) gunluk faiz. None -> config EnvConfig.cash_annual_rate'ten
         # bilesik turetilir; UI/CLI gunluk orani dogrudan gecebilir. SABIT skaler -> RNG
@@ -2410,6 +2416,16 @@ class PortfolioEnv:
         if seed is not None:
             self.rng = np.random.default_rng(seed)   # env-yerel; global RNG'ye dokunmaz
         self._episode_idx += 1                        # 1. episode -> idx=0 (temiz); >=1 -> noise
+        # OPT-IN per-episode veri swap'i: episode_data_fn verilmisse (UI anti-ezber modu)
+        # bu episode'un (prices, feat_tensor)'unu degistir. None ise (CLI/golden) bu
+        # blok HIC calisMAZ -> reset() RNG/sonucu BIT-AYNI. Shape eslesmezse sessizce atla.
+        if self._episode_data_fn is not None:
+            _p, _ft = self._episode_data_fn(self._episode_idx)
+            _p = np.asarray(_p, dtype=np.float32)
+            _ft = np.asarray(_ft, dtype=np.float32)
+            if _p.shape == self.prices.shape and _ft.shape == self.feat_tensor.shape:
+                self.prices = _p
+                self.feat_tensor = _ft
         self._reset_state()
         return self._obs(), {}
 
@@ -3845,6 +3861,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               force_price_noise: bool = False,
               cash_daily_rate: float | None = None,
               episode_clean: bool = False,
+              episode_data_fn=None,
               rebalance_freq: int | None = None,
               gamma: float | None = None,
               mom_window: int | None = None,
@@ -3880,6 +3897,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
         force_price_noise=bool(force_price_noise),   # gurultu-artirimli coklu-episode (eval'de gurultu); default kapali
         episode_clean=bool(episode_clean),   # OPT-IN: UI training True (1. iter orijinal); CLI/golden False
+        episode_data_fn=episode_data_fn,     # OPT-IN: per-episode veri swap (anti-ezber); None -> CLI/golden BIT-AYNI
         rebalance_freq=rebalance_freq,        # OPT-IN: None -> preset (CLI/golden); UI override eder
         gamma=gamma, mom_window=mom_window, minvol_window=minvol_window,  # v12: acik override (None->preset)
         step_days=step_days,
@@ -4350,6 +4368,77 @@ FORMAT = 2
 
 # Tum kaydedilmis modellerin bulundugu dizin (proje koku / models/).
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
+
+# Kullanici tarafindan kaydedilen odul preset JSON dosyalari.
+REWARD_PRESETS_DIR = Path(__file__).resolve().parent.parent / "reward_presets"
+
+
+def reward_preset_path(name: str) -> Path:
+    """Odul preset dosya yolu: reward_presets/{guvenli_isim}.json
+
+    Sanitize: harf/rakam/_/- disini _ ile degistir; bos ise 'preset' kullanilir.
+    """
+    safe = re.sub(r"[^\w\-]", "_", name.strip()) or "preset"
+    return REWARD_PRESETS_DIR / f"{safe}.json"
+
+
+def save_reward_preset(reward_cfg: dict, name: str, description: str = "") -> str:
+    """Odul preset'ini JSON'a yazar; yolu doner.
+
+    Format: {name, description, saved_at, format:1, reward_cfg}.
+    REWARD_PRESETS_DIR otomatik olusturulur.
+    """
+    import json
+    path = reward_preset_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "name": name,
+        "description": description,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "format": 1,
+        "reward_cfg": dict(reward_cfg),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def load_reward_preset(name: str) -> "dict | None":
+    """Odul preset'ini yukler; reward_cfg dict doner (yoksa None)."""
+    import json
+    path = reward_preset_path(name)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return dict(data.get("reward_cfg", {}))
+    except Exception:
+        return None
+
+
+def list_reward_presets() -> "list[dict]":
+    """Tum kayitli odul preset'lerini listeler; saved_at'e gore yeni->eski sirali.
+
+    Her eleman: {path, name, description, saved_at, reward_cfg}.
+    Bozuk JSON dosyalari sessizce atlanir.
+    """
+    import json
+    results = []
+    if not REWARD_PRESETS_DIR.exists():
+        return results
+    for fpath in REWARD_PRESETS_DIR.glob("*.json"):
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            results.append({
+                "path": str(fpath),
+                "name": data.get("name", fpath.stem),
+                "description": data.get("description", ""),
+                "saved_at": data.get("saved_at", ""),
+                "reward_cfg": dict(data.get("reward_cfg", {})),
+            })
+        except Exception:
+            continue
+    results.sort(key=lambda x: x["saved_at"], reverse=True)
+    return results
 
 
 def model_path(algo: str, horizon: str | int = "medium", adaptive: bool = True) -> Path:
@@ -5440,7 +5529,7 @@ from ui.charts import (  # noqa: F401
     _horizon_preset_table, _q_bar, _reward_bar, _state_top_features, _weights_pie,
 )
 from ui.sidebar import _sidebar_reward_editor, sidebar_controls  # noqa: F401
-from ui.tabs import tab_compare, tab_mdp, tab_test, tab_train  # noqa: F401
+from ui.tabs import tab_compare, tab_mdp, tab_test, tab_train, tab_reward  # noqa: F401
 
 
 def main():
@@ -5463,16 +5552,18 @@ def main():
         else:
             st.warning(message + " - sonuclar bu kaynak etiketiyle kaydedilir.")
 
-    t1, t2, t3, t4 = st.tabs([
+    t1, t2, t3, t4, t5 = st.tabs([
         "📐 Veri & MDP",
         "🎓 Eğitim",
         "🎬 Test (Adım-Adım)",
         "📊 Karşılaştırma",
+        "⚖️ Ödül & Ceza Tasarımı",
     ])
     with t1: tab_mdp()
     with t2: tab_train(algo, step_days, adaptive, hp)
     with t3: tab_test(algo, step_days, adaptive)
     with t4: tab_compare()
+    with t5: tab_reward()
 
 
 if __name__ == "__main__":
@@ -5528,6 +5619,7 @@ def _init_state():
         "n_episodes": 12,                          # parametrik episode sayısı (UI)
         "price_noise_std": EnvConfig.price_noise_std,  # fiyat gürültüsü σ (UI kontrolü)
         "episode_clean": True,   # 1. iterasyon orijinal veri (anti-ezber); UI default açık
+        "train_noisy_episodes": True,  # OPT-IN: her episode = noise'lu yeni veri seti (anti-ezber); default açık
         "train_rebalance": None,  # rebalans frekansı override (None -> vade preset'i; golden-güvenli)
         # Tarih aralığı — DataConfig tek kaynak
         "data_start": _dc.start,
@@ -5611,7 +5703,7 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import DEFAULTS, SEED, ForecastConfig, MacroConfig, validate_train_range
 from core.factory import build_agent, build_env
-from core.episodes import episode_metrics
+from core.episodes import episode_metrics, make_noisy_prices
 from core.persistence import (load_agent, model_path, named_model_path,
                               read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
@@ -5815,7 +5907,8 @@ def _load_data():
 def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_steps: int,
               cash_daily_rate: float | None = None, *,
               force_noise: bool = False, noise_eval: float = 0.0,
-              seed_override: int | None = None):
+              seed_override: int | None = None,
+              episode_data_fn=None):
     """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3).
 
     N12: cash_daily_rate None verilirse session_state.cash_daily_rate okunur;
@@ -5866,12 +5959,89 @@ def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_ste
         price_noise_std=(float(noise_eval) if force_noise else noise_std),  # UI σ (train) / noise-episode (eval)
         force_price_noise=bool(force_noise),       # gurultu-artirimli coklu-episode: eval'de gurultu ac
         episode_clean=ep_clean,                    # 1. iterasyon orijinal (anti-ezber)
+        episode_data_fn=episode_data_fn,           # OPT-IN: per-episode veri swap (anti-ezber); None -> degismez
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
         cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
         rebalance_freq=1, step_days=int(step_days),
         gamma=float(st.session_state.get("gamma_daily", DEFAULTS.gamma)),
         mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
         start_index=start_index,
+    )
+
+
+def _make_noisy_eval_env(noisy_te: pd.DataFrame, algo: str, step_days: int,
+                         adaptive: bool, seed: int):
+    """Noisy test serisi uzerinden eval ortami kurar (fiyat-seviyesi gurultu).
+
+    _make_env'in eval bloguyla AYNI context penceresi + start_index mantigini
+    taklit eder; ancak px_te yerine noisy_te kullanir. Feature'lar noisy_te
+    uzerinden YENIDEN HESAPLANIR (add_features) ve egitimde fit edilmis
+    session_state.scaler ile donusturulur — sizinti yok (scaler train-only).
+
+    Forecast feature (ForecastConfig.enabled=True iken feats_te'de bulunur):
+    Tahmin modeli egzojen (hisse serisiyle baglantiyi kesilmis) ve noisy
+    fiyattan yeniden hesaplanamaz (fit edilmemis). Bu nedenle forecast feature
+    orijinal feats_te'den (context+te dilimi) kopyalanir. State-dim KORUNUR.
+
+    Makro + regime egzojen (hisse fiyatiyla baglantisiz); orijinal olanlar
+    kullanilir (context + te dilimi, _make_env eval yoluyla ayni).
+    """
+    context = min(
+        len(st.session_state.px_tr),
+        max(21, ceil(DEFAULTS.minvol_window / step_days)) + 1
+    )
+    px_context = st.session_state.px_tr.iloc[-context:]
+
+    # Noisy te + context penceresi birlestir (baslangic fiyati px_tr'den gelir)
+    px_df = pd.concat([px_context, noisy_te])
+
+    # session_counts
+    counts = np.concatenate([
+        np.asarray(st.session_state.px_tr.attrs.get(
+            "session_counts", np.ones(len(st.session_state.px_tr), dtype=int)))[-context:],
+        np.asarray(st.session_state.px_te.attrs.get(
+            "session_counts", np.ones(len(st.session_state.px_te), dtype=int))),
+    ])
+    px_df.attrs.update(st.session_state.px_te.attrs)
+    px_df.attrs["session_counts"] = counts
+
+    # Feature'lari noisy fiyat uzerinden yeniden hesapla; egitim scaler'i uygula
+    # add_features: saf teknik feature'lar (12 adet); forecast egzojen -> ayri islenir
+    raw_feats_noisy = add_features(px_df)
+    feats_noisy = st.session_state.scaler.transform(raw_feats_noisy)
+
+    # Forecast feature varsa (state-dim uyumu icin): orijinal feats_te'den kopyala
+    # feats_te zaten context+te ile build edilmis (services._make_env eval yolu)
+    feats_te_orig = {k: pd.concat([st.session_state.feats_tr[k].iloc[-context:], v])
+                     for k, v in st.session_state.feats_te.items()}
+    if "forecast" in feats_te_orig and "forecast" not in feats_noisy:
+        feats_noisy["forecast"] = feats_te_orig["forecast"]
+
+    # Makro + regime orijinal (egzojen, hisse noisy'siyle degismez)
+    macro = st.session_state.get("macro_te")
+    regime = st.session_state.get("regime_te")
+    if macro is not None:
+        macro = np.concatenate([st.session_state.macro_tr[-context:], macro], axis=0)
+    if regime is not None:
+        regime = np.concatenate([st.session_state.regime_tr[-context:], regime], axis=0)
+
+    # Nakit faizi
+    cash_daily_rate = st.session_state.get("cash_daily_rate", None)
+    extra_cash = {} if cash_daily_rate is None else {"cash_daily_rate": float(cash_daily_rate)}
+
+    return build_env(
+        algo, px_df, feats_noisy,
+        adaptive=adaptive, max_steps=10_000,
+        random_start=False, seed=seed,
+        reward_overrides=st.session_state.get("reward_cfg", {}) or {},
+        # force_price_noise GECME: fiyat zaten noisy (fiyat-seviyesi)
+        episode_clean=False,
+        macro=macro, regime=regime,
+        rebalance_freq=1, step_days=int(step_days),
+        gamma=float(st.session_state.get("gamma_daily", DEFAULTS.gamma)),
+        mom_window=DEFAULTS.mom_window, minvol_window=DEFAULTS.minvol_window,
+        start_index=context,
+        **extra_cash,
     )
 
 
@@ -5882,19 +6052,32 @@ def evaluate_noise_episodes_ui(agent, algo: str, step_days: int, adaptive: bool,
 
     Episode 0 = orijinal (gurultusuz) referans — normal testle AYNI kurulum (_make_env
     eval yolu: context penceresi + start_index) -> episode 0 normal test sonucuyla
-    ortusur. Episode 1..N = ayni test serisine getiri-seviyesinde Gauss gurultusu
-    (force_price_noise; episode basina FARKLI tohum) eklenmis YENI patikalar (anti-ezber).
-    Her episode TUM veri tarih araligini kapsar ve SIRAYLA kosar — biri tam BITMEDEN
-    (N gun varsa N adim) digeri BASLAMAZ. Donen her episode dict'i: episode, noise_std,
-    steps, nav, dates, trace (adim-adim), + final_nav/total_return/max_drawdown/sharpe.
+    ortusur.
+
+    Episode 1..N = orijinal px_te'ye UNIFORM noise eklenip YENIDEN HESAPLANMIS
+    fiyat serisinden kurulan YENI ortamlar (fiyat-seviyesi anti-ezber). Her episode
+    farkli seed kullanir; feature'lar noisy fiyat uzerinden yeniden hesaplanir.
+    Ajan GERCEKTEN FARKLI veri gorur (getiri-seviyesi Gauss'tan farkli).
+
+    Her episode TUM veri tarih araligini kapsar ve SIRAYLA kosar — biri tam bitmeden
+    digeri baslamaz. Donen her episode dict'i: episode, noise_std, steps, nav, dates,
+    trace (adim-adim), + final_nav/total_return/max_drawdown/sharpe.
     """
     results = []
     for i in range(int(n_episodes)):
         nstd = 0.0 if i == 0 else float(noise_std)
-        env = _make_env(False, algo, step_days, adaptive, max_steps=10_000,
-                        force_noise=(nstd > 0.0), noise_eval=nstd, seed_override=SEED + i)
-        # Tam aralik, adim-adim trace (tekli-test ile AYNI dongey reuse eder) — episode
-        # done'a (veri sonu) kadar kosar; sonraki episode ancak bu bittikten sonra baslar.
+        if i == 0:
+            # Episode 0: orijinal fiyatlar — _make_env eval yoluyla birebir ayni
+            env = _make_env(False, algo, step_days, adaptive, max_steps=10_000,
+                            seed_override=SEED + i)
+        else:
+            # Episode 1..N: px_te uzerine UNIFORM noise -> yeni fiyat serisi -> env
+            noisy_te = make_noisy_prices(
+                st.session_state.px_te, nstd, seed=SEED + i
+            )
+            env = _make_noisy_eval_env(noisy_te, algo, step_days, adaptive,
+                                       seed=SEED + i)
+        # Tam aralik, adim-adim trace — done'a (veri sonu) kadar sirayla kosar
         trace = _run_trace_loop(env, agent, algo, light=True)
         nav = np.asarray(env.nav_history, dtype=float)
         rets = np.asarray(getattr(env, "ret_history", []), dtype=float)
@@ -5932,7 +6115,54 @@ def train_generator(algo: str, step_days: int, adaptive: bool, hp: dict,
     """
     _algo_defaults = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}
     max_steps = max(1, len(st.session_state.px_tr))
-    env = _make_env(True, algo, step_days, adaptive, max_steps=max_steps)
+
+    # OPT-IN: per-episode noise'lu veri seti (anti-ezber). Toggle aciksa her episode
+    # train verisinin UNIFORM-noise'lu yeni bir versiyonunu gorur (episode 0 = orijinal).
+    # KAPALI veya veri yuklenmemisse: episode_data_fn=None -> mevcut davranis korunur (golden BIT-AYNI).
+    _edf = None
+    if st.session_state.get("train_noisy_episodes", True) and st.session_state.get("data_loaded"):
+        from core.factory import select_features as _select_features
+        from utils.features import add_features as _add_features
+
+        _px_tr_orig = st.session_state.px_tr            # orijinal train fiyat DataFrame
+        _scaler = st.session_state.scaler               # train-only fit edilmis scaler
+        _feats_tr_orig = st.session_state.feats_tr      # zaten transform edilmis feats dict
+        _nstd = float(st.session_state.get("price_noise_std", 0.01))
+
+        # feat_names: select_features sonrasi env'in kullandigi sira (algo'ya gore forecast filtreli)
+        _feat_names = list(_select_features(_feats_tr_orig, algo).keys())
+
+        # Episode 0 icin orijinal feat_tensor — env ctor'un kullandigi ile BIT-AYNI
+        _orig_feat_tensor = np.stack(
+            [_feats_tr_orig[k].values.astype(np.float32) for k in _feat_names], axis=-1
+        )
+        _orig_prices = _px_tr_orig.values.astype(np.float32)
+
+        def _edf(ep_idx: int):
+            """Her episode icin (prices_array, feat_tensor_array) dondurur.
+            ep_idx == 0 -> orijinal (BIT-AYNI); ep_idx >= 1 -> noise'lu yeni veri seti."""
+            if ep_idx == 0 or _nstd == 0.0:
+                return (_orig_prices, _orig_feat_tensor)
+            # Noise'lu fiyat serisi uret (UNIFORM; core.episodes.make_noisy_prices)
+            _noisy_px = make_noisy_prices(_px_tr_orig, _nstd, seed=SEED + ep_idx)
+            # Teknik feature'lari noisy fiyat uzerinden yeniden hesapla; egitim scaler'i uygula
+            _raw_noisy = _add_features(_noisy_px)
+            _feats_noisy = _scaler.transform(_raw_noisy)
+            # Forecast feature (varsa) egzojen -> orijinal feats_tr'den kopyala (state_dim KORU)
+            if "forecast" in _feats_tr_orig and "forecast" not in _feats_noisy:
+                _feats_noisy["forecast"] = _feats_tr_orig["forecast"]
+            # select_features filtresi (DQN forecast'i dislar vs PPO/SAC/TD3 icin)
+            _feats_noisy_sel = _select_features(_feats_noisy, algo)
+            _ft = np.stack(
+                [_feats_noisy_sel[k].values.astype(np.float32) for k in _feat_names], axis=-1
+            )
+            return (_noisy_px.values.astype(np.float32), _ft)
+
+    # episode_data_fn aktifse train adim-noise'u KAPAT (veri zaten noise'lu; cift-noise gereksiz)
+    _noise_std_override = 0.0 if _edf is not None else None  # None -> _make_env kendi okur
+
+    env = _make_env(True, algo, step_days, adaptive, max_steps=max_steps,
+                    episode_data_fn=_edf)
     if resume_agent is not None:
         agent = resume_agent
     else:
@@ -6139,7 +6369,8 @@ import datetime
 
 import streamlit as st
 
-from config import (DEFAULTS, SEED, STEP_DAYS_MAX, DataConfig, EnvConfig, RewardConfig,
+from config import (DEFAULTS, SEED, STEP_DAYS_MAX, DataConfig, DQNConfig, EnvConfig,
+                    PPOConfig, RewardConfig, SACConfig, TD3Config,
                     cash_daily_rate as _cash_daily_rate)
 from env.portfolio_env import HORIZON_PRESETS
 from core.persistence import MODELS_DIR, model_path
@@ -6162,157 +6393,24 @@ _LBL_BATCH = "Batch"
 
 
 def _sidebar_reward_editor(preset: dict):
-    """⚖️ Ödül & Ceza katsayıları düzenleyicisi — session_state.reward_cfg'i günceller.
+    """⚖️ Ödül & Ceza — sidebar slim stub.
 
-    None/boş değerler env'in preset default'larına düşer. Kullanıcı 'Preset'e dön'
-    ile tüm override'ları sıfırlayabilir.
+    Tüm detaylı editör 'Ödül & Ceza Tasarımı' sekmesine taşındı.
+    Sidebar'da yalnız bilgi notu + reset butonu bırakıldı; böylece
+    iki ayrı widget seti aynı reward_cfg key'lerini desync etmez.
     """
-    cfg = st.session_state.setdefault("reward_cfg", {})
     with st.sidebar.expander("⚖️ Ödül & Ceza Katsayıları", expanded=False):
-        st.caption("Ödül = log-getiri − η·turnover − λ·max(0, DD−τ) − iflas cezası")
-
-        if st.button("↺ Preset'e dön (tüm override'ları sıfırla)",
-                     key="reset_reward_cfg", width='stretch'):
+        st.info(
+            "⚖️ Ödül/ceza ayarları artık **'Ödül & Ceza Tasarımı'** sekmesinde.\n\n"
+            "Tüm katsayıları, preset kaydet/yükle ve canlı önizlemeyi oradan yönetin."
+        )
+        if st.button(
+            "↺ Preset'e dön (tüm override'ları sıfırla)",
+            key="reset_reward_cfg",
+            width="stretch",
+        ):
             st.session_state.reward_cfg = {}
             st.rerun()
-
-        st.markdown("**Ödül terimleri** (vade preset'i default olarak)")
-        cfg["eta_base"] = st.number_input(
-            "η — İşlem (turnover) maliyeti katsayısı",
-            value=float(cfg.get("eta_base", preset["eta"])),
-            min_value=0.0, max_value=0.1, step=0.0001, format="%.4f",
-            help="Ağırlık değişiminin L1 normu bu katsayı ile çarpılıp ödülden düşülür "
-                 "(ve NAV'ı azaltır). Büyütünce ajan daha az işlem yapar.",
-        )
-        cfg["lambda_base"] = st.number_input(
-            "λ — Drawdown (DD) ceza katsayısı",
-            value=float(cfg.get("lambda_base", preset["lam"])),
-            min_value=0.0, max_value=10.0, step=0.05, format="%.3f",
-            help="max(0, DD − τ) bu katsayı ile çarpılıp ödülden düşülür.",
-        )
-        cfg["tau_base"] = st.number_input(
-            "τ — DD eşiği (oran)",
-            value=float(cfg.get("tau_base", preset["tau"])),
-            min_value=0.0, max_value=0.5, step=0.005, format="%.3f",
-            help="Tepe-den DD > τ olduğunda ceza başlar. 0.05 = %5'lik DD toleransı.",
-        )
-
-        st.markdown("**İflas (simülasyonu durdurma)**")
-        cfg["bankruptcy_nav"] = st.number_input(
-            "İflas NAV eşiği",
-            value=float(cfg.get("bankruptcy_nav", EnvConfig.bankruptcy_nav)),
-            min_value=0.0, max_value=0.9, step=0.01, format="%.2f",
-            help="NAV bu eşiğin altına düşerse episod iflas olarak sonlandırılır. "
-                 "Örn. 0.01 = başlangıç sermayesinin %1'ine inmek.",
-        )
-        cfg["bankruptcy_penalty"] = st.number_input(
-            "İflas ek ceza değeri",
-            value=float(cfg.get("bankruptcy_penalty", EnvConfig.bankruptcy_penalty)),
-            min_value=0.0, max_value=1000.0, step=1.0, format="%.1f",
-            help="İflas anında toplam ödüle eklenen negatif terim. Log-ölçeğinde büyük değer "
-                 "(normal adım ödülü ~±0.01). Ajan iflasa gitmemeyi öğrenir.",
-        )
-
-        st.markdown("**Adaptif şekillendirici hedefleri**")
-        cfg["vol_target"] = st.number_input(
-            "vol_target (hedef realize vol)",
-            value=float(cfg.get("vol_target", EnvConfig.vol_target)),
-            min_value=0.0001, max_value=0.5, step=0.001, format="%.4f",
-            help="Adaptif mod açıkken λ ve τ bu hedefe göre ölçeklenir.",
-        )
-        cfg["turnover_target"] = st.number_input(
-            "turnover_target (hedef turnover)",
-            value=float(cfg.get("turnover_target", EnvConfig.turnover_target)),
-            min_value=0.001, max_value=1.0, step=0.005, format="%.3f",
-            help="Adaptif mod açıkken η bu hedefe göre ölçeklenir.",
-        )
-        cfg["ema_alpha"] = st.slider(
-            "EMA α (adaptif hafıza)",
-            min_value=0.001, max_value=0.5, value=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
-            step=0.005, format="%.3f",
-            help="Büyük α = daha hızlı uyum, küçük α = daha stabil.",
-        )
-
-        st.markdown("**DSR & CVaR risk terimleri**")
-        cfg["w_dsr"] = st.number_input(
-            "w_dsr — Diferansiyel Sharpe ağırlığı",
-            value=float(cfg.get("w_dsr", _rc.w_dsr)),
-            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
-            help="DSR terimi ağırlığı: online risk-ayarlı Sharpe gradyanı. "
-                 "0 = kapalı, 0.05 = hafif etkin.",
-        )
-        cfg["w_cvar"] = st.number_input(
-            "w_cvar — CVaR kuyruk cezası ağırlığı",
-            value=float(cfg.get("w_cvar", _rc.w_cvar)),
-            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
-            help="CVaR (Conditional Value at Risk) ceza ağırlığı. "
-                 "0 = kapalı; kriz dönemlerinde regime_beta ile amplify edilir.",
-        )
-        cfg["dsr_eta"] = st.number_input(
-            "dsr_eta — DSR EWMA oranı",
-            value=float(cfg.get("dsr_eta", _rc.dsr_eta)),
-            min_value=0.001, max_value=0.1, step=0.001, format="%.3f",
-            help="Diferansiyel Sharpe hesabındaki EWMA pencere oranı. "
-                 "Küçük = yavaş adaptasyon, büyük = hızlı.",
-        )
-        cfg["cvar_alpha"] = st.number_input(
-            "cvar_alpha — CVaR kuyruk yüzdesi",
-            value=float(cfg.get("cvar_alpha", _rc.cvar_alpha)),
-            min_value=0.01, max_value=0.2, step=0.005, format="%.3f",
-            help="CVaR için kuyruk yüzdesi (α). 0.05 = en kötü %5'lik getiri ortalaması.",
-        )
-        cfg["regime_beta"] = st.number_input(
-            "regime_beta — Kriz amplifikasyon gücü",
-            value=float(cfg.get("regime_beta", _rc.regime_beta)),
-            min_value=0.0, max_value=5.0, step=0.1, format="%.2f",
-            help="CVaR cezasını kriz rejiminde büyüten çarpan. "
-                 "0 = rejim bağımsız, 5 = kriz anında 6× ceza.",
-        )
-        cfg["cvar_amp"] = st.number_input(
-            "cvar_amp — Rejim amplifikasyon üsteli",
-            value=float(cfg.get("cvar_amp", _rc.cvar_amp)),
-            min_value=0.5, max_value=3.0, step=0.1, format="%.2f",
-            help="κ = w_cvar·(1 + regime_beta·max(0,regime))^cvar_amp formülündeki üstel. "
-                 "1.0 = doğrusal amplifikasyon.",
-        )
-
-        st.caption("⚠️ Bu ayarları değiştirdikten sonra ajanları **yeniden eğitmek** "
-                   "anlamlı olur; eski ajan farklı ortamda öğrenilmiştir.")
-
-    with st.sidebar.expander("🧪 Deneysel ödül terimleri (opt-in, varsayılan kapalı)",
-                             expanded=False):
-        st.caption(
-            "Bu terimler varsayılan 0 ile tamamen kapalıdır — aktif etmek için "
-            "sıfırdan farklı değer girin. Yeni ajan eğitmeden etkisi görülmez."
-        )
-        cfg["w_gain"] = st.number_input(
-            "w_gain — Kazanç-çarpanı ödülü ağırlığı",
-            value=float(cfg.get("w_gain", _rc.w_gain)),
-            min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
-            help="NAV gain_floor eşiğini aştığında verilen ödül ağırlığı. "
-                 "2× → w_gain ödül, 3× → 2·w_gain ödül. 0 = kapalı.",
-        )
-        cfg["gain_floor"] = st.number_input(
-            "gain_floor — Ödül eşiği (NAV)",
-            value=float(cfg.get("gain_floor", _rc.gain_floor)),
-            min_value=1.0, max_value=2.0, step=0.05, format="%.2f",
-            help="w_gain ödülünün başlayacağı NAV çarpanı. "
-                 "1.0 = başlangıçtan itibaren, 1.5 = %50 büyüme sonrası.",
-        )
-        cfg["w_gain_speed"] = st.number_input(
-            "w_gain_speed — Hız bonusu ağırlığı",
-            value=float(cfg.get("w_gain_speed", _rc.w_gain_speed)),
-            min_value=0.0, max_value=2.0, step=0.05, format="%.2f",
-            help="Erken büyümeye daha yüksek ödül veren hız faktörü. "
-                 "0 = zamandan bağımsız, pozitif = erken kazanç daha değerli.",
-        )
-        cfg["w_ruin_timing"] = st.number_input(
-            "w_ruin_timing — İflas-timing ceza ağırlığı",
-            value=float(cfg.get("w_ruin_timing", _rc.w_ruin_timing)),
-            min_value=0.0, max_value=3.0, step=0.1, format="%.2f",
-            help="Erken iflas anına daha sert ceza uygular. "
-                 "0 = düz (flat) iflas_penalty, pozitif = erken iflasa üstel ceza.",
-        )
 
 
 def sidebar_controls():
@@ -6362,6 +6460,14 @@ def sidebar_controls():
              "iterasyonlar her biri N(0, σ)'dan FARKLI gürültü realizasyonuyla eğitilir "
              "(kullanıcı isteği — '1 iterasyon orijinal, kalanı noise'lu'). Kapalı: tüm "
              "iterasyonlar gürültülü (klasik). σ=0 ise etkisiz.",
+    )
+
+    st.session_state.train_noisy_episodes = st.sidebar.checkbox(
+        "Eğitimde her episode = noise'lu veri seti (anti-ezber)",
+        value=bool(st.session_state.get("train_noisy_episodes", True)),
+        help="Açık: her episode train verisinin UNIFORM-noise'lu YENİ versiyonu "
+             "(episode 0 orijinal); ajan her episode'da FARKLI veri üzerinde eğitilir. "
+             "Kapalı: getiri-seviyesi adım-noise (eski davranış). σ slider gürültü genişliği.",
     )
 
     st.sidebar.divider()
@@ -6627,48 +6733,199 @@ def sidebar_controls():
         help="İskonto faktörü. Vade preset default verir (Kısa 0.95 / Orta 0.99 / Uzun 0.995); "
              "burada değiştirilebilir — DQN/PPO/SAC/TD3'ün hepsine uygulanır.",
     )
+    # Gelişmiş expander'larda hidden seçeneği için ortak tuple listesi + format
+    _HIDDEN_OPTIONS = [(128, 64), (256, 128), (512, 256)]
+    _hidden_fmt = lambda t: f"{t[0]}×{t[1]}"
+
     if algo == "DQN":
         st.sidebar.caption(_EP_HINT)
         hp["lr"]        = st.sidebar.select_slider("Öğrenme oranı",
-            options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3)
-        hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000)
-        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64)
-        hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100)
+            options=[1e-4, 3e-4, 5e-4, 1e-3, 3e-3], value=1e-3,
+            key=f"dqn_lr_{step_days}")
+        hp["eps_decay"] = st.sidebar.slider("ε decay adımı", 2_000, 30_000, 10_000, step=1_000,
+            key=f"dqn_eps_decay_{step_days}")
+        hp["batch_size"]= st.sidebar.select_slider(_LBL_BATCH, options=[32, 64, 128], value=64,
+            key=f"dqn_batch_{step_days}")
+        hp["target_update"] = st.sidebar.slider("Target sync", 100, 2000, 500, step=100,
+            key=f"dqn_target_update_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(DQNConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"dqn_hidden_{step_days}",
+                help="Politika ağının gizli katman nöron sayısı (1. katman × 2. katman). "
+                     "Büyük ağ kapasiteyi artırır ama daha yavaş eğitilir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=DQNConfig.buffer_size,
+                key=f"dqn_buffer_{step_days}",
+                help="Deneyim tekrar belleğinin maksimum kapasitesi. "
+                     "Büyük buffer çeşitlilik sağlar, bellek tüketimini artırır.",
+            )
+            hp["eps_start"] = st.slider(
+                "ε başlangıç (keşif)",
+                min_value=0.5, max_value=1.0,
+                value=DQNConfig.eps_start,
+                step=0.05,
+                key=f"dqn_eps_start_{step_days}",
+                help="Epsilon-greedy keşif oranının başlangıç değeri. "
+                     "1.0 = tamamen rastgele; eğitim ilerledikçe eps_end'e düşer.",
+            )
+            hp["eps_end"] = st.slider(
+                "ε bitiş (minimum keşif)",
+                min_value=0.01, max_value=0.20,
+                value=DQNConfig.eps_end,
+                step=0.01,
+                key=f"dqn_eps_end_{step_days}",
+                help="Epsilon'un ulaşacağı minimum değer. "
+                     "Küçük tutmak keşfi azaltır, sömürüyü artırır.",
+            )
+            hp["huber_delta"] = st.select_slider(
+                "Huber delta (kayıp eşiği)",
+                options=[0.5, 1.0, 2.0],
+                value=DQNConfig.huber_delta,
+                key=f"dqn_huber_delta_{step_days}",
+                help="Huber kaybının L1/L2 geçiş eşiği. "
+                     "Küçük delta aykırı değerlere karşı daha sağlam.",
+            )
     elif algo == "PPO":
         st.sidebar.caption(_EP_HINT.replace("episode", "update"))
-        hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64)
+        hp["rollout_len"]= st.sidebar.slider("Rollout uzunluğu", 128, 1024, 400, step=64,
+            key=f"ppo_rollout_{step_days}")
         hp["lr_p"]       = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"ppo_lr_p_{step_days}")
         hp["lr_v"]       = st.sidebar.select_slider("Value LR",
-            options=[3e-4, 1e-3, 3e-3], value=1e-3)
-        hp["clip"]       = st.sidebar.slider("Clip ε", 0.05, 0.4, 0.2, step=0.05)
+            options=[3e-4, 1e-3, 3e-3], value=1e-3,
+            key=f"ppo_lr_v_{step_days}")
+        hp["clip"]       = st.sidebar.slider("Clip ε", 0.05, 0.4, 0.2, step=0.05,
+            key=f"ppo_clip_{step_days}")
         hp["ent_coef"]   = st.sidebar.select_slider("Entropi katsayısı",
-            options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128)
-        hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1)
+            options=[0.0, 0.001, 0.005, 0.01, 0.02], value=0.005,
+            key=f"ppo_ent_coef_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider("Mini-batch", options=[64, 128, 256], value=128,
+            key=f"ppo_batch_{step_days}")
+        hp["n_epochs"]   = st.sidebar.slider("Epoch", 2, 10, 6, step=1,
+            key=f"ppo_n_epochs_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(PPOConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"ppo_hidden_{step_days}",
+                help="Actor ve Critic ağlarının gizli katman nöron sayısı. "
+                     "Büyük ağ karmaşık politikaları öğrenebilir.",
+            )
+            hp["lam"] = st.slider(
+                "GAE lambda (λ)",
+                min_value=0.90, max_value=0.99,
+                value=PPOConfig.lam,
+                step=0.01,
+                key=f"ppo_lam_{step_days}",
+                help="Generalized Advantage Estimation'ın varyans-bias dengesi. "
+                     "1.0 = tam MC (yüksek varyans); 0.0 = TD(0) (yüksek bias).",
+            )
+            hp["log_std_init"] = st.slider(
+                "log σ başlangıcı",
+                min_value=-1.0, max_value=0.0,
+                value=PPOConfig.log_std_init,
+                step=0.1,
+                key=f"ppo_log_std_init_{step_days}",
+                help="Politika dağılımının başlangıç log-standart sapması. "
+                     "Daha negatif = daha dar başlangıç dağılımı (daha az keşif).",
+            )
     elif algo == "SAC":
         st.sidebar.caption(_EP_HINT)
         hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"sac_lr_pi_{step_days}")
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
-            options=[3e-4, 5e-4, 1e-3], value=5e-4)
-        hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01)
+            options=[3e-4, 5e-4, 1e-3], value=5e-4,
+            key=f"sac_lr_q_{step_days}")
+        hp["alpha"]      = st.sidebar.slider("Entropi α", 0.0, 0.5, 0.05, step=0.01,
+            key=f"sac_alpha_{step_days}")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
-            options=[0.005, 0.01, 0.05], value=0.01)
-        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+            options=[0.005, 0.01, 0.05], value=0.01,
+            key=f"sac_tau_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128,
+            key=f"sac_batch_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(SACConfig.hidden),
+                format_func=_hidden_fmt,
+                key=f"sac_hidden_{step_days}",
+                help="Actor ve Q-ağlarının gizli katman nöron sayısı. "
+                     "SAC sürekli eylem uzayında çalışır; kapasite önemlidir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=SACConfig.buffer_size,
+                key=f"sac_buffer_{step_days}",
+                help="Off-policy deneyim belleğinin maksimum kapasitesi. "
+                     "Büyük buffer örnek çeşitliliğini artırır.",
+            )
     else:  # TD3 — sürekli/deterministik politika (hocanın tavsiyesi)
         st.sidebar.caption(_EP_HINT)
         hp["lr_pi"]      = st.sidebar.select_slider(_LBL_POLICY_LR,
-            options=[1e-4, 3e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 1e-3], value=3e-4,
+            key=f"td3_lr_pi_{step_days}")
         hp["lr_q"]       = st.sidebar.select_slider("Q LR",
-            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4)
+            options=[1e-4, 3e-4, 5e-4, 1e-3], value=3e-4,
+            key=f"td3_lr_q_{step_days}")
         hp["policy_noise"] = st.sidebar.slider("Hedef-politika gürültüsü", 0.0, 0.5, 0.2, step=0.05,
+            key=f"td3_policy_noise_{step_days}",
             help="Hedef aksiyona eklenen clamped Gauss gürültüsü (TD3 smoothing).")
         hp["expl_noise"] = st.sidebar.slider("Keşif gürültüsü", 0.0, 0.5, 0.1, step=0.05,
+            key=f"td3_expl_noise_{step_days}",
             help="Eğitimde aksiyona eklenen keşif gürültüsü (eval'de kapalı).")
         hp["tau"]        = st.sidebar.select_slider("Soft update τ",
-            options=[0.005, 0.01, 0.05], value=0.005)
-        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128)
+            options=[0.005, 0.01, 0.05], value=0.005,
+            key=f"td3_tau_{step_days}")
+        hp["batch_size"] = st.sidebar.select_slider(_LBL_BATCH, options=[64, 128, 256], value=128,
+            key=f"td3_batch_{step_days}")
+        with st.sidebar.expander("🔧 Gelişmiş hiperparametreler", expanded=False):
+            hp["hidden"] = st.selectbox(
+                "Gizli katman boyutu",
+                options=_HIDDEN_OPTIONS,
+                index=_HIDDEN_OPTIONS.index(TD3Config.hidden),
+                format_func=_hidden_fmt,
+                key=f"td3_hidden_{step_days}",
+                help="Actor ve Critic ağlarının gizli katman nöron sayısı. "
+                     "TD3 deterministik politikayla çalışır; derin ağ stabil kalabilir.",
+            )
+            hp["noise_clip"] = st.slider(
+                "Gürültü kırpma (noise_clip)",
+                min_value=0.0, max_value=1.0,
+                value=TD3Config.noise_clip,
+                step=0.1,
+                key=f"td3_noise_clip_{step_days}",
+                help="Hedef-politika gürültüsünün kırpma sınırı. "
+                     "Büyük değer daha geniş hedef düzgünleştirme sağlar.",
+            )
+            hp["policy_delay"] = st.slider(
+                "Politika güncelleme gecikmesi",
+                min_value=1, max_value=4,
+                value=TD3Config.policy_delay,
+                step=1,
+                key=f"td3_policy_delay_{step_days}",
+                help="Actor her kaç Critic güncellemesinde bir güncellenir (TD3 gecikmeli politika). "
+                     "2 = varsayılan; artırmak eğitimi stabilleştirir.",
+            )
+            hp["buffer_size"] = st.select_slider(
+                "Replay buffer boyutu",
+                options=[10_000, 50_000, 100_000],
+                value=TD3Config.buffer_size,
+                key=f"td3_buffer_{step_days}",
+                help="Off-policy deneyim belleğinin maksimum kapasitesi.",
+            )
 
     # 💾 Model kalıcılığı (PDF §11 + N11): eğitilmiş modeli diske kaydet / diskten yükle.
     # İsimli kayıt: kullanıcı ad girer → named_model_path(name).pt olarak kaydedilir.
@@ -6869,7 +7126,7 @@ from ui.services import train_generator
 from ui.state import _agent_key
 from utils.metrics import training_diagnostics
 from utils.portfolio_tl import (
-    build_portfolio_table, compute_tl_series, step_rows_for_training,
+    build_portfolio_table, build_trade_log, compute_tl_series, step_rows_for_training,
 )
 
 # Grafik/tablo serilestirme her N iterde bir (performans — kesif bulgusu:
@@ -7332,6 +7589,18 @@ def _render_episode_browser(key, algo, initial_capital):
         return
     st.markdown("---")
     st.markdown("### 🔎 Episode incele (her iterasyonun detayı)")
+    _noisy_mode = st.session_state.get("train_noisy_episodes", True)
+    if _noisy_mode:
+        st.caption(
+            "Her episode = train verisinin noise'lu YENİ versiyonu (anti-ezber modu açık). "
+            "Episode 0 = orijinal veri; Episode 1..N = farklı tohumlu UNIFORM-noise'lu veri setleri. "
+            "Adım = bir BIST seansı (karar günü)."
+        )
+    else:
+        st.caption(
+            "Anti-ezber modu kapalı — tüm episodlar aynı veri üzerinde getiri-seviyesi "
+            "adım-noise ile eğitildi. Adım = bir BIST seansı (karar günü)."
+        )
     n = len(snaps)
 
     def _label(i):
@@ -7369,6 +7638,54 @@ def _render_episode_browser(key, algo, initial_capital):
         ph_tl_table=ph_table, ph_tl_port=ph_port, ph_bankrupt=ph_bank,
         seq=f"browse_{key}_{sel}",
     )
+
+    # ---- Adım kaydırıcısı: seçilen episode'da HER adımdaki aksiyon/holdings/nakit ----
+    if int(s["step_count"]) > 1:
+        st.markdown("**📋 Adım-adım detay** — bu episode'da seçilen adımda hangi aksiyon, "
+                    "hangi hisseler tutuluyor, portföy ve nakit durumu:")
+        _t_start = int(s["t"]) - int(s["step_count"])
+        _tx = [float(rt.get("tx_cost", 0.0)) for rt in s["reward_terms_history"]]
+        _ep_tl = compute_tl_series(
+            nav_hist=s["nav_history"], weight_hist=s["weight_history"],
+            prices_matrix=shared["prices"], initial_capital=initial_capital,
+            tx_cost_rates=_tx, t_start=_t_start,
+        )
+        if _ep_tl:
+            _maxk = len(_ep_tl) - 1
+            step_k = st.slider("Adım seç", 0, _maxk, _maxk, key=f"ep_browse_step_{key}_{sel}")
+            snap_k = _ep_tl[step_k]
+            _acts = s["actions"]
+            if algo == "DQN" and step_k < len(_acts):
+                _a = int(_acts[step_k])
+                act_name = ACTION_NAMES[_a] if 0 <= _a < len(ACTION_NAMES) else str(_a)
+            elif algo in ("PPO", "SAC", "TD3"):
+                act_name = f"{algo} (sürekli aksiyon)"
+            else:
+                act_name = "—"
+            _di = _t_start + 1 + step_k
+            dstr = (str(pd.Timestamp(shared["dates"][_di]).date())
+                    if 0 <= _di < len(shared["dates"]) else "")
+            sc = st.columns(6)
+            sc[0].metric("Adım", f"{step_k + 1} / {int(s['step_count'])}")
+            sc[1].metric("Tarih", dstr)
+            sc[2].metric("Aksiyon", act_name)
+            sc[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+            sc[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+            sc[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+            # w_prev = adımdan ÖNCEKİ ağırlık (weight_history[step_k]); 0'da başlangıç=nakit.
+            w_prev_k = s["weight_history"][step_k] if step_k < len(s["weight_history"]) else None
+            df_port_k = build_portfolio_table(BIST28, snap_k, include_cash=True, w_prev=w_prev_k)
+            df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+            pcol, tcol = st.columns([1.4, 1])
+            with pcol:
+                st.caption("Portföy — bu adımda tutulan hisseler (ağırlık / lot / TL)")
+                st.dataframe(df_port_k, hide_index=True, width='stretch', height=320)
+            with tcol:
+                st.caption("Bu adımın işlemleri (al / sat)")
+                if df_trade_k.empty:
+                    st.info("Bu adımda işlem yok (ağırlıklar korunmuş).")
+                else:
+                    st.dataframe(df_trade_k, hide_index=True, width='stretch', height=280)
 
 ```
 
@@ -7429,11 +7746,12 @@ def tab_test(algo: str, step_days: int, adaptive: bool):
     st.session_state.setdefault("noise_episodes", {})
     with st.expander("🎲 Gürültü-artırımlı çoklu episode (robustluk testi)", expanded=False):
         st.caption(
-            "Eğitilmiş ajan **tüm test aralığı boyunca** sırayla birden çok episode'da "
-            "koşturulur. Episode 0 = orijinal seri; sonraki episode'lar orijinal hisse "
-            "getirilerine eklenen Gauss gürültüsüyle üretilen **yeni patikalardır** "
-            "(anti-ezber). Düşük dağılım = ajan dayanıklı; yüksek dağılım = tek tarihsel "
-            "yola aşırı uyum riski."
+            "Episode'lar orijinal fiyatlara **UNIFORM noise** eklenmiş YENİ serilerdir "
+            "(1. episode orijinal); ajan farklı veri görür (anti-ezber). "
+            "Feature'lar noisy fiyat üzerinden yeniden hesaplanır — ajan gerçekten farklı "
+            "durum vektörü alır (getiri-seviyesi Gauss'tan farklı: fiyat-seviyesi uniform). "
+            "Adım kaydırıcısıyla her episode'da her adımdaki aksiyon/holdings/nakit görülür. "
+            "Düşük dağılım = ajan dayanıklı; yüksek dağılım = tek tarihsel yola aşırı uyum riski."
         )
         cc = st.columns(3)
         n_ep = cc[0].slider("Episode sayısı", 2, 30, 6, key="noise_n_ep")
@@ -7502,6 +7820,43 @@ def tab_test(algo: str, step_days: int, adaptive: bool):
                     initial_capital=cap)
                 st.caption(f"{_ep_lbl[sel]} — {len(df_detail)} adım (tüm veri tarih aralığı)")
                 st.dataframe(df_detail, hide_index=True, use_container_width=True, height=420)
+
+                # ---- Adım kaydırıcısı: seçilen episode'da per-step detay ----
+                st.markdown("---")
+                st.markdown("**Adım kaydırıcısı** — seçilen episode'da her adımdaki "
+                            "aksiyon / holdings / nakit detayı:")
+                ep_max_step = len(ep_tr) - 1
+                step_k = st.slider(
+                    "Adım seç", 0, ep_max_step, 0,
+                    key=f"noise_ep_step_slider_{sel}_{_ep_lbl[sel][:20]}"
+                )
+                snap_k = snaps[step_k]
+                step_cols = st.columns(6)
+                step_cols[0].metric("Adım", f"{step_k + 1} / {ep_max_step + 1}")
+                step_cols[1].metric("Tarih", ep_tr[step_k]["date"])
+                step_cols[2].metric("Aksiyon", ep_tr[step_k]["action_name"])
+                step_cols[3].metric("Portföy TL", f"{snap_k['portfolio_tl']:,.0f} ₺")
+                step_cols[4].metric("Nakit TL", f"{snap_k['cash_tl']:,.0f} ₺")
+                step_cols[5].metric("Adım P&L", f"{snap_k['step_pnl_tl']:+,.0f} ₺")
+
+                # Holdings tablosu
+                w_prev_k = ep_tr[step_k - 1]["weights_before"] if step_k > 0 else None
+                df_port_k = build_portfolio_table(
+                    BIST28, snap_k, include_cash=True, w_prev=w_prev_k
+                )
+                port_col, trade_col = st.columns([1.3, 1])
+                with port_col:
+                    st.caption("Portföy (hisse / durum / agirlik / TL)")
+                    st.dataframe(df_port_k, hide_index=True,
+                                 use_container_width=True, height=320)
+                with trade_col:
+                    st.caption("Bu adimin islemleri (alim/satim)")
+                    df_trade_k = build_trade_log(BIST28, snap_k, threshold_tl=1.0)
+                    if df_trade_k.empty:
+                        st.info("Bu adımda işlem yok.")
+                    else:
+                        st.dataframe(df_trade_k, hide_index=True,
+                                     use_container_width=True, height=280)
 
     max_step = len(trace) - 1
     # ---- Oynatma kontrolleri ----

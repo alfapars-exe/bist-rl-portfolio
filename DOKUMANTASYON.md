@@ -582,7 +582,9 @@ iki ardışık `python main.py` çalıştırmasının tüm metriklerde maksimum 
 > **Önemli not — V7 referans ölçümü:** Aşağıdaki tablo `tests/golden/v7_metrics_baseline.csv`
 > kaynaklı bir **V7 iterasyon-referansının** anlık görüntüsüdür. V8 anti-ezber slippage terimi
 > (`σ=0.001`, yalnız eğitimde) DQN davranışını köklü biçimde değiştirdi; reprodüksiyon
-> düzeltmesi sonrası geçerli DQN sonucu FinalNAV 1.279, CAGR +9.4% (§8.3).
+> düzeltmesi ve v12 re-baseline sonrası geçerli DQN sonucu **NAV≈0.01, CAGR≈−96.7%,
+> Sharpe≈−6.59 (pratik iflas)** — bkz. §8.3 kanonik tablo. "FinalNAV 1.279, CAGR +9.4%"
+> ifadesi V7/V8 dönem artefaktıdır; v12 re-baseline ile geçersizdir.
 > V7 tarihi silinmemeli — meşru iterasyon kaydıdır; fakat **geçerli (GEÇERLİ) sonuçlar §8.3'te
 > verilmektedir**. Bu tablo yalnızca state/reward geliştirme döngüsünün ölçülen yönünü gösterir.
 
@@ -1004,6 +1006,17 @@ DQN aksiyon dağılımı:
 
 ## 11. Tartışma (Rapor §9.9)
 
+> **PDF §9.9 — 6 Soru Eşleme Tablosu (izlenebilirlik)**
+>
+> | # | PDF §9.9 sorusu | Bu bölümdeki karşılık |
+> |---|---|---|
+> | (1) | İlk state tasarımı neden yetersizdi? | Aşağıda **(1)** |
+> | (2) | İlk reward tasarımı neden yetersizdi? | Aşağıda **(2)** |
+> | (3) | En kritik düzeltme ne oldu? | Aşağıda **(3)** |
+> | (4) | Ajan hangi davranışı öğrendi? | Aşağıda **(4)** |
+> | (5) | Ajan nerede başarısız kaldı? | Aşağıda **(5)** |
+> | (6) | Problem daha karmaşık olsaydı ne eklemek gerekirdi? | Aşağıda **(6)** |
+
 > **Ana bulgu (dürüst tez, v12 re-baseline; seed=42; §8.3 sayısal dayanak):**
 > TD3 (Sharpe 2.203 / NAV 2.728) ve SAC (Sharpe 2.174 / NAV 2.729) EqualWeight
 > (Sharpe 2.185 / NAV 2.830) ile risk-ayarlıda başa baş; MeanVar en yüksek NAV (2.929).
@@ -1011,16 +1024,16 @@ DQN aksiyon dağılımı:
 > DQN sonucudur, gizlenmez.** Eski V11 sayıları (SAC 5.595 vs BuyHold 5.751 vb.)
 > v12 re-baseline ile geçersizdir. V11 metodoloji düzeltmeleri (§8.9) korunmaktadır.
 
-- **İlk state tasarımı neden yetersizdi?** 5 teknik öznitelik tek-ölçekli sinyal veriyordu;
+- **(1) İlk state tasarımı neden yetersizdi?** 5 teknik öznitelik tek-ölçekli sinyal veriyordu;
   çoklu-ölçek trend/volatilite ve ileri-görü (forecast) olmadan ajan rejim ayrımı yapamıyordu.
-- **İlk reward tasarımı neden yetersizdi?** Sabit η/λ/τ, volatil rejimde ya aşırı ya yetersiz
+- **(2) İlk reward tasarımı neden yetersizdi?** Sabit η/λ/τ, volatil rejimde ya aşırı ya yetersiz
   cezalandırıyordu; risk-ayarlı (Sharpe türevi) terim yoktu → ajan ödül uğruna riskli davranıyordu.
-- **En kritik düzeltme?** İki taşıyıcı: (1) **adaptif ödül şekillendirme + Diferansiyel Sharpe**
+- **(3) En kritik düzeltme?** İki taşıyıcı: (1) **adaptif ödül şekillendirme + Diferansiyel Sharpe**
   (rejime-duyarlı, risk-ayarlı ödül), (2) **CNN-LSTM forecast özelliği** (predict-then-optimize) —
   ablation forecast'ı yalnız DQN/SAC'a vermeyi gerektirdi.
-- **Ajan hangi davranışı öğrendi?** Düşük-turnover, düşüş-bilinçli tahsis; volatil dönemde
+- **(4) Ajan hangi davranışı öğrendi?** Düşük-turnover, düşüş-bilinçli tahsis; volatil dönemde
   nakit/ters-volatilite ağırlıklı, sakin dönemde momentum ağırlıklı davranış.
-- **Ajan nerede başarısız kaldı?** Somut bulgular (`results/metrics.csv`, §8.1):
+- **(5) Ajan nerede başarısız kaldı?** Somut bulgular (`results/metrics.csv`, §8.1):
   - **DQN v12'de pratik iflas:** NAV≈0.01, Sharpe≈−6.59 — bu v12 modelinin DQN sonucudur,
     gizlenmez. V11 çoklu-seed (CV ~%45, Sharpe 0.903±0.408) DQN'in yapısal kararsızlığını
     gösteriyordu; v12'de bu kararsızlık daha da belirgin biçimde tezahür etti. Ayrık şablon
@@ -1063,7 +1076,7 @@ DQN aksiyon dağılımı:
   (DeMiguel et al. 2009: naif 1/N çeşitlendirmeyi ham Sharpe'ta yenmek zordur). **Monte-Carlo stres**
   (blok bootstrap + Student-t ağır kuyruk) en iyi RL ajanın 1-yıl ileri VaR/CVaR + felaket olasılığını
   niceler.
-- **Problem daha karmaşık olsaydı ne eklenirdi?** Bu projede zaten eklenenler: **makro rejim** (V6),
+- **(6) Problem daha karmaşık olsaydı ne eklenirdi?** Bu projede zaten eklenenler: **makro rejim** (V6),
   **rejim-amplified CVaR** (V7), **TD3** (sürekli-deterministik ajan), **fiyat gürültüsü** (V8),
   **nakit risksiz faizi** (V10, `cash_annual_rate=0.40`), **adil-karşılaştırma metodolojisi** (V11,
   8 düzeltme), ve **titizlik katmanı** — Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres +
@@ -1104,7 +1117,11 @@ pytest -m "not slow"            # hızlı yerel döngü (UI smoke hariç)
 
 ### Teslim bileşenleri
 - **Final raporu:** Bu `DOKUMANTASYON.md` (PDF §9 başlıklarıyla hizalı) çıktısı.
-- **Python kodları:** Tüm kaynak `kod/` altında; rapor ekine eklenir.
+- **Python kodları (PDF §10 — kod eki):** Tüm kaynak kod `KOD_EKI.md` dosyasında
+  derlenmiştir (38 kaynak dosya, ~7893 satır; `python scripts/build_code_appendix.py`
+  ile yeniden üretilir). Teslim PDF'i oluşturulurken `DOKUMANTASYON.md` ve `KOD_EKI.md`
+  **tek belge olarak birleştirilir**; kod eki raporun SONUNA ek olarak iliştirilerek
+  PDF §10 zorunluluğu karşılanır.
 
 ---
 

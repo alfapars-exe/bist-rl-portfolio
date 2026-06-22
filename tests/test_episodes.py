@@ -124,3 +124,33 @@ def test_force_price_noise_flag_golden_safe():
     # force=True: eval'de gurultu ACIK (yeni episode yolu)
     e_force = _eval_env(px, price_noise_std=0.05, force_price_noise=True)
     assert e_force._noise_active is True
+
+
+# ------------------------------------------- per-episode detay tablosu (trace)
+def test_run_trace_loop_light_produces_detail_table():
+    """Per-episode adim-adim detay tablosu: _run_trace_loop(light=True) -> trace ->
+    step_rows_for_training ekrandaki tabloyu (Gün#/Tarih/Aksiyon/TL/P&L/Komisyon/turnover/
+    Tutulan hisse) uretir. Satir sayisi = adim sayisi (tam aralik, sirali); DQN aksiyon
+    adi dolu; light modda state/q_values atlanir (bellek)."""
+    from ui.services import _compute_test_tl_snaps, _run_trace_loop
+    from utils.portfolio_tl import step_rows_for_training
+    px = _market()
+    feats = TrainScaler().fit(add_features(px)).transform(add_features(px))
+    env = DiscretePortfolioEnv(px, feats, horizon="short", adaptive=True,
+                               max_steps=10_000, random_start=False, seed=42)
+    trace = _run_trace_loop(env, _RandomAgent(seed=0), "DQN", light=True)
+    assert len(trace) > 50
+    assert trace[0]["state"] is None and trace[0]["q_values"] is None      # light: bellek
+    assert {"nav", "weights_after", "prices_t", "reward_terms", "action_name"} <= set(trace[0])
+    snaps = _compute_test_tl_snaps(trace, 100_000.0)
+    df = step_rows_for_training(
+        snaps, [t["date"] for t in trace],
+        action_names=[t["action_name"] for t in trace],
+        action_indices=[t["action_idx"] for t in trace],
+        reward_terms_list=[t["reward_terms"] for t in trace],
+        initial_capital=100_000.0)
+    assert len(df) == len(trace)                                           # satir = adim
+    for col in ["Gün #", "Tarih", "Aksiyon", "Nakit TL", "Portföy TL", "Adım P&L",
+                "Kümülatif P&L", "Komisyon TL", "Δ turnover", "Tutulan hisse"]:
+        assert col in df.columns
+    assert df["Aksiyon"].iloc[0] != ""                                     # DQN aksiyon adi dolu

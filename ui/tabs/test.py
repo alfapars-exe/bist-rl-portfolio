@@ -18,6 +18,7 @@ from core.episodes import summarize_episodes
 from ui.state import _agent_key, env_rebalance_hint
 from utils.portfolio_tl import (
     build_cumulative_trade_log, build_portfolio_table, build_trade_log,
+    step_rows_for_training,
 )
 
 
@@ -103,6 +104,25 @@ def tab_test(algo: str, step_days: int, adaptive: bool):
             mc[1].metric("Final NAV std", f"{summ['final_nav_std']:.4f}")
             mc[2].metric("Ort. getiri", f"{summ['total_return_mean'] * 100:+.2f}%")
             mc[3].metric("Zarar olasılığı", f"{summ['prob_loss'] * 100:.0f}%")
+
+            # ---- Per-episode adım-adım detay tablosu (ekrandaki tam tablo) ----
+            st.markdown("**📋 Episode detay tablosu (adım-adım)** — episode'lar SIRAYLA "
+                        "koşar; biri tam bitmeden (N gün → N adım) diğeri başlamaz.")
+            _ep_lbl = [("Orijinal (gürültüsüz)" if r["episode"] == 0
+                        else f"Episode {r['episode']} · σ={r['noise_std']:.3f}") for r in eps]
+            sel = st.selectbox("Episode seç (detay tablosu)", range(len(eps)),
+                               format_func=lambda i: _ep_lbl[i], key="noise_ep_detail_sel")
+            ep_tr = eps[sel].get("trace") or []
+            if ep_tr:
+                snaps = _compute_test_tl_snaps(ep_tr, cap)
+                df_detail = step_rows_for_training(
+                    snaps, [t["date"] for t in ep_tr],   # düz list (str); np.array -> numpy.str_ pd.Timestamp hatasi
+                    action_names=[t["action_name"] for t in ep_tr],
+                    action_indices=[t["action_idx"] for t in ep_tr],
+                    reward_terms_list=[t["reward_terms"] for t in ep_tr],
+                    initial_capital=cap)
+                st.caption(f"{_ep_lbl[sel]} — {len(df_detail)} adım (tüm veri tarih aralığı)")
+                st.dataframe(df_detail, hide_index=True, use_container_width=True, height=420)
 
     max_step = len(trace) - 1
     # ---- Oynatma kontrolleri ----

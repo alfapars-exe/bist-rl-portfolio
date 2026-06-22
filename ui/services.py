@@ -16,7 +16,7 @@ import streamlit as st
 from agents.base import SupportsQValues
 from config import DEFAULTS, SEED, ForecastConfig, MacroConfig, validate_train_range
 from core.factory import build_agent, build_env
-from core.episodes import evaluate_noise_episodes
+from core.episodes import episode_metrics
 from core.persistence import (load_agent, model_path, named_model_path,
                               read_meta, save_agent, MODELS_DIR as _MODELS_DIR)
 from core.trainer import train as train_loop
@@ -282,23 +282,33 @@ def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_ste
 
 def evaluate_noise_episodes_ui(agent, algo: str, step_days: int, adaptive: bool, *,
                                n_episodes: int = 5, noise_std: float = 0.01) -> list:
-    """Egitilmis ajani test araligi boyunca SIRAYLA birden cok episode'da kosturur.
+    """Egitilmis ajani test araligi boyunca SIRAYLA birden cok episode'da kosturur;
+    HER episode icin tam adim-adim trace toplar (Test sekmesindeki detay tablosu icin).
 
-    Episode 0 = orijinal (gurultusuz) referans — normal testle AYNI kurulum
-    (_make_env eval yolu: context penceresi + start_index dahil) -> episode 0
-    normal test sonucuyla ortusur. Episode 1..N = ayni test serisine getiri-
-    seviyesinde Gauss gurultusu (force_price_noise; episode basina FARKLI tohum)
-    eklenmis YENI patikalar (anti-ezber). Her episode TUM test araligini kapsar.
+    Episode 0 = orijinal (gurultusuz) referans — normal testle AYNI kurulum (_make_env
+    eval yolu: context penceresi + start_index) -> episode 0 normal test sonucuyla
+    ortusur. Episode 1..N = ayni test serisine getiri-seviyesinde Gauss gurultusu
+    (force_price_noise; episode basina FARKLI tohum) eklenmis YENI patikalar (anti-ezber).
+    Her episode TUM veri tarih araligini kapsar ve SIRAYLA kosar — biri tam BITMEDEN
+    (N gun varsa N adim) digeri BASLAMAZ. Donen her episode dict'i: episode, noise_std,
+    steps, nav, dates, trace (adim-adim), + final_nav/total_return/max_drawdown/sharpe.
     """
-    def make_env(episode: int, noise_std: float, seed: int):
-        return _make_env(False, algo, step_days, adaptive, max_steps=10_000,
-                         force_noise=(noise_std > 0.0), noise_eval=noise_std,
-                         seed_override=seed)
-
-    return evaluate_noise_episodes(
-        make_env, agent, n_episodes=int(n_episodes),
-        noise_std=float(noise_std), seed=SEED, include_original=True,
-    )
+    results = []
+    for i in range(int(n_episodes)):
+        nstd = 0.0 if i == 0 else float(noise_std)
+        env = _make_env(False, algo, step_days, adaptive, max_steps=10_000,
+                        force_noise=(nstd > 0.0), noise_eval=nstd, seed_override=SEED + i)
+        # Tam aralik, adim-adim trace (tekli-test ile AYNI dongey reuse eder) — episode
+        # done'a (veri sonu) kadar kosar; sonraki episode ancak bu bittikten sonra baslar.
+        trace = _run_trace_loop(env, agent, algo, light=True)
+        nav = np.asarray(env.nav_history, dtype=float)
+        rets = np.asarray(getattr(env, "ret_history", []), dtype=float)
+        results.append(dict(
+            episode=i, noise_std=nstd, steps=len(trace),
+            nav=nav, dates=[t["date"] for t in trace], trace=trace,
+            **episode_metrics(nav, rets),
+        ))
+    return results
 
 
 def _make_agent(algo: str, state_dim: int, action_dim: int, hp: dict):
@@ -345,15 +355,23 @@ def train_generator(algo: str, step_days: int, adaptive: bool, hp: dict,
 # =====================================================================
 def evaluate_with_trace(agent, algo: str, step_days: int, adaptive: bool) -> list:
     env = _make_env(False, algo, step_days, adaptive, max_steps=10_000)
+    return _run_trace_loop(env, agent, algo)
+
+
+def _run_trace_loop(env, agent, algo: str, light: bool = False) -> list:
+    """Bir env'i adim-adim kosturup TAM trace dondurur (ORTAK cekirdek: tekli test
+    playback'i + gurultu-artirimli per-episode tablo ayni dongey reuse eder). Episode
+    veri sonuna (done) kadar SIRAYLA kosar. light=True -> 'state'/'q_values' atlanir
+    (cok-episode bellek; detay tablosu icin gereksiz). light=False -> tam trace."""
     s, _ = env.reset()
     trace = []
     done = trunc = False
     # P5 (ISP): hasattr yoklamasi yerine resmi Protocol — ayni semantik, acik niyet.
-    has_q = isinstance(agent, SupportsQValues)  # yalnizca DQN introspeksiyonu sunar
+    has_q = (not light) and isinstance(agent, SupportsQValues)  # yalnizca DQN introspeksiyonu
     while not (done or trunc):
         decision_date = env.dates[env.t]
         weights_before = env.w.copy()
-        state_snapshot = s.copy()
+        state_snapshot = None if light else s.copy()
 
         q_vals = agent.q_values(s) if has_q else None
         a = agent.act_eval(s)                       # ajan-agnostik (BaseAgent.act_eval)

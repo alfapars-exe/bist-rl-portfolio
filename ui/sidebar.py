@@ -28,157 +28,24 @@ _LBL_BATCH = "Batch"
 
 
 def _sidebar_reward_editor(preset: dict):
-    """⚖️ Ödül & Ceza katsayıları düzenleyicisi — session_state.reward_cfg'i günceller.
+    """⚖️ Ödül & Ceza — sidebar slim stub.
 
-    None/boş değerler env'in preset default'larına düşer. Kullanıcı 'Preset'e dön'
-    ile tüm override'ları sıfırlayabilir.
+    Tüm detaylı editör 'Ödül & Ceza Tasarımı' sekmesine taşındı.
+    Sidebar'da yalnız bilgi notu + reset butonu bırakıldı; böylece
+    iki ayrı widget seti aynı reward_cfg key'lerini desync etmez.
     """
-    cfg = st.session_state.setdefault("reward_cfg", {})
     with st.sidebar.expander("⚖️ Ödül & Ceza Katsayıları", expanded=False):
-        st.caption("Ödül = log-getiri − η·turnover − λ·max(0, DD−τ) − iflas cezası")
-
-        if st.button("↺ Preset'e dön (tüm override'ları sıfırla)",
-                     key="reset_reward_cfg", width='stretch'):
+        st.info(
+            "⚖️ Ödül/ceza ayarları artık **'Ödül & Ceza Tasarımı'** sekmesinde.\n\n"
+            "Tüm katsayıları, preset kaydet/yükle ve canlı önizlemeyi oradan yönetin."
+        )
+        if st.button(
+            "↺ Preset'e dön (tüm override'ları sıfırla)",
+            key="reset_reward_cfg",
+            width="stretch",
+        ):
             st.session_state.reward_cfg = {}
             st.rerun()
-
-        st.markdown("**Ödül terimleri** (vade preset'i default olarak)")
-        cfg["eta_base"] = st.number_input(
-            "η — İşlem (turnover) maliyeti katsayısı",
-            value=float(cfg.get("eta_base", preset["eta"])),
-            min_value=0.0, max_value=0.1, step=0.0001, format="%.4f",
-            help="Ağırlık değişiminin L1 normu bu katsayı ile çarpılıp ödülden düşülür "
-                 "(ve NAV'ı azaltır). Büyütünce ajan daha az işlem yapar.",
-        )
-        cfg["lambda_base"] = st.number_input(
-            "λ — Drawdown (DD) ceza katsayısı",
-            value=float(cfg.get("lambda_base", preset["lam"])),
-            min_value=0.0, max_value=10.0, step=0.05, format="%.3f",
-            help="max(0, DD − τ) bu katsayı ile çarpılıp ödülden düşülür.",
-        )
-        cfg["tau_base"] = st.number_input(
-            "τ — DD eşiği (oran)",
-            value=float(cfg.get("tau_base", preset["tau"])),
-            min_value=0.0, max_value=0.5, step=0.005, format="%.3f",
-            help="Tepe-den DD > τ olduğunda ceza başlar. 0.05 = %5'lik DD toleransı.",
-        )
-
-        st.markdown("**İflas (simülasyonu durdurma)**")
-        cfg["bankruptcy_nav"] = st.number_input(
-            "İflas NAV eşiği",
-            value=float(cfg.get("bankruptcy_nav", EnvConfig.bankruptcy_nav)),
-            min_value=0.0, max_value=0.9, step=0.01, format="%.2f",
-            help="NAV bu eşiğin altına düşerse episod iflas olarak sonlandırılır. "
-                 "Örn. 0.01 = başlangıç sermayesinin %1'ine inmek.",
-        )
-        cfg["bankruptcy_penalty"] = st.number_input(
-            "İflas ek ceza değeri",
-            value=float(cfg.get("bankruptcy_penalty", EnvConfig.bankruptcy_penalty)),
-            min_value=0.0, max_value=1000.0, step=1.0, format="%.1f",
-            help="İflas anında toplam ödüle eklenen negatif terim. Log-ölçeğinde büyük değer "
-                 "(normal adım ödülü ~±0.01). Ajan iflasa gitmemeyi öğrenir.",
-        )
-
-        st.markdown("**Adaptif şekillendirici hedefleri**")
-        cfg["vol_target"] = st.number_input(
-            "vol_target (hedef realize vol)",
-            value=float(cfg.get("vol_target", EnvConfig.vol_target)),
-            min_value=0.0001, max_value=0.5, step=0.001, format="%.4f",
-            help="Adaptif mod açıkken λ ve τ bu hedefe göre ölçeklenir.",
-        )
-        cfg["turnover_target"] = st.number_input(
-            "turnover_target (hedef turnover)",
-            value=float(cfg.get("turnover_target", EnvConfig.turnover_target)),
-            min_value=0.001, max_value=1.0, step=0.005, format="%.3f",
-            help="Adaptif mod açıkken η bu hedefe göre ölçeklenir.",
-        )
-        cfg["ema_alpha"] = st.slider(
-            "EMA α (adaptif hafıza)",
-            min_value=0.001, max_value=0.5, value=float(cfg.get("ema_alpha", EnvConfig.ema_alpha)),
-            step=0.005, format="%.3f",
-            help="Büyük α = daha hızlı uyum, küçük α = daha stabil.",
-        )
-
-        st.markdown("**DSR & CVaR risk terimleri**")
-        cfg["w_dsr"] = st.number_input(
-            "w_dsr — Diferansiyel Sharpe ağırlığı",
-            value=float(cfg.get("w_dsr", _rc.w_dsr)),
-            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
-            help="DSR terimi ağırlığı: online risk-ayarlı Sharpe gradyanı. "
-                 "0 = kapalı, 0.05 = hafif etkin.",
-        )
-        cfg["w_cvar"] = st.number_input(
-            "w_cvar — CVaR kuyruk cezası ağırlığı",
-            value=float(cfg.get("w_cvar", _rc.w_cvar)),
-            min_value=0.0, max_value=0.2, step=0.005, format="%.3f",
-            help="CVaR (Conditional Value at Risk) ceza ağırlığı. "
-                 "0 = kapalı; kriz dönemlerinde regime_beta ile amplify edilir.",
-        )
-        cfg["dsr_eta"] = st.number_input(
-            "dsr_eta — DSR EWMA oranı",
-            value=float(cfg.get("dsr_eta", _rc.dsr_eta)),
-            min_value=0.001, max_value=0.1, step=0.001, format="%.3f",
-            help="Diferansiyel Sharpe hesabındaki EWMA pencere oranı. "
-                 "Küçük = yavaş adaptasyon, büyük = hızlı.",
-        )
-        cfg["cvar_alpha"] = st.number_input(
-            "cvar_alpha — CVaR kuyruk yüzdesi",
-            value=float(cfg.get("cvar_alpha", _rc.cvar_alpha)),
-            min_value=0.01, max_value=0.2, step=0.005, format="%.3f",
-            help="CVaR için kuyruk yüzdesi (α). 0.05 = en kötü %5'lik getiri ortalaması.",
-        )
-        cfg["regime_beta"] = st.number_input(
-            "regime_beta — Kriz amplifikasyon gücü",
-            value=float(cfg.get("regime_beta", _rc.regime_beta)),
-            min_value=0.0, max_value=5.0, step=0.1, format="%.2f",
-            help="CVaR cezasını kriz rejiminde büyüten çarpan. "
-                 "0 = rejim bağımsız, 5 = kriz anında 6× ceza.",
-        )
-        cfg["cvar_amp"] = st.number_input(
-            "cvar_amp — Rejim amplifikasyon üsteli",
-            value=float(cfg.get("cvar_amp", _rc.cvar_amp)),
-            min_value=0.5, max_value=3.0, step=0.1, format="%.2f",
-            help="κ = w_cvar·(1 + regime_beta·max(0,regime))^cvar_amp formülündeki üstel. "
-                 "1.0 = doğrusal amplifikasyon.",
-        )
-
-        st.caption("⚠️ Bu ayarları değiştirdikten sonra ajanları **yeniden eğitmek** "
-                   "anlamlı olur; eski ajan farklı ortamda öğrenilmiştir.")
-
-    with st.sidebar.expander("🧪 Deneysel ödül terimleri (opt-in, varsayılan kapalı)",
-                             expanded=False):
-        st.caption(
-            "Bu terimler varsayılan 0 ile tamamen kapalıdır — aktif etmek için "
-            "sıfırdan farklı değer girin. Yeni ajan eğitmeden etkisi görülmez."
-        )
-        cfg["w_gain"] = st.number_input(
-            "w_gain — Kazanç-çarpanı ödülü ağırlığı",
-            value=float(cfg.get("w_gain", _rc.w_gain)),
-            min_value=0.0, max_value=1.0, step=0.05, format="%.2f",
-            help="NAV gain_floor eşiğini aştığında verilen ödül ağırlığı. "
-                 "2× → w_gain ödül, 3× → 2·w_gain ödül. 0 = kapalı.",
-        )
-        cfg["gain_floor"] = st.number_input(
-            "gain_floor — Ödül eşiği (NAV)",
-            value=float(cfg.get("gain_floor", _rc.gain_floor)),
-            min_value=1.0, max_value=2.0, step=0.05, format="%.2f",
-            help="w_gain ödülünün başlayacağı NAV çarpanı. "
-                 "1.0 = başlangıçtan itibaren, 1.5 = %50 büyüme sonrası.",
-        )
-        cfg["w_gain_speed"] = st.number_input(
-            "w_gain_speed — Hız bonusu ağırlığı",
-            value=float(cfg.get("w_gain_speed", _rc.w_gain_speed)),
-            min_value=0.0, max_value=2.0, step=0.05, format="%.2f",
-            help="Erken büyümeye daha yüksek ödül veren hız faktörü. "
-                 "0 = zamandan bağımsız, pozitif = erken kazanç daha değerli.",
-        )
-        cfg["w_ruin_timing"] = st.number_input(
-            "w_ruin_timing — İflas-timing ceza ağırlığı",
-            value=float(cfg.get("w_ruin_timing", _rc.w_ruin_timing)),
-            min_value=0.0, max_value=3.0, step=0.1, format="%.2f",
-            help="Erken iflas anına daha sert ceza uygular. "
-                 "0 = düz (flat) iflas_penalty, pozitif = erken iflasa üstel ceza.",
-        )
 
 
 def sidebar_controls():

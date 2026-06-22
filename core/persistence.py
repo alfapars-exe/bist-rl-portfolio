@@ -36,6 +36,77 @@ FORMAT = 2
 # Tum kaydedilmis modellerin bulundugu dizin (proje koku / models/).
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 
+# Kullanici tarafindan kaydedilen odul preset JSON dosyalari.
+REWARD_PRESETS_DIR = Path(__file__).resolve().parent.parent / "reward_presets"
+
+
+def reward_preset_path(name: str) -> Path:
+    """Odul preset dosya yolu: reward_presets/{guvenli_isim}.json
+
+    Sanitize: harf/rakam/_/- disini _ ile degistir; bos ise 'preset' kullanilir.
+    """
+    safe = re.sub(r"[^\w\-]", "_", name.strip()) or "preset"
+    return REWARD_PRESETS_DIR / f"{safe}.json"
+
+
+def save_reward_preset(reward_cfg: dict, name: str, description: str = "") -> str:
+    """Odul preset'ini JSON'a yazar; yolu doner.
+
+    Format: {name, description, saved_at, format:1, reward_cfg}.
+    REWARD_PRESETS_DIR otomatik olusturulur.
+    """
+    import json
+    path = reward_preset_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "name": name,
+        "description": description,
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "format": 1,
+        "reward_cfg": dict(reward_cfg),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path)
+
+
+def load_reward_preset(name: str) -> "dict | None":
+    """Odul preset'ini yukler; reward_cfg dict doner (yoksa None)."""
+    import json
+    path = reward_preset_path(name)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return dict(data.get("reward_cfg", {}))
+    except Exception:
+        return None
+
+
+def list_reward_presets() -> "list[dict]":
+    """Tum kayitli odul preset'lerini listeler; saved_at'e gore yeni->eski sirali.
+
+    Her eleman: {path, name, description, saved_at, reward_cfg}.
+    Bozuk JSON dosyalari sessizce atlanir.
+    """
+    import json
+    results = []
+    if not REWARD_PRESETS_DIR.exists():
+        return results
+    for fpath in REWARD_PRESETS_DIR.glob("*.json"):
+        try:
+            data = json.loads(fpath.read_text(encoding="utf-8"))
+            results.append({
+                "path": str(fpath),
+                "name": data.get("name", fpath.stem),
+                "description": data.get("description", ""),
+                "saved_at": data.get("saved_at", ""),
+                "reward_cfg": dict(data.get("reward_cfg", {})),
+            })
+        except Exception:
+            continue
+    results.sort(key=lambda x: x["saved_at"], reverse=True)
+    return results
+
 
 def model_path(algo: str, horizon: str | int = "medium", adaptive: bool = True) -> Path:
     """N11: algo_{horizon}_{adaptive}.pt — vade+adaptive farklilastirir.

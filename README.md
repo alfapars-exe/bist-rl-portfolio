@@ -5,11 +5,14 @@ UYİK 2026 bildirisi için hazırlanan DQN/PPO/SAC portföy RL ortamının
 adım adım gözleyebildiğiniz, vade preset'leri (Kısa/Orta/Uzun) ve
 adaptif ödül şekillendirici içeren bir demo uygulama.
 
-> **V12 aktif sözleşme:** Kısa/Orta/Uzun preset ve Gün/Ay/Yıl granülerlik
-> kontrolleri kaldırıldı. Tek kontrol `step_days=N` değeridir: veri ardışık N BIST
-> seansının dönem-sonu kapanışından oluşur ve ajan her adımda rebalans yapar.
-> Nakit faiz, discount, lookback ve yıllık metrikler gerçek dönem uzunluğuna göre
-> ölçeklenir. Aşağıdaki V11 bölümleri yalnız tarihsel sonuç açıklamasıdır.
+> **V12 aktif sözleşme:** Kısa/Orta/Uzun preset artık yalnız PENCERE/REBALANS/ÖDÜL
+> parametrelerini (η/λ/τ/γ/mom/minvol) etkiler; **episode uzunluğunu belirlemez.**
+> Episode = seçili veri tarih aralığının TAMAMI (eğitim: `len(px_tr)` adım, test:
+> `len(px_te)` adım). Tek adım kontrolü `step_days=N` değeridir: ardışık N BIST
+> seansının blok-ortalaması. `config.DEFAULTS` (`StepDefaults`: step_days=1,
+> medium-preset türevi η/λ/τ/γ/mom/minvol) ve `config.STEP_DAYS_MAX=252` tek kaynaktır.
+> Aşağıdaki V11 bölümleri yalnız tarihsel karşılaştırma için korunmuştur; **kanonik
+> sayılar v12 re-baseline tablosundadır** (bkz. Ana Bulgu ve §8.1).
 
 > 📘 **Tam proje dokümantasyonu** (mimari, çalışma mantığı, teknolojiler,
 > algoritmalar + RL Final Projesi rapor başlıkları §9.1–§9.9): **[DOKUMANTASYON.md](DOKUMANTASYON.md)**
@@ -23,14 +26,24 @@ adaptif ödül şekillendirici içeren bir demo uygulama.
 - **Ödül**: `log(1+w·r) − η_t·‖Δw‖₁ − λ_t·max(0, DD−τ_t)` — 4 terim ayrı ayrı raporlanır
 - **Nakit faizi (V10)**: Nakit varlık risksiz faiz kazanır (`cash_annual_rate=0.40`, günlük bileşik); ajan fırsat maliyetini içselleştirir
 - **Adil karşılaştırma (V11)**: Re-base hizalama + maliyetli baseline + nakit %40 faiz + 8 metodoloji düzeltmesi — RL ve baseline aynı koşullarda değerlendirilir
-- **Tek N-seans modeli**: `step_days=1..252`; dönem-sonu kapanışı, her adımda karar/rebalans ve tüm train aralığını kapsayan episode
+- **Tek N-seans modeli (v12)**: `step_days=1..252` (`config.STEP_DAYS_MAX=252`); dönem-sonu kapanışı, her adımda karar/rebalans. `config.DEFAULTS` (`StepDefaults`) = step_days=1 + medium-preset türevi parametreler. Episode = seçili tarih aralığının TAMAMI (eğitim `len(px_tr)` adım, test `len(px_te)` adım). `data.resample_to_step_days(df, n)`: n=1 no-op, n≥2 N-günlük blok-ortalama. `core/contracts.py` (`RunSpec`/`DataProvenance`) model + veri kimliği sözleşmelerini tanımlar
+- **Gürültü-artırımlı çoklu-episode (opt-in)**: `core/episodes.py` — `make_noisy_prices`, `evaluate_noise_episodes`, `summarize_episodes`. env `force_price_noise=True` (default kapalı → golden bit-aynı). UI Test sekmesinde NAV grafiği + episode seçici + adım-adım detay tablosu
+- **NaN-güvenliği**: `env._risky_returns` `np.nan_to_num` (halt/eksik gün → 0 getiri; temiz veride no-op → golden korunur). `data._sanitize_prices` cache-okuma NaN temizliği. yfinance tz-aware → tz-naive normalleştirme + emniyet ağı
 - **Model kaydet/yükle (isim + tarih)**: Eğitilen ajan kullanıcı-verilen ada ve kayıt zamanıyla (`saved_at` ISO) diske yazılır; `list_saved_models()` ile listelenir; sidebar selectbox'tan seçilip yeniden eğitmeden Test sekmesine geçilebilir (`core/persistence.py`)
-- **İşlem yapılabilir örnekleme**: Ortalama fiyat yerine ardışık N seansın son kapanışı kullanılır; train/test ayrı örneklenir
-- **Episode-clean (1. iterasyon orijinal veri)**: Sidebar checkbox (UI'da varsayılan açık). Açıkken 1. episode gürültüsüz orijinal fiyatlar, 2.–N. her biri farklı `N(0,σ)` realizasyonu. CLI/golden'da default kapalı → V11 bit-aynı
+- **Episode-clean (1. iterasyon orijinal veri)**: Sidebar checkbox (UI'da varsayılan açık). Açıkken 1. episode gürültüsüz orijinal fiyatlar, 2.–N. her biri farklı `N(0,σ)` realizasyonu. CLI/golden'da default kapalı → bit-aynı
 - **Adaptif Şekillendirici**: EWMA rolling vol + turnover'a göre katsayıları anlık ölçekler
 - **Framework**: PyTorch (tüm ajanlar)
 
-> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141, seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135) risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW Sharpe 2.090) ve risksiz faiz hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik kararsız (çoklu-seed CV ~%45; per-seed NAV 1.37–3.65). V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit %40 faizi) RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez, RL nakiti %0) kaldırıldı. Ayrıntılı metrikler: `DOKUMANTASYON.md §8.1`, §8.5 (çoklu-seed), §8.6 (duyarlılık), §8.9 (adil-karşılaştırma metodolojisi), §8.10 (nakit faizi), `§11`.
+> **Ana bulgu (dürüst tez, v12 re-baseline; seed=42; `tests/golden/metrics_baseline.csv`):**
+> TD3 (Sharpe 2.203 / NAV 2.728) ve SAC (Sharpe 2.174 / NAV 2.729) sürekli ajanlar
+> EqualWeight (Sharpe 2.185 / NAV 2.830) ile risk-ayarlıda başa baş; MeanVar en yüksek
+> NAV (2.929) ve rekabetçi Sharpe (2.048) üretir. BuyHold (Sharpe 2.140 / NAV 2.807)
+> hurdle'ı TD3/SAC geçer. **DQN bu konfigürasyonda sürekli ajanların ve baseline'ların
+> çok altında kalmıştır (NAV≈0.01, Sharpe≈−6.59; pratik olarak iflas)** — bu v12 modelinin
+> DQN sonucudur, gizlenmez. Golden (7 strateji): DQN / PPO / SAC / TD3 / BuyHold /
+> EqualWeight / MeanVar. Eski V11 değerleri (SAC 5.595, DQN 1.348 vb.) artık geçersizdir;
+> v12 re-baseline kanonik sayılardır. Ayrıntılı metrikler: `DOKUMANTASYON.md §8.1`,
+> §8.5 (çoklu-seed), §8.6 (duyarlılık), §8.9 (adil-karşılaştırma metodolojisi), §8.10 (nakit faizi), `§11`.
 
 > **Veri sınırlılıkları:** Evren bugünkü BIST 30 bileşenlerinden seçilmiştir — dönem içinde endeksten çıkan hisseler dahil edilmemiştir (survivorship bias riski). Fiyatlar yfinance `auto_adjust=True` ile temettü/split düzeltmeli kapanış fiyatlarıdır. Bid-ask spread, fiyat limiti ve likidite kısıtları modellenmemiştir. Ayrıntılar: `DOKUMANTASYON.md §2b`.
 
@@ -92,7 +105,7 @@ python main.py --skip-plots      # sadece eğitim
 |-------|--------|
 | 📐 Veri & MDP | 28 ticker, MDP tuple, N-seans sözleşmesi, adaptif formül açıklaması |
 | 🎓 Eğitim | Canlı ödül/kazanç/başarı/loss eğrileri, progress bar, session cache |
-| 🎬 Test (Adım-Adım) | Oynat/Durdur/İleri-Geri + slider; durum, Q-değerleri, ağırlık pastası, ödül terimleri, adaptif katsayıların mini zaman serisi |
+| 🎬 Test (Adım-Adım) | Oynat/Durdur/İleri-Geri + slider; durum, Q-değerleri, ağırlık pastası, ödül terimleri, adaptif katsayıların mini zaman serisi. **🎲 Gürültü-artırımlı çoklu-episode (v12 opt-in):** episode sayısı + σ kaydırıcı, NAV(TL) grafiği, özet (Final NAV ort/std, ort. getiri, zarar olasılığı) + **episode seçici** → seçilen episode için adım-adım detay tablosu (Gün#/Tarih/Aksiyon/Nakit TL/Portföy TL/Adım P&L/Kümülatif P&L/Kümülatif %/Komisyon TL/Δturnover/Tutulan hisse). Episode'lar sıralı çalışır |
 | 📊 Karşılaştırma | Metrik tablosu (CAGR, Sharpe, Sortino, MaxDD, Calmar, Vol, FinalNAV, Turnover), NAV çok-çizgili, ağırlık ısı haritası, DQN aksiyon dağılımı, adaptif katsayılar |
 
 ## Dosya Yapısı
@@ -102,37 +115,55 @@ kod/
 ├── app.py                      # Streamlit UI (ana giriş) — core.trainer/rollout tüketir
 ├── main.py                     # CLI orkestratörü (train.run() + plots.run())
 ├── train.py                    # CLI eğitim + backtest sürücüsü (prepare_data + run)
-├── plots.py                    # 9 matplotlib figürü (run())
+├── plots.py                    # matplotlib figürleri (run())
 ├── data.py                     # BIST 28 indirme + parquet cache
+│                               #   · _sanitize_prices() — cache NaN temizliği (v12)
+│                               #   · resample_to_step_days(df, n) — N-günlük blok-ortalama (v12)
+│                               #   · yfinance tz-aware → tz-naive normalize + emniyet ağı (v12)
 ├── config.py                   # Merkezi hiperparametreler + HORIZON_PRESETS (tek kaynak)
+│                               #   · StepDefaults / DEFAULTS / STEP_DAYS_MAX (v12)
+│                               #   · validate_train_range() — dejenere-config NaN koruması
 ├── pyproject.toml              # Paketleme + pytest yapılandırması
 ├── requirements.txt
 ├── README.md
 ├── data/prices.parquet         # yfinance cache (ilk çalıştırmada oluşur)
-├── core/                       # Eğitim/eval çekirdeği — CLI + UI ortak (Faz 3)
-│   ├── trainer.py              # generator tabanlı eğitim (DQN/PPO/SAC) + dispatch
+├── core/                       # Eğitim/eval çekirdeği — CLI + UI ortak
+│   ├── trainer.py              # generator tabanlı eğitim (DQN/PPO/SAC/TD3) + dispatch
 │   ├── rollout.py              # ajan-agnostik evaluate (act_eval)
-│   └── walkforward.py          # v2: walk-forward doğrulama (overfitting kontrolü)
-├── forecast/                   # v2: CNN-LSTM bir-adım getiri tahmincisi
+│   ├── walkforward.py          # walk-forward doğrulama (overfitting kontrolü)
+│   ├── factory.py              # build_agent / build_env — step_days/gamma/mom/minvol override (v12)
+│   ├── contracts.py            # RunSpec / DataProvenance / BacktestResult sözleşmeleri (v12)
+│   ├── episodes.py             # make_noisy_prices / evaluate_noise_episodes / summarize_episodes (v12)
+│   ├── persistence.py          # save_agent / load_agent / list_saved_models
+│   └── features.py             # select_features (forecast-filtreleme)
+├── forecast/                   # CNN-LSTM bir-adım getiri tahmincisi
 │   └── forecaster.py           # predict-then-optimize; 'forecast' feature (train-only fit)
 ├── env/
 │   ├── __init__.py
-│   └── portfolio_env.py        # MDP env + AdaptiveRewardShaper (HORIZON_PRESETS → config)
+│   └── portfolio_env.py        # MDP env — step_days / force_price_noise / nan_to_num (v12)
+│                               #   · gamma / mom_window / minvol_window açık override (None→preset)
 ├── agents/
 │   ├── __init__.py
 │   ├── base.py                 # BaseAgent arayüzü (act_eval)
 │   ├── common.py               # ReplayBuffer, mlp, get_device, set_seed
 │   ├── dqn.py                  # PyTorch DQN (393→256→128→6, Huber, lr=1e-3)
 │   ├── ppo.py                  # PyTorch PPO (GAE, clipped surrogate)
-│   └── sac.py                  # PyTorch SAC (twin-Q, tanh-squashed Gaussian)
+│   ├── sac.py                  # PyTorch SAC (twin-Q, tanh-squashed Gaussian)
+│   └── td3.py                  # PyTorch TD3 (twin-Q, delayed policy, target smoothing)
 ├── utils/
 │   ├── __init__.py
 │   ├── features.py             # add_features + TrainScaler (z-score)
 │   ├── baselines.py            # EW, BuyHold, MeanVar
 │   ├── metrics.py              # CAGR/Sharpe/Sortino/MDD + success_vs_benchmark
 │   └── portfolio_tl.py         # NAV→TL/lot/işlem-logu türetimi (UI katmanı)
+├── ui/                         # Streamlit paketi (SRP)
+│   ├── state.py                # session başlangıç değerleri
+│   ├── services.py             # evaluate_noise_episodes_ui + _run_trace_loop (v12)
+│   ├── sidebar.py              # step_days kaydırıcı; episode seçici (v12)
+│   ├── charts.py
+│   └── tabs/                   # mdp · train · test (gürültü-episode + seçici) · compare
 ├── tests/                      # pytest: invariants + golden-master regresyon
-│   └── golden/                 # dondurulmuş metrics_baseline.csv (≤1e-6 gate)
+│   └── golden/                 # metrics_baseline.csv — 7 strateji (≤1e-6 gate; v12 re-baseline)
 ├── results/                    # CSV'ler
 └── figures/                    # PNG'ler
 ```
@@ -150,12 +181,17 @@ kod/
 | γ | 0.99 (orta vade) / 0.95 (kısa) / 0.995 (uzun) |
 | Seed | 42 (tekrar üretilebilir) |
 
-## Vade Preset'leri
+## Vade Preset'leri (v12 — yalnız PENCERE/REBALANS/ÖDÜL parametresi)
+
+> **v12 önemli not:** Preset artık **episode uzunluğunu belirlemez.** Episode = seçili
+> tarih aralığının tamamı (eğitim env `len(px_tr)` adım, test env `len(px_te)` adım).
+> `train_max_steps` alanı tarihsel uyumluluk için korunmuştur; aktif kod yolunda
+> kullanılmamaktadır. `config.DEFAULTS = StepDefaults()` orta-preset türevi
+> değerleri (step_days=1, η=0.0010, λ=0.50, τ=0.05, γ=0.99, mom=20, minvol=60)
+> tek kaynak olarak sunar.
 
 | | Kısa | Orta | Uzun |
 |---|---|---|---|
-| Episode gün aralığı (UI slider) | 1–30 gün | 30–90 gün | 90–360 gün |
-| Eğitim episode uzunluğu (`train_max_steps`) | 30 | 90 | 360 |
 | Rebalans (gün) | 1 | 5 | 20 |
 | Momentum pencere | 5 | 20 | 60 |
 | Min-vol pencere | 20 | 60 | 120 |
@@ -163,6 +199,7 @@ kod/
 | λ base | 0.25 | 0.50 | 1.00 |
 | τ base | 0.03 | 0.05 | 0.08 |
 | γ | 0.95 | 0.99 | 0.995 |
+| `train_max_steps` (eski; artık aktif değil) | 30 | 90 | 360 |
 
 ## Adaptif Ödül Şekillendirici
 

@@ -38,13 +38,25 @@
 | Doğrulama | 101 pytest + golden-master regresyon (1e-6) + walk-forward (3 kat) + **titizlik: Deflated/Probabilistic Sharpe + PBO + Monte-Carlo stres** (López de Prado) |
 | Teknolojiler | Python 3.10–3.12, PyTorch (CPU), Streamlit, Plotly, matplotlib, pandas, NumPy, yfinance |
 
-> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141, seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135) risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW 2.090) ve risksiz faiz hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik kararsız (çoklu-seed CV ~%45). V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit faizi) RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez, RL nakiti %0) kaldırıldı.
+> **Ana bulgu (dürüst tez, v12 re-baseline; `tests/golden/metrics_baseline.csv`):**
+> TD3 (Sharpe 2.203 / NAV 2.728) ve SAC (Sharpe 2.174 / NAV 2.729) EqualWeight
+> (Sharpe 2.185 / NAV 2.830) ile risk-ayarlıda başa baş; MeanVar en yüksek NAV (2.929).
+> **DQN bu konfigürasyonda NAV≈0.01, Sharpe≈−6.59 (pratik iflas); gizlenmez.**
+> Eski V11 değerleri (SAC 5.595, DQN 1.348 vb.) v12 re-baseline ile geçersizdir.
+> V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit faizi)
+> korunmaya devam etmektedir; yalnız sayısal sonuçlar yeniden temellendirilmiştir.
 
 ---
 
 ## 1. Giriş (Rapor §9.1)
 
-> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141, seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135) risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW 2.090) ve risksiz faiz hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik kararsız (çoklu-seed CV ~%45). V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit %40 faizi) RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez, RL nakiti %0) kaldırıldı.
+> **Ana bulgu (dürüst tez, v12 re-baseline; seed=42):** TD3 (Sharpe 2.203 / NAV 2.728)
+> ve SAC (Sharpe 2.174 / NAV 2.729) EqualWeight (Sharpe 2.185 / NAV 2.830) ile
+> risk-ayarlıda başa baş; MeanVar en yüksek NAV (2.929). **DQN bu konfigürasyonda
+> NAV≈0.01 (pratik iflas); bu v12 modelinin DQN sonucudur, gizlenmez.**
+> Eski V11 sayıları (SAC 5.595, DQN 1.348 vb.) v12 re-baseline ile geçersizdir.
+> V11 adil-karşılaştırma düzeltmeleri (re-base hizalama, maliyetli baseline, nakit %40
+> faizi) korunmaktadır; yalnız sayısal sonuçlar yeniden temellendirilmiştir.
 
 **Problem neden önemli?** Portföy yönetimi, sınırlı sermayeyi zaman içinde değişen riskli
 varlıklara dağıtma problemidir. Her gün piyasa yeni bilgi üretir; yatırımcı işlem maliyeti,
@@ -133,7 +145,7 @@ Test dönemi yalnızca 2022–2024 (≈3 yıl, tek kesim) kullanılmıştır. Fa
 | **Rebalans frekansı kısıtı** | Ağırlık yalnızca rebalans günlerinde değişir (kısa=1, orta=5, uzun=20 günde bir); ara günlerde önceki ağırlık korunur |
 | **Düşüş (drawdown) kısıtı** | Tepe-değerden düşüş τ eşiğini aşınca λ ile cezalandırılır (risk yönetimi) |
 | **Güvenlik / iflas kısıtı** | NAV < `bankruptcy_nav` → episode biter, ek ceza (`bankruptcy_penalty`) |
-| **Zaman kısıtı** | Eğitim episode'u en fazla `train_max_steps` (vadeye göre: Kısa 30, Orta 90, Uzun 360 gün) sürer; eval tam test dönemi boyunca çalışır. UI'dan vade aralığı içinde (min_days–max_days) slider ile seçilebilir |
+| **Zaman kısıtı (v12)** | Episode uzunluğu vade preset'inden bağımsızdır. Eğitim env = `len(px_tr)` adım (seçili tarih aralığının tamamı); eval env = `len(px_te)` adım (`max_steps=10_000` üst tavanıyla). Eski `train_max_steps` (Kısa 30, Orta 90, Uzun 360) tarihsel uyumluluk için `HORIZON_PRESETS`'te korunmuştur; aktif kod yolunda kullanılmamaktadır |
 | **Ayrık eylem kısıtı (DQN)** | DQN yalnızca 6 önceden tanımlı şablondan birini seçebilir; aralık-dışı indeks `ValueError` ile reddedilir |
 | **Sızıntısızlık kısıtı** | Tüm öznitelikler yalnız geçmişe bakar; ölçekleyici (z-score) ve tahminci yalnız train'de fit edilir, test'e uygulanır ama orada fit edilmez |
 
@@ -373,6 +385,25 @@ Projenin gerçek evrimi (V1→V8) aşağıdaki ≥3 iterasyon tablosuna eşlenir
 > dersi (dürüst):** makro *algı* (V6) tek başına yetmedi; algıyı *kullanan ödül* (V7) eklenince
 > en zayıf ajan belirgin iyileşti — "rejim skoru = omurga" (bir kez üret, iki kez kullan).
 
+### 7b. v12 Mühendislik Değişiklikleri (Episode/Adım Modeli + NaN-Güvenliği)
+
+v12, state/reward tasarımına değil **MDP zaman adımı sözleşmesine** ve **veri sağlamlığına**
+odaklanan bir mühendislik revizyonudur. Golden ≤1e-6 korunur.
+
+| Değişiklik | Dosya/Kaynak | Etkisi |
+|---|---|---|
+| **Tek-adım modeli** (`StepDefaults`, `DEFAULTS`, `STEP_DAYS_MAX`) | `config.py` | Vade preset'i episode uzunluğunu değil yalnız pencere/rebalans/ödül parametrelerini belirler. `step_days=1` (default) = günlük; n≥2 = N-günlük blok |
+| **Episode = tam tarih aralığı** | `ui/services.py`, `ui/sidebar.py` | Eğitim env `len(px_tr)` adım; eval env `len(px_te)` adım (`max_steps=10_000`). Eski horizon slider kaldırıldı |
+| **`resample_to_step_days(df, n)`** | `data.py` | n=1 no-op; n≥2 N-günlük blok-ortalama. Leak-safe: add_features (günlük) → split → resample sırası |
+| **`core/contracts.py`** (`RunSpec`, `DataProvenance`, `BacktestResult`) | `core/contracts.py` | Model+veri kimliği/provenance sözleşmeleri; UI ve CLI aynı `RunSpec`/`BacktestResult` paylaşır |
+| **`core/episodes.py`** (`make_noisy_prices`, `evaluate_noise_episodes`, `summarize_episodes`) | `core/episodes.py` | Gürültü-artırımlı çoklu-episode değerlendirmesi. `force_price_noise=False` default → golden bit-aynı |
+| **`force_price_noise`** (env parametresi) | `env/portfolio_env.py`, `core/factory.py` | Eval'de gürültü açar (çoklu-episode için); default kapalı → golden korunur |
+| **`_risky_returns` `np.nan_to_num`** | `env/portfolio_env.py` | Halt/eksik gün → 0 getiri; NaN NAV zincirini kırar. Temiz veride no-op → golden korunur |
+| **`_sanitize_prices()`** | `data.py` | Cache-okuma NaN temizliği: `ffill().bfill()` + tamamen-boş sütun düşürme |
+| **yfinance tz-aware → tz-naive normalize** | `data.py` | `px.index.tz_localize(None).normalize()` — MIXED-boş frame hatasını önler (HF Space fix) |
+| **`validate_train_range()`** | `config.py` | Resample sonrası yetersiz train noktası varsa sessiz NaN yerine dostça hata |
+| **`gamma`/`mom_window`/`minvol_window` açık override** | `env/portfolio_env.py`, `core/factory.py` | `None` → preset (golden bit-aynı); UI/CLI açık değer geçebilir |
+
 ---
 
 ## 8. Deneysel Sonuçlar (Rapor §9.7)
@@ -417,30 +448,29 @@ Her iterasyon kendi referansıyla saklanır: `golden/v5_…`, `v6_…`, `v7_metr
 Reprodüksiyon düzeltmesi sonrası golden artık gerçek anlamda reprodüklenebilirdir: aynı ortamda
 iki ardışık `python main.py` çalıştırmasının tüm metriklerde maksimum farkı 0.0'dır.
 
-**Adil kanonik (V11: re-base hizalı + maliyetli baseline + nakit %40 faiz; seed=42):**
+**Kanonik v12 re-baseline (seed=42; `tests/golden/metrics_baseline.csv`; 7 strateji):**
+
+> **ESKİ V11 SAYILARI GEÇERSİZDİR.** Aşağıdaki tablo v12 re-baseline sonuçlarıdır;
+> golden artık 7 strateji içerir (RiskParity/InverseVol/MinVariance/Momentum/CashRiskFree
+> golden'dan çıkmıştır). V11 metodoloji düzeltmeleri (re-base hizalama, maliyetli baseline,
+> nakit %40 faiz) korunmakta; yalnız sayısal değerler yeniden temellendirilmiştir.
 
 | Strateji | CAGR | Sharpe | Sortino | MaxDD | Calmar | FinalNAV | Turnover |
 |---|---|---|---|---|---|---|---|
-| DQN | 0.115 | 0.484 | 0.721 | −0.452 | 0.255 | 1.348 | 0.235 |
-| PPO | 0.794 | 2.010 | 3.242 | −0.258 | 3.075 | 4.946 | 0.049 |
-| SAC | 0.877 | 2.141 | 3.484 | −0.254 | 3.457 | 5.595 | 0.011 |
-| TD3 | 0.869 | 2.151 | 3.500 | −0.252 | 3.443 | 5.525 | 0.015 |
-| BuyHold | 0.896 | 1.942 | 3.083 | −0.269 | 3.336 | 5.751 | 0.000 |
-| EqualWeight | 0.882 | 2.090 | 3.390 | −0.263 | 3.354 | 5.636 | 0.000 |
-| MeanVar | 0.895 | 1.959 | 3.186 | −0.338 | 2.651 | 5.739 | 0.033 |
-| RiskParity | 0.894 | 2.135 | 3.466 | −0.253 | 3.536 | 5.733 | 0.009 |
-| InverseVol | 0.917 | 2.162 | 3.515 | −0.255 | 3.590 | 5.922 | 0.006 |
-| MinVariance | 0.992 | 2.317 | 3.738 | −0.236 | 4.202 | 6.578 | 0.023 |
-| Momentum | 0.687 | 1.539 | 2.335 | −0.360 | 1.910 | 4.175 | 0.165 |
-| CashRiskFree | 0.399 | — | — | 0.000 | — | 2.506 | 0.000 |
+| DQN | −0.967 | −6.590 | −6.887 | −0.991 | −0.976 | 0.010 | 0.875 |
+| PPO | 0.754 | 1.677 | 2.639 | −0.263 | 2.870 | 2.149 | 0.163 |
+| SAC | 1.091 | 2.174 | 3.485 | −0.262 | 4.163 | 2.729 | 0.084 |
+| TD3 | 1.091 | 2.203 | 3.591 | −0.247 | 4.422 | 2.728 | 0.054 |
+| BuyHold | 1.135 | 2.140 | 3.439 | −0.269 | 4.225 | 2.807 | 0.006 |
+| EqualWeight | 1.148 | 2.185 | 3.504 | −0.263 | 4.364 | 2.830 | 0.023 |
+| MeanVar | 1.203 | 2.048 | 3.273 | −0.283 | 4.253 | 2.929 | 0.033 |
 
-> **V11 okuma notu:** Tablo `results/metrics.csv`'den alınmıştır (12 strateji, 2022–2024,
-> seed=42). V11 metodoloji düzeltmeleriyle (re-base hizalama, maliyetli baseline, nakit %40
-> faizi) RL ve baseline'lar aynı başlangıç noktasından (NAV[0]=1) ve aynı maliyet koşullarından
-> değerlendirilmektedir. TD3 (Sharpe 2.151) ve SAC (Sharpe 2.141) risk-ayarlıda InverseVol
-> (2.162) ve RiskParity (2.135) ile başa baş; EqualWeight (2.090) ve CashRiskFree (NAV 2.506)
-> hurdle'ını geçer. MinVariance (2.317) hâlâ önde. DQN kârlı ama zayıf (NAV 1.348, Sharpe
-> 0.484); çoklu-seed kararsızlığı için bkz. §8.5. Metodoloji ayrıntıları için bkz. §8.9.
+> **v12 okuma notu:** Tablo `tests/golden/metrics_baseline.csv`'den alınmıştır (2022–2024,
+> seed=42). TD3 (Sharpe 2.203) ve SAC (Sharpe 2.174) EqualWeight (2.185) ile başa baş;
+> MeanVar en yüksek NAV (2.929). **DQN NAV≈0.01 (pratik iflas): bu v12 modelinin
+> DQN sonucudur, gizlenmez.** En yüksek NAV: MeanVar (2.929) / en yüksek Sharpe:
+> TD3 (2.203). Golden 7 strateji içerir; eski RiskParity/InverseVol/MinVariance/
+> Momentum/CashRiskFree golden'dan çıkmıştır. Metodoloji ayrıntıları için bkz. §8.9.
 
 **Eğitim özet tablosu (`results/training_diagnostics.csv`):**
 
@@ -505,6 +535,11 @@ ort ± std olarak raporlanmıştır. Kaynak: `results/multiseed_summary.csv`.
 
 **Çoklu-seed performans tablosu (V11 adil kanonik, 5 seed 42–46, 2022–2024 test dönemi):**
 
+> **Not:** Aşağıdaki çoklu-seed tablosu V11 koşullarında üretilmiştir; kanonik tek-seed
+> sonuçlar için v12 re-baseline tablosu (§8.3) geçerlidir. Çoklu-seed analizi algoritmaların
+> **göreceli** kararlılığını ölçmek için korunmuştur; mutlak NAV değerleri V11 baseline'ına
+> aittir.
+
 | Algoritma | Sharpe ort ± std | FinalNAV ort ± std | CAGR ort ± std | MaxDD ort ± std |
 |---|---|---|---|---|
 | DQN | 0.903 ± 0.408 | 2.204 ± 0.908 | 0.316 ± 0.191 | −0.410 ± 0.072 |
@@ -512,7 +547,7 @@ ort ± std olarak raporlanmıştır. Kaynak: `results/multiseed_summary.csv`.
 | SAC | 2.123 ± 0.017 | 5.619 ± 0.079 | 0.880 ± 0.010 | −0.254 ± 0.001 |
 | TD3 | 2.122 ± 0.125 | 5.748 ± 0.575 | 0.894 ± 0.072 | −0.253 ± 0.010 |
 
-DQN per-seed FinalNAV: 1.37 / 2.47 / 3.65 / 1.58 / 1.96 (CV ~%45; kanonik seed=42=1.37 düşük gerçekleşmedir).
+DQN per-seed FinalNAV (V11): 1.37 / 2.47 / 3.65 / 1.58 / 1.96 (CV ~%45). v12 kanonik seed=42'de DQN NAV≈0.01 (pratik iflas); §8.3'e bakınız.
 
 **Yorum:**
 
@@ -592,23 +627,23 @@ round-trip. Preset değerleri — kısa 0.0015 (~30 bps RT) / orta 0.0010 (~20 b
 
 **Net Sharpe — EK Maliyet Duyarlılık Tablosu (V11, kanonik η=10 bps üstüne):**
 
-| Strateji | Turnover (tek-yön) | Sharpe (kanonik) | Sharpe @+20 bps EK | Sharpe @+50 bps EK | Drag @50 bps |
+| Strateji | Turnover (tek-yön) | Sharpe (v12 kanonik) | Sharpe @+20 bps EK | Sharpe @+50 bps EK | Drag @50 bps |
 |---|---|---|---|---|---|
-| SAC | 0.011 | 2.141 | ~2.123 | ~2.108 | ~%1.32 |
-| MinVariance | 0.023 | 2.317 | ~2.298 | ~2.271 | ~%0.5 |
-| TD3 | 0.015 | 2.151 | ~2.127 | ~2.094 | ~%3.0 |
-| MeanVar | 0.033 | 1.959 | ~1.916 | ~1.855 | ~%3.8 |
-| Momentum | 0.165 | 1.539 | ~1.435 | ~1.280 | ~%16.2 |
-| PPO | 0.049 | 2.010 | ~1.942 | ~1.843 | ~%8.3 |
-| DQN | 0.235 | 0.484 | ~0.170 | −0.241 | ~%29.9 |
-| EqualWeight / BuyHold | 0.000 | (sabit) | (sabit) | (sabit) | %0 |
+| SAC | 0.084 | 2.174 | ~2.149 | ~2.132 | ~%1.94 |
+| TD3 | 0.054 | 2.203 | ~2.181 | ~2.163 | ~%1.82 |
+| MeanVar | 0.033 | 2.048 | ~2.005 | ~1.944 | ~%5.1 |
+| PPO | 0.163 | 1.677 | ~1.571 | ~1.413 | ~%15.7 |
+| DQN | 0.875 | −6.590 | (daha negatif) | (daha negatif) | — |
+| EqualWeight / BuyHold | 0.006–0.023 | 2.140–2.185 | (hafif düşüş) | (hafif düşüş) | ~%0–%1 |
 
-**Bulgu:** Gerçekçi EK maliyet altında SAC'ın düşük turnover'ı (0.011) belirgin net avantaja
-dönüşmektedir — SAC neredeyse maliyet-bağışık (50 bps EK'de bile drag ~%1.32, Sharpe 2.141→2.108).
-Yüksek-turnover ajanlar kritik biçimde çökmektedir: DQN Sharpe 0.484→−0.241 (negatif), Momentum
-1.539→1.280, PPO 2.010→1.843. SAC her maliyet seviyesinde DQN ve Momentum'un üstündedir; aradaki
-makas maliyetle birlikte açılmaktadır. Pratik sonuç: RL ailesinde SAC, "öğrenilmiş düşük-turnover"
-politikası sayesinde gerçek BIST maliyeti altında tek savunulabilir aktif ajandır.
+> **Not:** v12 turnover değerleri `tests/golden/metrics_baseline.csv`'den alınmıştır.
+> Eski V11 Sharpe değerleri (SAC 2.141, TD3 2.151 vb.) artık geçerli değildir.
+
+**Bulgu (v12):** SAC ve TD3 düşük turnover'ları (0.084 / 0.054) sayesinde EK maliyet altında
+kararlı kalmaktadır. DQN v12'de zaten pratik iflas konumundadır (NAV≈0.01); maliyet analizi
+anlamsızdır. PPO yüksek turnover (0.163) nedeniyle 50 bps EK'de Sharpe ~1.41'e geriler.
+MeanVar turnover 0.033 ile maliyet-dayanıklı konumunu korur. SAC "öğrenilmiş düşük-turnover"
+politikasıyla v12'de de en savunulabilir aktif ajan konumundadır.
 
 **Metot uyarısı:** Bu analiz `results/weights_*` + `navs_aligned` kaynaklı günlük-seri
 yeniden-bileşikleme ile yapılmış **göreli** bir değerlendirmedir. Sağlam bulgu turnover→maliyet-drag
@@ -657,9 +692,12 @@ Bu oran sabit (RNG çağrısı yok) olduğundan golden RNG sırası korunur; yal
 piyasa getirisi eksi işlem maliyeti kazanır. Dolayısıyla ajan örtük olarak "hisse mi nakit mi daha
 kârlı?" sorusunu her adımda çözmektedir — gerçek bir fırsat maliyeti (opportunity cost) hesabı.
 
-**CashRiskFree baseline:** Tüm portföyü nakitte tutan strateji. V11 kanonik tabloda FinalNAV 2.506
-(CAGR %39.9) ile **risksiz hurdle** görevi görür. RL ajanlarının bu hurdle'ı geçmesi, hisse riskine
-değer katıldığının minimum kanıtıdır. TD3/SAC (NAV ~5.5×) bu hurdle'ı yaklaşık 2.2× aşmaktadır.
+**CashRiskFree baseline:** Tüm portföyü nakitte tutan strateji; risksiz hurdle görevi görür.
+V11 kanonik tabloda FinalNAV 2.506 (CAGR %39.9) idi. **v12 golden'da CashRiskFree strateji
+yoktur** (7 strateji: DQN/PPO/SAC/TD3/BuyHold/EqualWeight/MeanVar). v12 kanonik'te TD3/SAC
+NAV≈2.728–2.729 ile BuyHold (2.807) ve EqualWeight (2.830) hurdle'ını geçememektedir; ancak
+DQN (NAV≈0.01) dışındaki tüm sürekli ajanlar varlığa yatırım yapmanın nakit tutmaktan değer
+kattığını göstermektedir.
 
 **Altın ve dolar makro-özellik olarak:** `gold_tl_mom` ve `usd_try_mom` state vektörüne (V6 makro
 bloğu) **rejim sinyali** olarak girer. Bu varlıklar portföyde alınamaz — kapsam kararı olarak
@@ -676,12 +714,16 @@ rejimini algılamasını sağlar, doğrudan pozisyon alamaz. Gelecek iş: çok-v
 kod/
 ├── app.py                # İnce Streamlit giriş noktası (main + sekme dispatch + uyumluluk re-export)
 ├── main.py               # CLI orkestratör: veri → eğitim → figürler (+ --walkforward)
-├── train.py              # DataBundle; prepare_data/train_dqn/ppo/sac/evaluate/run
+├── train.py              # DataBundle; prepare_data/train_dqn/ppo/sac/td3/evaluate/run
 ├── data.py               # BIST verisi indirme + sentetik GBM fallback + cache + train/test split
-│                         #   · resample_to_granularity(df, granularity) — adım granülerliği
+│                         #   · _sanitize_prices() — cache NaN temizliği (v12)
+│                         #   · resample_to_step_days(df, n) — N-günlük blok-ortalama (v12)
+│                         #   · resample_to_granularity(df, granularity) — aylık/yıllık
+│                         #   · yfinance tz-aware → tz-naive normalize + emniyet ağı (v12)
 ├── config.py             # TEK yapılandırma kaynağı (SEED, HORIZON_PRESETS, FEATURES, *Config dataclass)
-│                         #   · GRANULARITY_OPTIONS = ("daily","monthly","yearly")
-│                         #   · GRANULARITY_MIN_POINTS = {"daily":252, "monthly":20, "yearly":5}
+│                         #   · StepDefaults / DEFAULTS / STEP_DAYS_MAX (v12 tek-adım modeli)
+│                         #   · validate_train_range() — dejenere-config NaN koruması (v12)
+│                         #   · GRANULARITY_OPTIONS / GRANULARITY_MIN_POINTS
 ├── plots.py              # 13 figür (matplotlib, F1–F13)
 ├── scripts/rigor_analysis.py  # DSR/PBO/Monte-Carlo stres/reel-NAV (golden-güvenli)
 ├── utils/deflated_sharpe.py   # Deflated/Probabilistic Sharpe + CSCV-PBO (López de Prado)
@@ -689,16 +731,19 @@ kod/
 ├── agents/
 │   ├── base.py           # BaseAgent (act_eval) + SupportsQValues Protocol (ISP)
 │   ├── common.py         # mlp, ReplayBuffer (+ torch_utils re-export)
-│   ├── dqn.py · ppo.py · sac.py   # üç ajan
+│   ├── dqn.py · ppo.py · sac.py · td3.py   # dört ajan
 ├── core/
 │   ├── trainer.py        # generator-tabanlı ortak eğitim döngüsü + _TRAINERS registry dispatch (OCP)
 │   ├── rollout.py        # değerlendirme (evaluate)
 │   ├── walkforward.py    # walk-forward doğrulama
-│   ├── factory.py        # build_agent / build_env — episode_clean parametresi dahil (OCP+DRY)
+│   ├── factory.py        # build_agent / build_env — step_days/gamma/mom/minvol override (v12)
+│   ├── contracts.py      # RunSpec / DataProvenance / BacktestResult sözleşmeleri (v12)
+│   ├── episodes.py       # make_noisy_prices / evaluate_noise_episodes / summarize_episodes (v12)
 │   ├── persistence.py    # save_agent(name,saved_at) / load_agent / named_model_path / list kayıt
 │   └── features.py       # select_features (forecast-filtreleme, DRY)
 ├── env/
-│   ├── portfolio_env.py  # PortfolioEnv — episode_clean / _episode_idx dahil (MDP mekaniği)
+│   ├── portfolio_env.py  # PortfolioEnv — step_days / force_price_noise / nan_to_num (v12)
+│   │                     #   gamma / mom_window / minvol_window açık override (None→preset)
 │   └── reward.py         # AdaptiveRewardShaper + DifferentialSharpe + RewardEngine (SRP)
 ├── forecast/forecaster.py  # CNN-LSTM bir-adım getiri tahmincisi (train-only fit)
 ├── utils/
@@ -709,10 +754,11 @@ kod/
 │   └── torch_utils.py    # get_device / set_seed (nötr; DIP)
 ├── ui/                   # Streamlit paketi (SRP)
 │   ├── state.py          # episode_clean=True (UI default) dahil session başlangıç değerleri
-│   ├── services.py       # list_saved_models / save_trained_agent / resample_to_granularity akışı
-│   ├── charts.py · sidebar.py   # granülerlik selectbox + episode_clean checkbox
+│   ├── services.py       # evaluate_noise_episodes_ui / _run_trace_loop (v12 gürültü-episode)
+│   │                     #   list_saved_models / save_trained_agent / resample akışı
+│   ├── charts.py · sidebar.py   # step_days kaydırıcı + episode seçici (v12)
 │   └── tabs/ (mdp · train · test · compare)
-└── tests/                # 101 test + golden-master (1e-6)
+└── tests/                # pytest + golden-master (1e-6); 7 strateji v12 re-baseline
 ```
 
 ### 9.2. Çalışma mantığı (uçtan uca akış)
@@ -794,16 +840,17 @@ seçilir; `python main.py` dört ajanı otomatik kaydeder.
   Kaynak: `ui/sidebar.py:225`, `env/portfolio_env.py:91,190–191,250`,
   `core/factory.py:108,136`.
 
-- **Adım granülerliği (Gün / Ay / Yıl):** Sidebar'da "Adım granülerliği" selectbox'ı
-  (`config.GRANULARITY_OPTIONS = ("daily", "monthly", "yearly")`). Seçilen granülerlikte
-  pipeline şöyle çalışır: (1) fiyatlar ve feature'lar **her zaman günlük** hesaplanır
-  (`add_features` DEĞİŞMEZ); (2) `data.resample_to_granularity(df, granularity)` ile
-  fiyat + feature + makro istenilen frekansta resample edilir (aylık → pandas `ME` ortalaması,
-  yıllık → `YE` ortalaması, günlük → no-op); (3) `train_test_split` ve `TrainScaler`
-  resample'lanmış veri üzerinde çalışır (sızıntısız). Günlük seçim = V11 bit-aynı
-  (golden-güvenli); aylık/yıllık kısa seriler için env `window`/`lo` parametreleri otomatik
-  uyarlanır (`GRANULARITY_MIN_POINTS` eşik uyarısı). Kaynak: `config.py:249,253`,
-  `data.py:279`, `ui/sidebar.py:260–263`, `ui/services.py:155–156`.
+- **Adım granülerliği — step_days (v12):** Sidebar'da `step_days` kaydırıcısı
+  (`config.STEP_DAYS_MAX=252`; kaynak: `config.py`). Seçilen N değerinde pipeline:
+  (1) fiyatlar ve feature'lar **her zaman günlük** hesaplanır (`add_features` DEĞİŞMEZ);
+  (2) `data.resample_to_step_days(df, n)` — n=1 no-op (golden-güvenli), n≥2 N-günlük
+  blok-ortalama (`df.resample(f"{n}D").mean().ffill()`); (3) env her adımda N seans
+  karşılığı getiriyi işler. `validate_train_range()` resample sonrası yetersiz nokta
+  varsa kullanıcıya dostça hata verir (sessiz NaN yerine). `config.DEFAULTS`
+  (`StepDefaults`) = step_days=1 + medium-preset türevi parametreler (tek kaynak).
+  Eski `resample_to_granularity` (aylık/yıllık) hâlâ mevcuttur; aktif UI yolu
+  `step_days` kontrolünü kullanır. Kaynak: `config.py` (StepDefaults/STEP_DAYS_MAX),
+  `data.py` (resample_to_step_days), `ui/sidebar.py`, `ui/services.py`.
 
 - **Model kaydet/yükle (isim + tarih):** Eğitilen ajan kullanıcı-verilen ada ve kayıt
   tarihiyle (`saved_at` ISO, saniye hassasiyeti) diske yazılır.
@@ -813,6 +860,17 @@ seçilir; `python main.py` dört ajanı otomatik kaydeder.
   meta okur; sonuçlar sidebar'da `saved_at`'e göre sıralı selectbox'ta görünür. Eski
   `{algo}_{horizon}_{adaptive}.pt` şeması geriye uyumlu olarak listede kalmaya devam eder.
   Kaynak: `core/persistence.py:50–100`, `ui/services.py:35–68`, `ui/sidebar.py:517–555`.
+
+- **Gürültü-artırımlı çoklu-episode (v12 opt-in):** Test sekmesinde "🎲 Gürültü-artırımlı
+  çoklu episode" paneli. Episode sayısı + σ kaydırıcı; "Çalıştır" düğmesiyle `core.episodes.
+  evaluate_noise_episodes` sırayla N tam-aralık episode çalıştırır (episode 0 = orijinal,
+  1..N = farklı tohumlu gürültü). Sonuçlar: NAV(TL) çok-çizgili grafik + özet tablo (Final
+  NAV ort/std, ort. getiri, zarar olasılığı) + **episode seçici** → seçilen episode için
+  adım-adım detay tablosu (Gün#/Tarih/Aksiyon/Nakit TL/Portföy TL/Adım P&L/Kümülatif P&L/
+  Kümülatif %/Komisyon TL/Δturnover/Tutulan hisse — ana test tablosuyla aynı sütunlar).
+  `force_price_noise=True` ile env eval'de gürültü açar; default `False` → golden bit-aynı.
+  Kaynak: `core/episodes.py` (make_noisy_prices/evaluate_noise_episodes/summarize_episodes),
+  `ui/services.py` (evaluate_noise_episodes_ui/_run_trace_loop), `ui/tabs/test.py`.
 
 ### Arayüz ekran görüntüleri
 
@@ -843,14 +901,12 @@ DQN aksiyon dağılımı:
 
 ## 11. Tartışma (Rapor §9.9)
 
-> **Ana bulgu (dürüst tez, V11 adil-karşılaştırma):** RL (en iyi TD3 Sharpe 2.151 / SAC 2.141,
-> seed=42), iyi-kurulmuş risk-bazlı optimize edicilerle (InverseVol 2.162, RiskParity 2.135)
-> risk-ayarlıda **başa baş**; naif 1/N eşit-ağırlığı (EW Sharpe 2.090) ve risksiz faiz
-> hurdle'ı (CashRiskFree NAV 2.506) geçer. MinVariance (Sharpe 2.317) hâlâ önde ama makas
-> kapandı. Mutlak NAV'da RL hafif geride (SAC 5.595 vs BuyHold 5.751). DQN patolojik
-> kararsız (çoklu-seed CV ~%45; per-seed NAV 1.37–3.65). V11 adil-karşılaştırma
-> düzeltmeleri RL'i güçlendirdi: önceki asimetrik ceza (RL maliyet öder/baseline ödemez,
-> RL nakiti %0) kaldırıldı. (§8.1, §8.5, §8.9 sayısal dayanak.)
+> **Ana bulgu (dürüst tez, v12 re-baseline; seed=42; §8.3 sayısal dayanak):**
+> TD3 (Sharpe 2.203 / NAV 2.728) ve SAC (Sharpe 2.174 / NAV 2.729) EqualWeight
+> (Sharpe 2.185 / NAV 2.830) ile risk-ayarlıda başa baş; MeanVar en yüksek NAV (2.929).
+> **DQN bu konfigürasyonda NAV≈0.01, Sharpe≈−6.59 (pratik iflas); bu v12 modelinin
+> DQN sonucudur, gizlenmez.** Eski V11 sayıları (SAC 5.595 vs BuyHold 5.751 vb.)
+> v12 re-baseline ile geçersizdir. V11 metodoloji düzeltmeleri (§8.9) korunmaktadır.
 
 - **İlk state tasarımı neden yetersizdi?** 5 teknik öznitelik tek-ölçekli sinyal veriyordu;
   çoklu-ölçek trend/volatilite ve ileri-görü (forecast) olmadan ajan rejim ayrımı yapamıyordu.
@@ -862,17 +918,16 @@ DQN aksiyon dağılımı:
 - **Ajan hangi davranışı öğrendi?** Düşük-turnover, düşüş-bilinçli tahsis; volatil dönemde
   nakit/ters-volatilite ağırlıklı, sakin dönemde momentum ağırlıklı davranış.
 - **Ajan nerede başarısız kaldı?** Somut bulgular (`results/metrics.csv`, §8.1):
-  - **DQN patolojik kararsız:** Tek-seed Sharpe 0.484, FinalNAV 1.348 (kârlı ama zayıf); çoklu-seed
-    CV ~%45 (Sharpe 0.903 ± 0.408, per-seed NAV 1.37/2.47/3.65/1.58/1.96) — tek bir seed sonucu
-    güvenilmez (§8.5). Ayrık şablon tasarımı bu ortamda yüksek varyans üretiyor.
-  - **Mutlak NAV'da RL hafif geride:** BuyHold 5.751, EqualWeight 5.636 — en iyi RL ajanı SAC 5.595.
-    Fark kapandı ama kapanmadı (~%0.7 NAV fark SAC-EW; ~%2.8 fark SAC-BuyHold). Adil V11
-    koşullarında fark V10-öncesine göre önemli ölçüde daraldı.
-  - **Risk-ayarlıda klasik optimize edicilerle başa baş veya hafif geride:** MinVariance (Sharpe 2.317)
-    hâlâ önde; InverseVol (2.162) ve TD3 (2.151) / SAC (2.141) pratik olarak aynı seviyede.
-    RiskParity (2.135) ile TD3/SAC başa baş. EW (2.090) RL tarafından geçildi. Bu sonuç DeMiguel
-    et al. (2009) ile kısmen tutarlıdır; ancak V11 adil koşullarında RL ile iyi-kurulmuş risk
-    optimize edicileri arasındaki makas belirgin biçimde kapandı.
+  - **DQN v12'de pratik iflas:** NAV≈0.01, Sharpe≈−6.59 — bu v12 modelinin DQN sonucudur,
+    gizlenmez. V11 çoklu-seed (CV ~%45, Sharpe 0.903±0.408) DQN'in yapısal kararsızlığını
+    gösteriyordu; v12'de bu kararsızlık daha da belirgin biçimde tezahür etti. Ayrık şablon
+    tasarımı bu ortamda yüksek varyans ve kırılganlık üretmektedir.
+  - **Sürekli ajanlar (SAC/TD3) EqualWeight ile başa baş:** v12 kanonik'te TD3 Sharpe 2.203,
+    SAC Sharpe 2.174, EqualWeight 2.185 — pratik fark yok. NAV'da EqualWeight (2.830) ve
+    BuyHold (2.807) sürekli ajanların hafif önünde. MeanVar en yüksek NAV (2.929).
+  - **Risk-ayarlıda sonuç:** EqualWeight (2.185) TD3/SAC (2.203/2.174) ile başa baş. Golden'dan
+    çıkan RiskParity/InverseVol/MinVariance ile karşılaştırma v12'de mevcut değildir. Bu sonuç
+    DeMiguel et al. (2009) ile tutarlıdır: naif 1/N çeşitlendirmeyi ham Sharpe'ta yenmek zordur.
   - Ani rejim kırılmalarında tepki gecikmeli; PPO forecast özelliğinden faydalanamadı (on-policy
     + dağılım kayması).
 - **Ezberi nasıl önledik (hocanın şartı)?** Hoca finansal projede gürültüyü açıkça şart koştu:

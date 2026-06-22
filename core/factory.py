@@ -115,6 +115,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
               force_price_noise: bool = False,
               cash_daily_rate: float | None = None,
               episode_clean: bool = False,
+              episode_data_fn=None,
               rebalance_freq: int | None = None,
               gamma: float | None = None,
               mom_window: int | None = None,
@@ -150,6 +151,7 @@ def build_env(algo: str, prices: pd.DataFrame, feats: dict, *,
         price_noise_std=(EnvConfig.price_noise_std if price_noise_std is None else float(price_noise_std)),
         force_price_noise=bool(force_price_noise),   # gurultu-artirimli coklu-episode (eval'de gurultu); default kapali
         episode_clean=bool(episode_clean),   # OPT-IN: UI training True (1. iter orijinal); CLI/golden False
+        episode_data_fn=episode_data_fn,     # OPT-IN: per-episode veri swap (anti-ezber); None -> CLI/golden BIT-AYNI
         rebalance_freq=rebalance_freq,        # OPT-IN: None -> preset (CLI/golden); UI override eder
         gamma=gamma, mom_window=mom_window, minvol_window=minvol_window,  # v12: acik override (None->preset)
         step_days=step_days,

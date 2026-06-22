@@ -220,7 +220,8 @@ def _load_data():
 def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_steps: int,
               cash_daily_rate: float | None = None, *,
               force_noise: bool = False, noise_eval: float = 0.0,
-              seed_override: int | None = None):
+              seed_override: int | None = None,
+              episode_data_fn=None):
     """UI ortam kurulumu — session_state'i okuyup core.factory.build_env'e delege eder (P3).
 
     N12: cash_daily_rate None verilirse session_state.cash_daily_rate okunur;
@@ -271,6 +272,7 @@ def _make_env(is_train: bool, algo: str, step_days: int, adaptive: bool, max_ste
         price_noise_std=(float(noise_eval) if force_noise else noise_std),  # UI σ (train) / noise-episode (eval)
         force_price_noise=bool(force_noise),       # gurultu-artirimli coklu-episode: eval'de gurultu ac
         episode_clean=ep_clean,                    # 1. iterasyon orijinal (anti-ezber)
+        episode_data_fn=episode_data_fn,           # OPT-IN: per-episode veri swap (anti-ezber); None -> degismez
         macro=macro, regime=regime,                # v6: makro rejim blogu + ham regime
         cash_daily_rate=cash_daily_rate,           # N12: UI nakit faiz oranı
         rebalance_freq=1, step_days=int(step_days),
@@ -426,7 +428,54 @@ def train_generator(algo: str, step_days: int, adaptive: bool, hp: dict,
     """
     _algo_defaults = {"DQN": 252, "PPO": 10_000, "SAC": 1200, "TD3": 1200}
     max_steps = max(1, len(st.session_state.px_tr))
-    env = _make_env(True, algo, step_days, adaptive, max_steps=max_steps)
+
+    # OPT-IN: per-episode noise'lu veri seti (anti-ezber). Toggle aciksa her episode
+    # train verisinin UNIFORM-noise'lu yeni bir versiyonunu gorur (episode 0 = orijinal).
+    # KAPALI veya veri yuklenmemisse: episode_data_fn=None -> mevcut davranis korunur (golden BIT-AYNI).
+    _edf = None
+    if st.session_state.get("train_noisy_episodes", True) and st.session_state.get("data_loaded"):
+        from core.factory import select_features as _select_features
+        from utils.features import add_features as _add_features
+
+        _px_tr_orig = st.session_state.px_tr            # orijinal train fiyat DataFrame
+        _scaler = st.session_state.scaler               # train-only fit edilmis scaler
+        _feats_tr_orig = st.session_state.feats_tr      # zaten transform edilmis feats dict
+        _nstd = float(st.session_state.get("price_noise_std", 0.01))
+
+        # feat_names: select_features sonrasi env'in kullandigi sira (algo'ya gore forecast filtreli)
+        _feat_names = list(_select_features(_feats_tr_orig, algo).keys())
+
+        # Episode 0 icin orijinal feat_tensor — env ctor'un kullandigi ile BIT-AYNI
+        _orig_feat_tensor = np.stack(
+            [_feats_tr_orig[k].values.astype(np.float32) for k in _feat_names], axis=-1
+        )
+        _orig_prices = _px_tr_orig.values.astype(np.float32)
+
+        def _edf(ep_idx: int):
+            """Her episode icin (prices_array, feat_tensor_array) dondurur.
+            ep_idx == 0 -> orijinal (BIT-AYNI); ep_idx >= 1 -> noise'lu yeni veri seti."""
+            if ep_idx == 0 or _nstd == 0.0:
+                return (_orig_prices, _orig_feat_tensor)
+            # Noise'lu fiyat serisi uret (UNIFORM; core.episodes.make_noisy_prices)
+            _noisy_px = make_noisy_prices(_px_tr_orig, _nstd, seed=SEED + ep_idx)
+            # Teknik feature'lari noisy fiyat uzerinden yeniden hesapla; egitim scaler'i uygula
+            _raw_noisy = _add_features(_noisy_px)
+            _feats_noisy = _scaler.transform(_raw_noisy)
+            # Forecast feature (varsa) egzojen -> orijinal feats_tr'den kopyala (state_dim KORU)
+            if "forecast" in _feats_tr_orig and "forecast" not in _feats_noisy:
+                _feats_noisy["forecast"] = _feats_tr_orig["forecast"]
+            # select_features filtresi (DQN forecast'i dislar vs PPO/SAC/TD3 icin)
+            _feats_noisy_sel = _select_features(_feats_noisy, algo)
+            _ft = np.stack(
+                [_feats_noisy_sel[k].values.astype(np.float32) for k in _feat_names], axis=-1
+            )
+            return (_noisy_px.values.astype(np.float32), _ft)
+
+    # episode_data_fn aktifse train adim-noise'u KAPAT (veri zaten noise'lu; cift-noise gereksiz)
+    _noise_std_override = 0.0 if _edf is not None else None  # None -> _make_env kendi okur
+
+    env = _make_env(True, algo, step_days, adaptive, max_steps=max_steps,
+                    episode_data_fn=_edf)
     if resume_agent is not None:
         agent = resume_agent
     else:

@@ -479,6 +479,18 @@ def _render_episode_browser(key, algo, initial_capital):
         return
     st.markdown("---")
     st.markdown("### 🔎 Episode incele (her iterasyonun detayı)")
+    _noisy_mode = st.session_state.get("train_noisy_episodes", True)
+    if _noisy_mode:
+        st.caption(
+            "Her episode = train verisinin noise'lu YENİ versiyonu (anti-ezber modu açık). "
+            "Episode 0 = orijinal veri; Episode 1..N = farklı tohumlu UNIFORM-noise'lu veri setleri. "
+            "Adım = bir BIST seansı (karar günü)."
+        )
+    else:
+        st.caption(
+            "Anti-ezber modu kapalı — tüm episodlar aynı veri üzerinde getiri-seviyesi "
+            "adım-noise ile eğitildi. Adım = bir BIST seansı (karar günü)."
+        )
     n = len(snaps)
 
     def _label(i):

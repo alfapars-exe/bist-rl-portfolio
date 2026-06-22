@@ -92,6 +92,7 @@ class PortfolioEnv:
                  price_noise_train_only: bool = EnvConfig.price_noise_train_only,
                  force_price_noise: bool = False,
                  episode_clean: bool = False,
+                 episode_data_fn=None,
                  rebalance_freq: int | None = None,
                  gamma: float | None = None,            # v12: None -> preset (golden); override
                  mom_window: int | None = None,         # v12: None -> preset; override
@@ -229,6 +230,11 @@ class PortfolioEnv:
         # idx>=1 gurultulu. DEFAULT KAPALI -> CLI/golden V11 davranisi (her episode gurultulu)
         # BIT-AYNI; yalniz UI episode_clean=True gecer. Kapaliyken sayac kullanilmaz -> golden-no-op.
         self._episode_clean = bool(episode_clean)
+        # OPT-IN per-episode veri degisimi (anti-ezber): her reset()'te callback
+        # (ep_idx) -> (prices_array, feat_tensor_array) doner; env bu episode'un
+        # noise'lu verisini kullanir. DEFAULT None -> blok hic calisMAZ -> CLI/golden
+        # RNG/sonuc BIT-AYNI. episode_clean ile celiSmez (ikisi de opt-in, ayri mekanizma).
+        self._episode_data_fn = episode_data_fn
         self._episode_idx = -1
         # v10: nakit (risksiz) gunluk faiz. None -> config EnvConfig.cash_annual_rate'ten
         # bilesik turetilir; UI/CLI gunluk orani dogrudan gecebilir. SABIT skaler -> RNG
@@ -286,6 +292,16 @@ class PortfolioEnv:
         if seed is not None:
             self.rng = np.random.default_rng(seed)   # env-yerel; global RNG'ye dokunmaz
         self._episode_idx += 1                        # 1. episode -> idx=0 (temiz); >=1 -> noise
+        # OPT-IN per-episode veri swap'i: episode_data_fn verilmisse (UI anti-ezber modu)
+        # bu episode'un (prices, feat_tensor)'unu degistir. None ise (CLI/golden) bu
+        # blok HIC calisMAZ -> reset() RNG/sonucu BIT-AYNI. Shape eslesmezse sessizce atla.
+        if self._episode_data_fn is not None:
+            _p, _ft = self._episode_data_fn(self._episode_idx)
+            _p = np.asarray(_p, dtype=np.float32)
+            _ft = np.asarray(_ft, dtype=np.float32)
+            if _p.shape == self.prices.shape and _ft.shape == self.feat_tensor.shape:
+                self.prices = _p
+                self.feat_tensor = _ft
         self._reset_state()
         return self._obs(), {}
 

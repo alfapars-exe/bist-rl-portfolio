@@ -97,6 +97,14 @@ def sidebar_controls():
              "iterasyonlar gürültülü (klasik). σ=0 ise etkisiz.",
     )
 
+    st.session_state.train_noisy_episodes = st.sidebar.checkbox(
+        "Eğitimde her episode = noise'lu veri seti (anti-ezber)",
+        value=bool(st.session_state.get("train_noisy_episodes", True)),
+        help="Açık: her episode train verisinin UNIFORM-noise'lu YENİ versiyonu "
+             "(episode 0 orijinal); ajan her episode'da FARKLI veri üzerinde eğitilir. "
+             "Kapalı: getiri-seviyesi adım-noise (eski davranış). σ slider gürültü genişliği.",
+    )
+
     st.sidebar.divider()
     _algos = ["DQN", "PPO", "SAC", "TD3"]
     _cur = st.session_state.selected_algo if st.session_state.selected_algo in _algos else "DQN"

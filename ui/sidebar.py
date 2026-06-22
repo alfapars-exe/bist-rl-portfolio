@@ -325,35 +325,20 @@ def sidebar_controls():
         )
 
     # ------------------------------------------------------------------
-    # N10: Vade gün-aralığı gösterimi + eğitim episode uzunluğu slider
+    # Episode uzunlugu VADEDEN BAGIMSIZ: her zaman secili veri tarih
+    # araliginin TAMAMI (train env = len(px_tr); eval env = tam test donemi).
+    # Vade (kisa/orta/uzun) yalniz pencere/rebalans/odul preset'ini etkiler,
+    # episode uzunlugunu DEGIL. (Eski horizon-bazli slider kaldirildi.)
     # ------------------------------------------------------------------
-    _min_d = preset["min_days"]
-    _max_d = preset["max_days"]
-    _default_steps = preset["train_max_steps"]
+    _max_d = preset["max_days"]                 # asagidaki rebalans araligi icin
+    _px_tr = st.session_state.get("px_tr")
+    _ep_txt = (f"≈{len(_px_tr)} adım (train aralığının tamamı)"
+               if _px_tr is not None else "tüm seçili tarih aralığı")
     st.sidebar.caption(
-        f"Vade gün aralığı: {_min_d}–{_max_d} gün  "
-        f"(preset eğitim uzunluğu: {_default_steps} adım)"
+        f"📏 **Episode uzunluğu: {_ep_txt}** — vade (kısa/orta/uzun) bundan BAĞIMSIZ. "
+        "1 episode = seçili veri tarih aralığının TAMAMI; eval de tam test dönemini koşar."
     )
-    # Eğitim episode uzunluğu slider: min_days–max_days; default train_max_steps.
-    # Bu değer train_generator → _make_env → env.max_steps'e bağlanır.
-    # Eval env TAM test dönemini koşmaya devam eder (max_steps=10_000).
-    _cur_steps = int(st.session_state.get("train_max_steps", _default_steps))
-    # Slider min=max olursa Streamlit hata verir; koru.
-    _slider_min = max(1, _min_d)
-    _slider_max = max(_slider_min + 1, _max_d)
-    _cur_steps = max(_slider_min, min(_slider_max, _cur_steps))
-    st.session_state.train_max_steps = st.sidebar.slider(
-        "Eğitim episode uzunluğu (adım)",
-        min_value=_slider_min,
-        max_value=_slider_max,
-        value=_cur_steps,
-        step=max(1, (_slider_max - _slider_min) // 20),
-        help=(
-            f"Her eğitim episodunun kaç adım (iş günü) süreceği. "
-            f"Seçili vade aralığı: {_min_d}–{_max_d} gün. "
-            "Eval/test ortamı bu değerden bağımsız — tam test dönemini koşar."
-        ),
-    )
+    st.session_state.train_max_steps = 10_000   # geriye-uyum (kullanilmiyor; egitim len(px_tr) kullanir)
 
     # Parametrik rebalans frekansı — vade preset'ini override eder (default = preset).
     # _make_env → build_env → env.rebalance_freq'e bağlanır; CLI/golden preset kullanır (golden-güvenli).
